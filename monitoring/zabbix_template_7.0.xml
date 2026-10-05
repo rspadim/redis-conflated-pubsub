@@ -1,0 +1,158 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<zabbix_export>
+    <version>7.0</version>
+    <template_groups>
+        <template_group>
+            <uuid>10000000000040008000000000000001</uuid>
+            <name>Templates/Applications</name>
+        </template_group>
+    </template_groups>
+    <templates>
+        <template>
+            <uuid>10000000000040008000000000000002</uuid>
+            <template>Template Redis Conflated Pub/Sub</template>
+            <name>Template Redis Conflated Pub/Sub</name>
+            <description>Monitoring items populated by the Redis Conflated Pub/Sub status collector and zabbix_sender.</description>
+            <groups>
+                <group>
+                    <name>Templates/Applications</name>
+                </group>
+            </groups>
+            <items>
+                <item>
+                    <uuid>10000000000040008000000000000003</uuid>
+                    <name>Service health</name><type>TRAP</type><key>redis_conflated_pubsub.health</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><value_type>UNSIGNED</value_type>
+                    <description>Health derived from the status state; running means healthy. A failed or invalid root status response sends zero.</description>
+                    <tags><tag><tag>component</tag><value>application</value></tag></tags>
+                </item>
+                <item>
+                    <uuid>10000000000040008000000000000004</uuid>
+                    <name>Status schema version</name><type>TRAP</type><key>redis_conflated_pubsub.schema_version</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><value_type>UNSIGNED</value_type>
+                    <description>Status JSON schema version.</description>
+                    <tags><tag><tag>component</tag><value>application</value></tag></tags>
+                </item>
+                <item>
+                    <uuid>10000000000040008000000000000005</uuid>
+                    <name>Service state</name><type>TRAP</type><key>redis_conflated_pubsub.state</key>
+                    <delay>0</delay><history>7d</history><trends>0</trends><value_type>CHAR</value_type>
+                    <description>Current service state, for example running or stopped.</description>
+                    <tags><tag><tag>component</tag><value>application</value></tag></tags>
+                </item>
+                <item>
+                    <uuid>10000000000040008000000000000006</uuid>
+                    <name>Status updated at</name><type>TRAP</type><key>redis_conflated_pubsub.updated_at</key>
+                    <delay>0</delay><history>7d</history><trends>0</trends><value_type>TEXT</value_type>
+                    <description>UTC timestamp when the status snapshot was created.</description>
+                    <tags><tag><tag>component</tag><value>application</value></tag></tags>
+                </item>
+                <item>
+                    <uuid>10000000000040008000000000000007</uuid>
+                    <name>Service started at</name><type>TRAP</type><key>redis_conflated_pubsub.started_at</key>
+                    <delay>0</delay><history>7d</history><trends>0</trends><value_type>TEXT</value_type>
+                    <description>UTC timestamp when the service process started.</description>
+                    <tags><tag><tag>component</tag><value>application</value></tag></tags>
+                </item>
+                <item>
+                    <uuid>10000000000040008000000000000008</uuid>
+                    <name>Service uptime</name><type>TRAP</type><key>redis_conflated_pubsub.uptime_seconds</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><value_type>UNSIGNED</value_type><units>s</units>
+                    <description>Service uptime in seconds.</description>
+                    <tags><tag><tag>component</tag><value>application</value></tag></tags>
+                </item>
+                <item>
+                    <uuid>10000000000040008000000000000009</uuid>
+                    <name>Input messages total</name><type>TRAP</type><key>redis_conflated_pubsub.input_messages_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><value_type>UNSIGNED</value_type>
+                    <description>Total messages received from input Redis Pub/Sub.</description>
+                    <tags><tag><tag>component</tag><value>application</value></tag></tags>
+                </item>
+                <item>
+                    <uuid>1000000000004000800000000000000a</uuid>
+                    <name>Output batches total</name><type>TRAP</type><key>redis_conflated_pubsub.output_batches_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><value_type>UNSIGNED</value_type>
+                    <description>Total batches successfully published to output Redis Pub/Sub.</description>
+                    <tags><tag><tag>component</tag><value>application</value></tag></tags>
+                </item>
+                <item>
+                    <uuid>1000000000004000800000000000000b</uuid>
+                    <name>Output messages total</name><type>TRAP</type><key>redis_conflated_pubsub.output_messages_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><value_type>UNSIGNED</value_type>
+                    <description>Total messages included in successfully published output batches.</description>
+                    <tags><tag><tag>component</tag><value>application</value></tag></tags>
+                </item>
+                <item>
+                    <uuid>1000000000004000800000000000000c</uuid>
+                    <name>Conflated messages total</name><type>TRAP</type><key>redis_conflated_pubsub.conflated_messages_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><value_type>UNSIGNED</value_type>
+                    <description>Total older messages replaced by newer messages for the same channel.</description>
+                    <tags><tag><tag>component</tag><value>application</value></tag></tags>
+                </item>
+                <item>
+                    <uuid>1000000000004000800000000000000d</uuid>
+                    <name>Excluded messages total</name><type>TRAP</type><key>redis_conflated_pubsub.excluded_messages_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><value_type>UNSIGNED</value_type>
+                    <description>Total input messages ignored by the configured channel exclusions.</description>
+                    <tags><tag><tag>component</tag><value>application</value></tag></tags>
+                </item>
+                <item>
+                    <uuid>1000000000004000800000000000000e</uuid>
+                    <name>Dropped messages total</name><type>TRAP</type><key>redis_conflated_pubsub.dropped_messages_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><value_type>UNSIGNED</value_type>
+                    <description>Total messages dropped because of configured size or capacity limits.</description>
+                    <tags><tag><tag>component</tag><value>application</value></tag></tags>
+                </item>
+                <item>
+                    <uuid>1000000000004000800000000000000f</uuid>
+                    <name>Publish errors total</name><type>TRAP</type><key>redis_conflated_pubsub.publish_errors_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><value_type>UNSIGNED</value_type>
+                    <description>Total failed output publish attempts.</description>
+                    <tags><tag><tag>component</tag><value>application</value></tag></tags>
+                </item>
+                <item>
+                    <uuid>10000000000040008000000000000010</uuid>
+                    <name>Input reconnects total</name><type>TRAP</type><key>redis_conflated_pubsub.input_reconnects_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><value_type>UNSIGNED</value_type>
+                    <description>Total input Redis Pub/Sub reconnect attempts.</description>
+                    <tags><tag><tag>component</tag><value>application</value></tag></tags>
+                </item>
+                <item>
+                    <uuid>10000000000040008000000000000011</uuid>
+                    <name>Output reconnects total</name><type>TRAP</type><key>redis_conflated_pubsub.output_reconnects_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><value_type>UNSIGNED</value_type>
+                    <description>Total output Redis reconnect attempts.</description>
+                    <tags><tag><tag>component</tag><value>application</value></tag></tags>
+                </item>
+                <item>
+                    <uuid>10000000000040008000000000000012</uuid>
+                    <name>Pending keys</name><type>TRAP</type><key>redis_conflated_pubsub.pending_keys</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><value_type>UNSIGNED</value_type>
+                    <description>Number of channel keys currently waiting to be published.</description>
+                    <tags><tag><tag>component</tag><value>application</value></tag></tags>
+                </item>
+                <item>
+                    <uuid>10000000000040008000000000000013</uuid>
+                    <name>Last input timestamp</name><type>TRAP</type><key>redis_conflated_pubsub.last_input_at</key>
+                    <delay>0</delay><history>7d</history><trends>0</trends><value_type>TEXT</value_type>
+                    <description>UTC timestamp of the most recently received input message, or never.</description>
+                    <tags><tag><tag>component</tag><value>application</value></tag></tags>
+                </item>
+                <item>
+                    <uuid>10000000000040008000000000000014</uuid>
+                    <name>Last flush timestamp</name><type>TRAP</type><key>redis_conflated_pubsub.last_flush_at</key>
+                    <delay>0</delay><history>7d</history><trends>0</trends><value_type>TEXT</value_type>
+                    <description>UTC timestamp of the most recently successful output flush, or never.</description>
+                    <tags><tag><tag>component</tag><value>application</value></tag></tags>
+                </item>
+                <item>
+                    <uuid>10000000000040008000000000000015</uuid>
+                    <name>Last error</name><type>TRAP</type><key>redis_conflated_pubsub.last_error</key>
+                    <delay>0</delay><history>7d</history><trends>0</trends><value_type>TEXT</value_type>
+                    <description>Most recently recorded service error, or none. Newlines are normalized for sender transport.</description>
+                    <tags><tag><tag>component</tag><value>application</value></tag></tags>
+                </item>
+            </items>
+        </template>
+    </templates>
+</zabbix_export>

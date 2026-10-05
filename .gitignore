@@ -1,0 +1,9 @@
+/target/
+/logs/
+/config.json
+/status.json
+/state/
+__pycache__/
+*.py[cod]
+*.tmp
+redis-conflated-pubsub.lock

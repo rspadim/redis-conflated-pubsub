@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-22.04
+          - ubuntu-24.04
+          - ubuntu-26.04
+          - windows-latest
+          - macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          components: clippy, rustfmt
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+
+  linux-static:
+    name: Build static Linux binary
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build static Linux image
+        run: docker build --pull --platform linux/amd64 --tag redis-conflated-pubsub:ci .
+      - name: Smoke-test the static Linux image
+        run: docker run --rm --platform linux/amd64 redis-conflated-pubsub:ci --version
+      - name: Extract the static binary
+        run: |
+          container_id=$(docker create --platform linux/amd64 redis-conflated-pubsub:ci)
+          mkdir -p dist
+          docker cp "$container_id:/usr/local/bin/redis-conflated-pubsub" dist/
+          docker rm "$container_id"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: redis-conflated-pubsub-linux-x86_64-musl
+          path: dist/redis-conflated-pubsub
+          if-no-files-found: error
+
+  redis-integration:
+    name: Redis Pub/Sub integration
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test DB 0/DB 2 input, DB 1 output, prefix filtering, and MULTI/EXEC forwarding
+        run: docker compose -f compose.test.yml up --build --abort-on-container-exit --exit-code-from integration-test
+
+  monitoring-validation:
+    name: Validate Zabbix monitoring files
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m unittest discover -s monitoring -p 'test_*.py'
+      - run: python -m json.tool monitoring/config.example.json > /dev/null
+      - name: Validate Zabbix XML templates
+        run: python -c "import xml.etree.ElementTree as ET; ET.parse('monitoring/zabbix_template_5.0.xml'); ET.parse('monitoring/zabbix_template_7.0.xml')"
+
+  linux-compatibility:
+    name: Linux compatibility (Ubuntu ${{ matrix.ubuntu }})
+    needs: linux-static
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        ubuntu: ["20.04", "22.04", "24.04", "26.04"]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: redis-conflated-pubsub-linux-x86_64-musl
+          path: dist
+      - run: chmod +x dist/redis-conflated-pubsub
+      - name: Run static binary in Ubuntu container
+        run: docker run --rm --platform linux/amd64 -v "$PWD/dist:/dist:ro" ubuntu:${{ matrix.ubuntu }} /dist/redis-conflated-pubsub --version

@@ -1,0 +1,44 @@
+services:
+  redis:
+    image: redis:7.4-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+
+  service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["--config", "/config/docker-config.json"]
+    working_dir: /state
+    volumes:
+      - ./tests/docker-config.json:/config/docker-config.json:ro
+      - integration-state:/state
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  random-publisher:
+    image: python:3.13-alpine
+    command: ["python", "/tests/random_publisher.py"]
+    volumes:
+      - ./tests:/tests:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  integration-test:
+    image: python:3.13-alpine
+    command: ["python", "/tests/docker_integration.py"]
+    volumes:
+      - ./tests:/tests:ro
+    depends_on:
+      service:
+        condition: service_started
+      random-publisher:
+        condition: service_started
+
+volumes:
+  integration-state:

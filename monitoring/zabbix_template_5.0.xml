@@ -1,0 +1,186 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<zabbix_export>
+    <version>5.0</version>
+    <date>2026-10-05T00:00:00Z</date>
+    <groups>
+        <group>
+            <name>Templates/Applications</name>
+        </group>
+    </groups>
+    <templates>
+        <template>
+            <template>Template Redis Conflated Pub/Sub</template>
+            <name>Template Redis Conflated Pub/Sub</name>
+            <description>Monitoring items populated by the Redis Conflated Pub/Sub status collector and zabbix_sender.</description>
+            <groups>
+                <group>
+                    <name>Templates/Applications</name>
+                </group>
+            </groups>
+            <applications>
+                <application>
+                    <name>Redis Conflated Pub/Sub</name>
+                </application>
+            </applications>
+            <items>
+                <item>
+                    <name>Service health</name>
+                    <type>2</type>
+                    <key>redis_conflated_pubsub.health</key>
+                    <delay>0</delay>
+                    <history>7d</history>
+                    <trends>365d</trends>
+                    <status>0</status>
+                    <value_type>3</value_type>
+                    <description>Health derived from the status state; running means healthy. A failed or invalid root status response sends zero.</description>
+                    <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
+                </item>
+                <item>
+                    <name>Status schema version</name>
+                    <type>2</type>
+                    <key>redis_conflated_pubsub.schema_version</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><status>0</status><value_type>3</value_type>
+                    <description>Status JSON schema version.</description>
+                    <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
+                </item>
+                <item>
+                    <name>Service state</name>
+                    <type>2</type>
+                    <key>redis_conflated_pubsub.state</key>
+                    <delay>0</delay><history>7d</history><trends>0</trends><status>0</status><value_type>1</value_type>
+                    <description>Current service state, for example running or stopped.</description>
+                    <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
+                </item>
+                <item>
+                    <name>Status updated at</name>
+                    <type>2</type>
+                    <key>redis_conflated_pubsub.updated_at</key>
+                    <delay>0</delay><history>7d</history><trends>0</trends><status>0</status><value_type>4</value_type>
+                    <description>UTC timestamp when the status snapshot was created.</description>
+                    <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
+                </item>
+                <item>
+                    <name>Service started at</name>
+                    <type>2</type>
+                    <key>redis_conflated_pubsub.started_at</key>
+                    <delay>0</delay><history>7d</history><trends>0</trends><status>0</status><value_type>4</value_type>
+                    <description>UTC timestamp when the service process started.</description>
+                    <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
+                </item>
+                <item>
+                    <name>Service uptime</name>
+                    <type>2</type>
+                    <key>redis_conflated_pubsub.uptime_seconds</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><status>0</status><value_type>3</value_type>
+                    <units>s</units>
+                    <description>Service uptime in seconds.</description>
+                    <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
+                </item>
+                <item>
+                    <name>Input messages total</name>
+                    <type>2</type>
+                    <key>redis_conflated_pubsub.input_messages_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><status>0</status><value_type>3</value_type>
+                    <description>Total messages received from input Redis Pub/Sub.</description>
+                    <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
+                </item>
+                <item>
+                    <name>Output batches total</name>
+                    <type>2</type>
+                    <key>redis_conflated_pubsub.output_batches_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><status>0</status><value_type>3</value_type>
+                    <description>Total batches successfully published to output Redis Pub/Sub.</description>
+                    <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
+                </item>
+                <item>
+                    <name>Output messages total</name>
+                    <type>2</type>
+                    <key>redis_conflated_pubsub.output_messages_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><status>0</status><value_type>3</value_type>
+                    <description>Total messages included in successfully published output batches.</description>
+                    <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
+                </item>
+                <item>
+                    <name>Conflated messages total</name>
+                    <type>2</type>
+                    <key>redis_conflated_pubsub.conflated_messages_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><status>0</status><value_type>3</value_type>
+                    <description>Total older messages replaced by newer messages for the same channel.</description>
+                    <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
+                </item>
+                <item>
+                    <name>Excluded messages total</name>
+                    <type>2</type>
+                    <key>redis_conflated_pubsub.excluded_messages_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><status>0</status><value_type>3</value_type>
+                    <description>Total input messages ignored by the configured channel exclusions.</description>
+                    <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
+                </item>
+                <item>
+                    <name>Dropped messages total</name>
+                    <type>2</type>
+                    <key>redis_conflated_pubsub.dropped_messages_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><status>0</status><value_type>3</value_type>
+                    <description>Total messages dropped because of configured size or capacity limits.</description>
+                    <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
+                </item>
+                <item>
+                    <name>Publish errors total</name>
+                    <type>2</type>
+                    <key>redis_conflated_pubsub.publish_errors_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><status>0</status><value_type>3</value_type>
+                    <description>Total failed output publish attempts.</description>
+                    <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
+                </item>
+                <item>
+                    <name>Input reconnects total</name>
+                    <type>2</type>
+                    <key>redis_conflated_pubsub.input_reconnects_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><status>0</status><value_type>3</value_type>
+                    <description>Total input Redis Pub/Sub reconnect attempts.</description>
+                    <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
+                </item>
+                <item>
+                    <name>Output reconnects total</name>
+                    <type>2</type>
+                    <key>redis_conflated_pubsub.output_reconnects_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><status>0</status><value_type>3</value_type>
+                    <description>Total output Redis reconnect attempts.</description>
+                    <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
+                </item>
+                <item>
+                    <name>Pending keys</name>
+                    <type>2</type>
+                    <key>redis_conflated_pubsub.pending_keys</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><status>0</status><value_type>3</value_type>
+                    <description>Number of channel keys currently waiting to be published.</description>
+                    <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
+                </item>
+                <item>
+                    <name>Last input timestamp</name>
+                    <type>2</type>
+                    <key>redis_conflated_pubsub.last_input_at</key>
+                    <delay>0</delay><history>7d</history><trends>0</trends><status>0</status><value_type>4</value_type>
+                    <description>UTC timestamp of the most recently received input message, or never.</description>
+                    <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
+                </item>
+                <item>
+                    <name>Last flush timestamp</name>
+                    <type>2</type>
+                    <key>redis_conflated_pubsub.last_flush_at</key>
+                    <delay>0</delay><history>7d</history><trends>0</trends><status>0</status><value_type>4</value_type>
+                    <description>UTC timestamp of the most recently successful output flush, or never.</description>
+                    <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
+                </item>
+                <item>
+                    <name>Last error</name>
+                    <type>2</type>
+                    <key>redis_conflated_pubsub.last_error</key>
+                    <delay>0</delay><history>7d</history><trends>0</trends><status>0</status><value_type>4</value_type>
+                    <description>Most recently recorded service error, or none. Newlines are normalized for sender transport.</description>
+                    <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
+                </item>
+            </items>
+        </template>
+    </templates>
+</zabbix_export>

@@ -1,0 +1,53 @@
+{
+  "input": {
+    "redis": {
+      "host": "redis",
+      "port": 6379,
+      "username": null,
+      "password_env": null,
+      "tls": false,
+      "database": 0,
+      "connect_timeout_ms": 2000
+    },
+    "subscriptions": [
+      { "type": "subscribe", "channel": "test-direct:marker" },
+      { "type": "psubscribe", "pattern": "test-feed:*" },
+      { "type": "psubscribe", "pattern": "replica:*" }
+    ]
+  },
+  "output": {
+    "redis": {
+      "host": "redis",
+      "port": 6379,
+      "username": null,
+      "password_env": null,
+      "tls": false,
+      "database": 1,
+      "connect_timeout_ms": 2000
+    },
+    "channel_prefix": "replica:",
+    "channel_suffix": ""
+  },
+  "conflation": {
+    "interval_ms": 250,
+    "max_pending_keys": 100,
+    "max_pending_bytes": 1048576,
+    "max_message_bytes": 262144,
+    "max_batch_bytes": 1572864
+  },
+  "instance_lock": {
+    "path": "/state/redis-conflated-pubsub.lock"
+  },
+  "status": {
+    "http": {
+      "bind": "0.0.0.0",
+      "port": 9090
+    }
+  },
+  "logging": {
+    "directory": "/state/logs",
+    "level": "info",
+    "retention_days": 2,
+    "max_total_size_mb": 10
+  }
+}

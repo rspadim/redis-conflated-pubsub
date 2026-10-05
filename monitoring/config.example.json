@@ -1,0 +1,9 @@
+{
+  "base_url": "http://127.0.0.1:9090/",
+  "zabbix_server": "127.0.0.1",
+  "zabbix_port": 10051,
+  "host": "your-zabbix-host",
+  "key_prefix": "redis_conflated_pubsub.",
+  "sender_path": "zabbix_sender",
+  "timeout_seconds": 5
+}
