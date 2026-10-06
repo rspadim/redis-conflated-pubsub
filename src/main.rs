@@ -110,48 +110,52 @@ async fn run() -> Result<()> {
     let _logging_guard = logging::init(&config.logging)?;
     let mut shutdown_signals = service::ShutdownSignals::new()?;
     #[cfg(unix)]
-    let mut active_config = config;
-    #[cfg(not(unix))]
-    let active_config = config;
-    #[cfg(unix)]
-    let mut metrics = Arc::new(status::Metrics::new());
-    #[cfg(not(unix))]
-    let metrics = Arc::new(status::Metrics::new());
-    #[cfg(unix)]
-    let mut fallback_config = None;
+    {
+        let mut active_config = config;
+        let mut metrics = Arc::new(status::Metrics::new());
+        let mut fallback_config = None;
 
-    info!(version = env!("CARGO_PKG_VERSION"), "service_started");
-    loop {
-        let run_result = service::run(
-            active_config.clone(),
-            Arc::clone(&metrics),
-            &args.config,
-            &mut shutdown_signals,
-        )
-        .await;
-        let outcome = match run_result {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                #[cfg(unix)]
-                if let Some(previous_config) = fallback_config.take() {
-                    warn!(error = %error, "configuration_reload_start_failed; restoring previous configuration");
-                    active_config = previous_config;
-                    metrics = Arc::new(status::Metrics::new());
-                    continue;
+        info!(version = env!("CARGO_PKG_VERSION"), "service_started");
+        loop {
+            let run_result = service::run(
+                active_config.clone(),
+                Arc::clone(&metrics),
+                &args.config,
+                &mut shutdown_signals,
+            )
+            .await;
+            let outcome = match run_result {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    if let Some(previous_config) = fallback_config.take() {
+                        warn!(error = %error, "configuration_reload_start_failed; restoring previous configuration");
+                        active_config = previous_config;
+                        metrics = Arc::new(status::Metrics::new());
+                        continue;
+                    }
+                    error!(error = %error, "service_failed");
+                    return Err(error);
                 }
-                error!(error = %error, "service_failed");
-                return Err(error);
+            };
+            match outcome {
+                service::RunOutcome::Shutdown => break,
+                service::RunOutcome::Reload(next_config) => {
+                    fallback_config = Some(active_config.clone());
+                    active_config = *next_config;
+                    metrics = Arc::new(status::Metrics::new());
+                    info!("service_configuration_reloaded");
+                }
             }
-        };
-        match outcome {
-            service::RunOutcome::Shutdown => break,
-            #[cfg(unix)]
-            service::RunOutcome::Reload(next_config) => {
-                fallback_config = Some(active_config.clone());
-                active_config = *next_config;
-                metrics = Arc::new(status::Metrics::new());
-                info!("service_configuration_reloaded");
-            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let metrics = Arc::new(status::Metrics::new());
+        info!(version = env!("CARGO_PKG_VERSION"), "service_started");
+        if let Err(error) = service::run(config, metrics, &args.config, &mut shutdown_signals).await
+        {
+            error!(error = %error, "service_failed");
+            return Err(error);
         }
     }
 

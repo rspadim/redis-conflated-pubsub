@@ -827,6 +827,7 @@ pub async fn run(
     });
 
     info!(outputs = config.outputs.len(), "service_ready");
+    #[cfg(unix)]
     let run_outcome = loop {
         match shutdown_signals.recv().await? {
             ServiceSignal::Shutdown => break RunOutcome::Shutdown,
@@ -844,6 +845,10 @@ pub async fn run(
                 break RunOutcome::Reload(Box::new(next_config));
             }
         }
+    };
+    #[cfg(not(unix))]
+    let run_outcome = match shutdown_signals.recv().await? {
+        ServiceSignal::Shutdown => RunOutcome::Shutdown,
     };
 
     match &run_outcome {
