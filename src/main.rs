@@ -21,7 +21,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use anyhow::{Context, Result};
 use clap::Parser;
 use config::AppConfig;
-use tracing::{error, info, warn};
+#[cfg(unix)]
+use tracing::warn;
+use tracing::{error, info};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -107,8 +109,15 @@ async fn run() -> Result<()> {
     let _instance_lock = config.instance_lock.acquire()?;
     let _logging_guard = logging::init(&config.logging)?;
     let mut shutdown_signals = service::ShutdownSignals::new()?;
+    #[cfg(unix)]
     let mut active_config = config;
+    #[cfg(not(unix))]
+    let active_config = config;
+    #[cfg(unix)]
     let mut metrics = Arc::new(status::Metrics::new());
+    #[cfg(not(unix))]
+    let metrics = Arc::new(status::Metrics::new());
+    #[cfg(unix)]
     let mut fallback_config = None;
 
     info!(version = env!("CARGO_PKG_VERSION"), "service_started");
@@ -123,18 +132,20 @@ async fn run() -> Result<()> {
         let outcome = match run_result {
             Ok(outcome) => outcome,
             Err(error) => {
-                let Some(previous_config) = fallback_config.take() else {
-                    error!(error = %error, "service_failed");
-                    return Err(error);
-                };
-                warn!(error = %error, "configuration_reload_start_failed; restoring previous configuration");
-                active_config = previous_config;
-                metrics = Arc::new(status::Metrics::new());
-                continue;
+                #[cfg(unix)]
+                if let Some(previous_config) = fallback_config.take() {
+                    warn!(error = %error, "configuration_reload_start_failed; restoring previous configuration");
+                    active_config = previous_config;
+                    metrics = Arc::new(status::Metrics::new());
+                    continue;
+                }
+                error!(error = %error, "service_failed");
+                return Err(error);
             }
         };
         match outcome {
             service::RunOutcome::Shutdown => break,
+            #[cfg(unix)]
             service::RunOutcome::Reload(next_config) => {
                 fallback_config = Some(active_config.clone());
                 active_config = *next_config;

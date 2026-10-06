@@ -5,7 +5,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Context, Result, anyhow, bail};
+#[cfg(unix)]
+use anyhow::bail;
+use anyhow::{Context, Result, anyhow};
 use futures_util::StreamExt;
 use redis::aio::MultiplexedConnection;
 use tokio::{
@@ -28,12 +30,14 @@ const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 #[derive(Debug)]
 pub enum RunOutcome {
     Shutdown,
+    #[cfg(unix)]
     Reload(Box<AppConfig>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ServiceSignal {
     Shutdown,
+    #[cfg(unix)]
     Reload,
 }
 
@@ -700,6 +704,8 @@ pub async fn run(
     config_path: &Path,
     shutdown_signals: &mut ShutdownSignals,
 ) -> Result<RunOutcome> {
+    #[cfg(not(unix))]
+    let _ = config_path;
     let input_client = config.input.redis.client()?;
     let http_listener = bind_status_http(config.status.http.as_ref()).await?;
     let global_max_bytes_per_exec = config.max_bytes_per_exec;
@@ -824,6 +830,7 @@ pub async fn run(
     let run_outcome = loop {
         match shutdown_signals.recv().await? {
             ServiceSignal::Shutdown => break RunOutcome::Shutdown,
+            #[cfg(unix)]
             ServiceSignal::Reload => {
                 let next_config = match load_reload_config(&config, config_path) {
                     Ok(next_config) => next_config,
@@ -841,6 +848,7 @@ pub async fn run(
 
     match &run_outcome {
         RunOutcome::Shutdown => info!("shutdown_signal_received"),
+        #[cfg(unix)]
         RunOutcome::Reload(_) => info!("configuration_reload_draining_outputs"),
     }
     input_task.abort();
@@ -871,6 +879,7 @@ pub async fn run(
     Ok(run_outcome)
 }
 
+#[cfg(unix)]
 fn reload_process_settings_unchanged(current: &AppConfig, next: &AppConfig) -> bool {
     current.instance_lock.path == next.instance_lock.path
         && current.logging.directory == next.logging.directory
@@ -879,6 +888,7 @@ fn reload_process_settings_unchanged(current: &AppConfig, next: &AppConfig) -> b
         && current.logging.max_total_size_mb == next.logging.max_total_size_mb
 }
 
+#[cfg(unix)]
 fn load_reload_config(current: &AppConfig, path: &Path) -> Result<AppConfig> {
     let next = AppConfig::load(path).context("failed to load configuration after SIGHUP")?;
     next.validate()?;
@@ -2098,6 +2108,7 @@ mod tests {
         assert_eq!(waiting.await.unwrap(), ServiceSignal::Reload);
     }
 
+    #[cfg(unix)]
     #[test]
     fn reload_rejects_instance_lock_or_logging_changes() {
         let current: AppConfig = serde_json::from_str(include_str!("../config.example.json"))
@@ -2113,6 +2124,7 @@ mod tests {
         assert!(!reload_process_settings_unchanged(&current, &next));
     }
 
+    #[cfg(unix)]
     #[test]
     fn reload_config_is_parsed_and_validated_before_acceptance() {
         let current: AppConfig = serde_json::from_str(include_str!("../config.example.json"))
