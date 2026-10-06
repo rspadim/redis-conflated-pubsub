@@ -100,7 +100,7 @@
                     <uuid>1000000000004000800000000000000d</uuid>
                     <name>Excluded messages total</name><type>TRAP</type><key>redis_conflated_pubsub.excluded_messages_total</key>
                     <delay>0</delay><history>7d</history><trends>365d</trends><value_type>UNSIGNED</value_type>
-                    <description>Total input messages ignored by the configured channel exclusions.</description>
+                    <description>Total input messages excluded by echo suppression or Sentinel channel filtering.</description>
                     <tags><tag><tag>component</tag><value>application</value></tag></tags>
                 </item>
                 <item>

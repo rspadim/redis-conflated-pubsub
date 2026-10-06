@@ -54,12 +54,32 @@ jobs:
           if-no-files-found: error
 
   redis-integration:
-    name: Redis Pub/Sub integration
+    name: Redis Pub/Sub delivery and protocol limits
     runs-on: ubuntu-24.04
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-      - name: Test DB 0/DB 2 input, DB 1 output, prefix filtering, and MULTI/EXEC forwarding
-        run: docker compose -f compose.test.yml up --build --abort-on-container-exit --exit-code-from integration-test
+      - name: Run Redis Pub/Sub and protocol E2Es
+        shell: bash
+        run: |
+          set -euo pipefail
+          cleanup() {
+            docker compose -p redis-conflated-ci -f compose.test.yml --profile fault down --volumes --remove-orphans || true
+            docker compose -p redis-conflated-ci-protocol -f compose.protocol.test.yml down --volumes --remove-orphans || true
+            docker compose -p redis-conflated-ci-oversize -f compose.oversize.test.yml down --volumes --remove-orphans || true
+          }
+          trap cleanup EXIT
+
+          docker compose -p redis-conflated-ci -f compose.test.yml up --build --abort-on-container-exit --exit-code-from integration-test
+          docker compose -p redis-conflated-ci -f compose.test.yml down --volumes
+
+          docker compose -p redis-conflated-ci-protocol -f compose.protocol.test.yml up --build --abort-on-container-exit --exit-code-from protocol-integration-test
+          docker compose -p redis-conflated-ci-protocol -f compose.protocol.test.yml down --volumes
+
+          docker compose -p redis-conflated-ci-oversize -f compose.oversize.test.yml up --build --abort-on-container-exit --exit-code-from oversize-integration-test
+          docker compose -p redis-conflated-ci-oversize -f compose.oversize.test.yml down --volumes
+
+          docker compose -p redis-conflated-ci -f compose.test.yml --profile fault up --build --abort-on-container-exit --exit-code-from fault-integration fault-integration
 
   monitoring-validation:
     name: Validate Zabbix monitoring files

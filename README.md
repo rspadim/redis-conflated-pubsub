@@ -2,6 +2,8 @@
 
 A cross-platform Rust service that reads from one Redis Pub/Sub input and forwards messages to multiple independently configured Redis outputs.
 
+Current release: **v0.1.1**. See the [changelog](CHANGELOG.md) for release notes.
+
 The JSON file configures the service only. By default, message payloads remain opaque bytes and are forwarded unchanged; they are never parsed, wrapped in a JSON envelope, or re-encoded. Only an explicit `truncate` policy removes a payload suffix, while `drop` skips that output. Payloads and pending conflation queues stay in memory and are never written to disk; only status snapshots and logs are persisted, if configured.
 
 ## Features
@@ -15,6 +17,8 @@ The JSON file configures the service only. By default, message payloads remain o
 
 Each individual `input.subscriptions[]` entry can define `output_prefix` and `output_suffix`, and each `outputs.<name>` entry can define its own `channel_prefix` and `channel_suffix`. A matching subscription rule routes the message to every configured output. For each output, the final channel is composed exactly as `outputs.<name>.channel_prefix + input.subscriptions[].output_prefix + source channel + input.subscriptions[].output_suffix + outputs.<name>.channel_suffix`. All four prefix/suffix fields are optional, default to empty strings, and may be omitted at either layer. With `oversized_message_policy: "send"`, Redis receives the original payload bytes unchanged.
 
+The input configuration can explicitly control filtering. `input.exclude_output_echoes` and `input.exclude_sentinel_pubsub` both default to `true`. The first suppresses channels in the configured output namespaces when input and output use the same Redis Pub/Sub server; the second filters Sentinel's `__sentinel__:hello` and known Sentinel notification channels. Both can be disabled explicitly, increment `excluded_messages_total` when they filter a message, and run before fan-out.
+
 Each named output has its own `conflation.interval_ms` and `conflation.max_commands_per_exec`, so it independently controls its forwarding cadence and command-count transaction limit. Top-level `max_bytes_per_exec` sets the default `MULTI`/`EXEC` byte target; `outputs.<name>.conflation.max_bytes_per_exec` can override that target for one output.
 
 - When `interval_ms <= 0`, that output issues one direct `PUBLISH` for each message as it arrives; it does not use `MULTI`/`EXEC`.
@@ -27,19 +31,27 @@ Redis logical database IDs do not isolate Pub/Sub. A subscriber on a Redis serve
 
 Redis Pub/Sub does not retain messages for disconnected subscribers. Positive-interval conflation intentionally supersedes intermediate messages for a channel. Payloads and pending queues exist only in memory and are never persisted. `max_bytes_per_exec` is an application request-size target, not a Redis server limit or a cap on the complete flush; chunks continue until the flush is processed. `max_commands_per_exec` limits the number of `PUBLISH` commands per transaction, not the total number of messages in a flush. Pub/Sub is not a durable replay queue.
 
+## Observed reduction
+
+In one anonymized production snapshot of v0.1.0, a conflated output using `interval_ms: 200` and no duplicate TTL sent **48.2% fewer PUBLISH messages** and **12.0% fewer payload bytes** than it received. This is workload-specific, not a throughput guarantee. For an exact byte count, subtract that output's `output_payload_bytes_total` from `input_payload_bytes_total`; this measures payload bytes only, excluding channels and RESP framing.
+
 ## Build and run
 
-Install the Rust toolchain selected by [`rust-toolchain.toml`](rust-toolchain.toml), save the complete example below as `config.json`, then build and start the service:
+Install the Rust toolchain selected by [`rust-toolchain.toml`](rust-toolchain.toml), save the complete configuration example below as `config.json`, then build and start the service:
 
 ```sh
 cargo build --release --locked
+./target/release/redis-conflated-pubsub --help
+./target/release/redis-conflated-pubsub --config-json-schema > config.schema.json
 ./target/release/redis-conflated-pubsub --check-config --config config.json
 ./target/release/redis-conflated-pubsub --config config.json
 ```
 
+`--config-json-schema` prints the JSON Schema (draft 2020-12) generated from the configuration types and exits without loading a configuration or connecting to Redis. `--check-config` validates a selected file, including semantic checks such as same-server echo-loop prevention.
+
 On Windows, run `target\release\redis-conflated-pubsub.exe` with the same arguments.
 
-This complete English `config.json` example uses generic local Redis settings; the input feed sends `test-feed:*` channels on DB 0. The matching rule adds `sub:` before and `:source` after each source channel; output `output0` adds `db0:` and publishes immediately to DB 0, while output `output1` adds `db1:` and independently conflates for 250 ms on DB 1. For example, `test-feed:alpha` becomes `db0:sub:test-feed:alpha:source` on DB 0 and `db1:sub:test-feed:alpha:source` on DB 1. The top-level 4 MiB `max_bytes_per_exec` is the default encoded-request target and the root oversized-message policy is `send`; `output1` overrides the target to 2 MiB and allows at most two `PUBLISH` commands per transaction. An output may explicitly override the root policy with `outputs.<name>.conflation.oversized_message_policy`. A flush beyond either bound is split into transactions. Consumers can use `PSUBSCRIBE db0:*` and `PSUBSCRIBE db1:*`; after each output prefix, the remaining channel retains the source channel mapped by the input subscription rule.
+This complete configuration example uses local Redis endpoints and the `test-feed:*` input channels. Its subscription rule adds `sub:` before and `:source` after each channel; `output0` adds `db0:` and publishes immediately to DB 0, while `output1` adds `db1:` and conflates for 250 ms on DB 1. For example, `test-feed:alpha` becomes `db0:sub:test-feed:alpha:source` on DB 0 and `db1:sub:test-feed:alpha:source` on DB 1. The root 4 MiB `max_bytes_per_exec` is the default RESP request target and the default oversized-message policy is `send`; `output1` overrides the target to 2 MiB and allows at most two `PUBLISH` commands per transaction. An output may override the policy with `outputs.<name>.conflation.oversized_message_policy`. A flush beyond either bound is split into transactions. Consumers can use `PSUBSCRIBE db0:*` and `PSUBSCRIBE db1:*`.
 
 ```json
 {
@@ -55,6 +67,8 @@ This complete English `config.json` example uses generic local Redis settings; t
       "database": 0,
       "connect_timeout_ms": 5000
     },
+    "exclude_output_echoes": true,
+    "exclude_sentinel_pubsub": true,
     "subscriptions": [
       {
         "type": "psubscribe",
@@ -121,9 +135,9 @@ This complete English `config.json` example uses generic local Redis settings; t
 
 `outputs` is a JSON object keyed by arbitrary output names such as `output0` and `output1`. Each output entry independently defines its Redis connection, optional `channel_prefix`/`channel_suffix`, and nested conflation settings. Top-level `max_bytes_per_exec` is the default encoded-request target for every output transaction; a named output can override it with `outputs.<name>.conflation.max_bytes_per_exec`. `max_commands_per_exec` is configured per output and bounds the command count in each transaction. The root `oversized_message_policy` defaults to `send`; an output may override it under `conflation`. `truncate` limits only that output's payload bytes, and `drop` skips only that output's publication. In this example, `output0` inherits the 4 MiB target and has interval `0` for immediate PUBLISH on DB 0; `output1` has interval `250`, overrides the target to 2 MiB, and allows two `PUBLISH` commands per transaction. Every subscription can independently define optional `output_prefix`/`output_suffix`; these are composed with each output's own prefix/suffix, so the final channel can differ by output. Omitted prefix/suffix fields default to empty strings. Every output maintains its own conflation state, flush schedule, and transaction limit.
 
-### Optional remote-input/local-output test
+### Remote input and local output
 
-To test forwarding from a remote Redis input to a local Redis instance, use the following `input` and `outputs` sections in your ignored local `config.json`. This example listens for `test-feed:*` on input DB 0, then forwards to local Redis at `127.0.0.1:16379`, DB 1, with a 250 ms conflation interval:
+This deployment example listens for `test-feed:*` on a remote input Redis DB 0 and forwards to a local Redis instance at `127.0.0.1:16379`, DB 1, with a 250 ms conflation interval. Adapt the endpoints, credentials, channel mapping, and size limits for your environment:
 
 ```json
 {
@@ -171,7 +185,7 @@ To test forwarding from a remote Redis input to a local Redis instance, use the 
 }
 ```
 
-`redis.example.net` is a documentation placeholder. Replace it only in the ignored local `config.json` with the Redis endpoint for your test; use generic sample values in committed documentation and tests. The optional output-level `channel_prefix`/`channel_suffix` fields can be omitted or left empty. Here, a source channel such as `test-feed:alpha` is published as `local:remote:test-feed:alpha`; a local consumer can listen with `redis-cli -h 127.0.0.1 -p 16379 -n 1 PSUBSCRIBE 'local:*'`. The top-level byte target is 4 MiB by default, while this output overrides it to 1 MiB; each `MULTI`/`EXEC` also contains at most 100 `PUBLISH` commands.
+`redis.example.net` is an example hostname; replace it with the address of the input Redis server. Output-level `channel_prefix` and `channel_suffix` can be omitted or left empty. Here, `test-feed:alpha` is published as `local:remote:test-feed:alpha`; a local consumer can listen with `redis-cli -h 127.0.0.1 -p 16379 -n 1 PSUBSCRIBE 'local:*'`. The root byte target is 4 MiB; this output overrides it to 1 MiB and permits up to 100 `PUBLISH` commands per transaction.
 
 Redis credentials are optional. Set `username` as needed; `password_env` names an environment variable containing the password. Export that variable before starting the process. Set `tls` to `true` if an endpoint requires TLS. Subscriptions can use either `{ "type": "subscribe", "channel": "..." }` or `{ "type": "psubscribe", "pattern": "..." }`; either rule can also set `output_prefix` and `output_suffix`. Output-level `channel_prefix` and `channel_suffix` can be set separately on each named output.
 
@@ -238,17 +252,21 @@ docker compose -f compose.protocol.test.yml down --volumes
 
 The [`monitoring/`](monitoring/) folder contains a Python `zabbix_sender` collector, a configuration example, and importable templates for Zabbix 5.0 and Zabbix 7.0. The collector reads the optional HTTP status JSON from `GET /` and sends the collected metrics to Zabbix. See [`monitoring/README.md`](monitoring/README.md) for setup instructions.
 
+## Related project
+
+See [RedisExcel](https://github.com/rspadim/RedisExcel).
+
 ## Reliability and limits
 
 - Redis Pub/Sub does not buffer messages while this service or a subscriber is disconnected.
 - A positive conflation interval intentionally replaces intermediate messages with the latest payload for the same source channel; non-positive intervals forward messages individually.
-- Each configured output uses its own Redis endpoint/database, channel prefix/suffix, interval, and maximum `PUBLISH` commands per transaction; top-level `max_bytes_per_exec` supplies the encoded-request target unless that output overrides it. RESP request accounting is exact: `MULTI` is 15 bytes, `EXEC` is 14 bytes, and each `PUBLISH` is `4 + bulk(7) + bulk(channel_bytes) + bulk(payload_bytes)`, where `bulk(n) = n + decimal_digits(n) + 5`. The `EXEC` response is separate server-to-client traffic and is not part of the request-byte target. Matching input subscription rules provide an additional channel prefix/suffix used by all outputs. Redis databases on the same server remain part of the same Pub/Sub namespace and do not isolate Pub/Sub traffic.
+- Each configured output uses its own Redis endpoint/database, channel prefix/suffix, interval, and maximum `PUBLISH` commands per transaction; top-level `max_bytes_per_exec` supplies the encoded-request target unless that output overrides it. RESP request accounting is exact: `MULTI` is 15 bytes, `EXEC` is 14 bytes, and each `PUBLISH` is `4 + bulk(7) + bulk(channel_bytes) + bulk(payload_bytes)`, where `bulk(n) = n + decimal_digits(n) + 5`. The `EXEC` response is separate server-to-client traffic and is not part of the request-byte target. Matching input subscription rules provide an additional channel prefix/suffix used by all outputs. `input.exclude_output_echoes` controls automatic suppression of the composed output namespace; disabling it on a shared Redis server can create a Pub/Sub loop. `input.exclude_sentinel_pubsub` defaults to `true` and suppresses Sentinel hello and notification channels. Redis databases on the same server remain part of the same Pub/Sub namespace and do not isolate Pub/Sub traffic.
 - `max_bytes_per_exec` is an application sizing target, not discovery of the remote server's hard limits. Redis settings such as `client-query-buffer-limit` and `proto-max-bulk-len` can differ. With `oversized_message_policy: "send"`, a single command over the target is sent alone and Redis may accept or reject it. The opt-in `truncate` and `drop` policies apply when one encoded `PUBLISH` exceeds the configured target.
 - Output publishes are not retried after an error. A failed chunk is counted, rate-limited in logs, and processing continues with subsequent chunks; a failed immediate `PUBLISH` does not block later messages. If Redis executed `EXEC` but its reply was lost, status reports the outcome as uncertain. Not retrying avoids duplicates caused by this service but cannot guarantee delivery; error and affected-message counters are exposed in `GET /`.
 - Redis Cluster supports only logical database 0; nonzero database IDs require a non-cluster Redis server.
 
 ## CI and releases
 
-GitHub Actions runs formatting, Clippy, and tests on Ubuntu, Windows, and macOS. A static Linux `musl` binary is also smoke-tested in Ubuntu containers.
+GitHub Actions runs formatting, Clippy, unit tests, cross-platform builds, Zabbix validation, and Docker Redis integration tests. The Docker tests cover byte-sized transaction splitting, Sentinel filtering, oversized-request failure handling, ambiguous EXEC responses, and immediate PUBLISH behavior. The static Linux `musl` binary is smoke-tested in Ubuntu containers.
 
-Pushing a `v*` tag builds release binaries for Linux x86_64, Windows x86_64, and macOS Intel and Apple Silicon, then publishes archives and SHA-256 checksums as a GitHub Release.
+Pushing a `v*` tag builds release binaries for Linux x86_64 musl, Windows x86_64, and macOS Intel and Apple Silicon, then publishes archives and SHA-256 checksums as a GitHub Release. Version 0.1.1 is available from the [GitHub Releases page](https://github.com/rspadim/redis-conflated-pubsub/releases).

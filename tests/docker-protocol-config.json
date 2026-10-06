@@ -11,10 +11,20 @@
       "database": 0,
       "connect_timeout_ms": 3000
     },
+    "exclude_output_echoes": true,
+    "exclude_sentinel_pubsub": true,
     "subscriptions": [
       {
         "type": "psubscribe",
         "pattern": "oversize-feed:*"
+      },
+      {
+        "type": "psubscribe",
+        "pattern": "__sentinel__:hello"
+      },
+      {
+        "type": "psubscribe",
+        "pattern": "+switch-master"
       }
     ]
   },

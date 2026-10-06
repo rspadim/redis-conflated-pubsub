@@ -11,6 +11,8 @@
       "database": 0,
       "connect_timeout_ms": 5000
     },
+    "exclude_output_echoes": true,
+    "exclude_sentinel_pubsub": true,
     "subscriptions": [
       {
         "type": "psubscribe",

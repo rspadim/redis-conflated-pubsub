@@ -111,7 +111,11 @@ pub async fn run(config: AppConfig, metrics: Arc<Metrics>) -> Result<()> {
             ))
         })
         .collect::<Result<Vec<_>>>()?;
-    let echo_filters = output_echo_filters(&config.input, &config.outputs);
+    let echo_filters = if config.input.exclude_output_echoes {
+        output_echo_filters(&config.input, &config.outputs)
+    } else {
+        Vec::new()
+    };
     let (input_senders, mut output_tasks) = output_setups
         .into_iter()
         .map(
@@ -253,6 +257,46 @@ fn output_echo_filters(
         .collect()
 }
 
+const SENTINEL_PUBSUB_CHANNELS: &[&str] = &[
+    "__sentinel__:hello",
+    "+reset-master",
+    "+slave",
+    "+replica",
+    "+sdown",
+    "-sdown",
+    "+odown",
+    "-odown",
+    "+new-epoch",
+    "+try-failover",
+    "+vote-for-leader",
+    "+elected-leader",
+    "+failover-state-select-slave",
+    "+selected-slave",
+    "+promoted-slave",
+    "+failover-state-send-slaveof-noone",
+    "+failover-state-wait-promotion",
+    "+failover-state-reconf-slaves",
+    "+slave-reconf-sent",
+    "+slave-reconf-inprog",
+    "+slave-reconf-done",
+    "+failover-end-for-timeout",
+    "+failover-end",
+    "+switch-master",
+    "+tilt",
+    "-tilt",
+    "+sentinel",
+    "+dup-sentinel",
+    "-dup-sentinel",
+    "+monitor",
+    "+reboot",
+    "+config-update",
+    "+sentinel-address-switch",
+];
+
+fn is_sentinel_pubsub_channel(channel: &str) -> bool {
+    SENTINEL_PUBSUB_CHANNELS.contains(&channel)
+}
+
 async fn bind_status_http(
     config: Option<&HttpStatusConfig>,
 ) -> Result<Option<tokio::net::TcpListener>> {
@@ -312,9 +356,11 @@ async fn read_input(
                 let mut stream = pubsub.on_message();
                 while let Some(message) = stream.next().await {
                     let source_channel = message.get_channel_name();
-                    if echo_filters
-                        .iter()
-                        .any(|filter| filter.matches(source_channel))
+                    if (config.exclude_sentinel_pubsub
+                        && is_sentinel_pubsub_channel(source_channel))
+                        || echo_filters
+                            .iter()
+                            .any(|filter| filter.matches(source_channel))
                     {
                         metrics
                             .excluded_messages_total
@@ -494,25 +540,52 @@ fn pending_batch(
     passthrough: &VecDeque<PendingMessage>,
 ) -> Vec<PendingMessage> {
     if interval_ms > 0 {
-        let mut candidates = pending.values().cloned().collect::<Vec<_>>();
-        candidates.sort_by(|left, right| left.output_channel.cmp(&right.output_channel));
-        let mut batch = Vec::new();
-        let mut batch_bytes = 0usize;
-        for message in candidates.into_iter().take(max_commands_per_exec) {
-            let message_bytes = publish_command_frame_bytes(&message);
-            let transaction_bytes = batch_bytes
-                .saturating_add(message_bytes)
-                .saturating_add(RESP_MULTI_FRAME_BYTES + RESP_EXEC_FRAME_BYTES);
-            if !batch.is_empty() && transaction_bytes > max_bytes_per_exec {
-                break;
-            }
-            batch_bytes = batch_bytes.saturating_add(message_bytes);
-            batch.push(message);
-        }
-        batch
+        let mut candidates = pending.keys().cloned().collect::<Vec<_>>();
+        candidates.sort();
+        let batch_length = pending_batch_length(
+            max_commands_per_exec,
+            max_bytes_per_exec,
+            pending,
+            &candidates,
+        );
+        candidates
+            .iter()
+            .take(batch_length)
+            .map(|channel| {
+                pending
+                    .get(channel)
+                    .expect("pending channel snapshot must remain present")
+                    .clone()
+            })
+            .collect()
     } else {
         passthrough.front().cloned().into_iter().collect()
     }
+}
+
+fn pending_batch_length(
+    max_commands_per_exec: usize,
+    max_bytes_per_exec: usize,
+    pending: &HashMap<String, PendingMessage>,
+    candidate_channels: &[String],
+) -> usize {
+    let mut batch_length = 0usize;
+    let mut batch_bytes = 0usize;
+    for channel in candidate_channels.iter().take(max_commands_per_exec) {
+        let message = pending
+            .get(channel)
+            .expect("pending channel snapshot must remain present");
+        let message_bytes = publish_command_frame_bytes(message);
+        let transaction_bytes = batch_bytes
+            .saturating_add(message_bytes)
+            .saturating_add(RESP_MULTI_FRAME_BYTES + RESP_EXEC_FRAME_BYTES);
+        if batch_length > 0 && transaction_bytes > max_bytes_per_exec {
+            break;
+        }
+        batch_bytes = batch_bytes.saturating_add(message_bytes);
+        batch_length += 1;
+    }
+    batch_length
 }
 
 const RESP_MULTI_FRAME_BYTES: usize = 15;
@@ -890,14 +963,25 @@ async fn publish_conflated_pending<P: BatchPublisher>(
     context: &mut OutputPublishContext<'_>,
 ) {
     let mut passthrough = VecDeque::new();
-    while !pending.is_empty() {
-        let batch = pending_batch(
-            1,
+    let mut candidate_channels = pending.keys().cloned().collect::<Vec<_>>();
+    candidate_channels.sort();
+    let mut offset = 0usize;
+    while offset < candidate_channels.len() {
+        let batch_length = pending_batch_length(
             max_commands_per_exec,
             max_bytes_per_exec,
             pending,
-            &passthrough,
+            &candidate_channels[offset..],
         );
+        let batch = candidate_channels[offset..offset + batch_length]
+            .iter()
+            .map(|channel| {
+                pending
+                    .get(channel)
+                    .expect("pending channel snapshot must remain present")
+                    .clone()
+            })
+            .collect::<Vec<_>>();
         let publish_result = publish_once(
             context.name,
             publisher,
@@ -920,7 +1004,7 @@ async fn publish_conflated_pending<P: BatchPublisher>(
                     context.metrics,
                     context.output_metrics,
                 );
-                drop(batch);
+                offset += batch_length;
                 tokio::task::yield_now().await;
                 continue;
             }
@@ -945,6 +1029,7 @@ async fn publish_conflated_pending<P: BatchPublisher>(
             atomic = true,
             "output_batch_published"
         );
+        offset += batch_length;
         tokio::task::yield_now().await;
     }
 }
@@ -1942,6 +2027,24 @@ mod tests {
         assert!(filter.matches("replica:sensor:a"));
         assert!(filter.matches("sensor:a:copy"));
         assert!(!filter.matches("sensor:a"));
+    }
+
+    #[test]
+    fn sentinel_filter_matches_hello_and_known_notification_channels_only() {
+        for channel in [
+            "__sentinel__:hello",
+            "+sdown",
+            "-odown",
+            "+switch-master",
+            "+failover-state-select-slave",
+            "+sentinel-address-switch",
+        ] {
+            assert!(is_sentinel_pubsub_channel(channel), "{channel}");
+        }
+
+        for channel in ["metrics:cpu", "+custom-event", "__sentinel__:custom"] {
+            assert!(!is_sentinel_pubsub_channel(channel), "{channel}");
+        }
     }
 
     #[test]

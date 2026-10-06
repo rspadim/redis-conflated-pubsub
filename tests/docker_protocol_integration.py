@@ -35,6 +35,10 @@ PUBLICATIONS = (
     ("oversize-feed:z", make_payload("z-large", LARGE_PAYLOAD_BYTES)),
 )
 LATEST = dict(PUBLICATIONS)
+SENTINEL_PUBLICATIONS = (
+    ("__sentinel__:hello", b"master,127.0.0.1,6379,runid"),
+    ("+switch-master", b"master 127.0.0.1 6379 127.0.0.2 6380"),
+)
 
 
 def output_channel(output_name, source_channel):
@@ -79,7 +83,7 @@ def wait_for_input_subscription():
         send_command(sock, "PUBSUB", "NUMPAT")
         last_count = read_response(reader)
         close(sock, reader)
-        if last_count == 1:
+        if last_count == 3:
             return
         time.sleep(0.05)
     raise AssertionError(f"Input subscription did not become active; NUMPAT={last_count}")
@@ -171,6 +175,17 @@ def publish_feed():
         close(sock, reader)
 
 
+def publish_sentinel_messages():
+    sock, reader = connect(0)
+    try:
+        for channel, payload in SENTINEL_PUBLICATIONS:
+            send_command(sock, "PUBLISH", channel, payload)
+            subscriber_count = read_response(reader)
+            assert subscriber_count >= 1, (channel, subscriber_count)
+    finally:
+        close(sock, reader)
+
+
 def main():
     wait_for_input_subscription()
     subscribers = open_subscribers()
@@ -178,6 +193,7 @@ def main():
     # Let every positive interval reach its first tick before sending the burst.
     time.sleep(1.7)
     publish_feed()
+    publish_sentinel_messages()
 
     expected_truncate = {}
     for source, payload in LATEST.items():
@@ -199,6 +215,7 @@ def main():
     status = wait_for_status(
         lambda current: current.get("state") == "running"
         and current.get("input_messages_total") == len(PUBLICATIONS)
+        and current.get("excluded_messages_total") == len(SENTINEL_PUBLICATIONS)
         and all(
             output_metrics(current)[name].get("output_messages_total") == count
             and output_metrics(current)[name].get("pending_messages") == 0
@@ -257,6 +274,7 @@ def main():
     assert status["truncated_messages_total"] == 5, status
     assert status["truncated_payload_bytes_total"] == truncated_bytes, status
     assert status["uncertain_transactions_total"] == 0, status
+    assert status["excluded_messages_total"] == len(SENTINEL_PUBLICATIONS), status
 
     expected_target_for_output = {
         "chunked": CHUNK_TARGET,

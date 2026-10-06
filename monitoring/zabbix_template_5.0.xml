@@ -122,7 +122,7 @@
                     <type>2</type>
                     <key>redis_conflated_pubsub.excluded_messages_total</key>
                     <delay>0</delay><history>7d</history><trends>365d</trends><status>0</status><value_type>3</value_type>
-                    <description>Total input messages ignored by the configured channel exclusions.</description>
+                    <description>Total input messages excluded by echo suppression or Sentinel channel filtering.</description>
                     <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
                 </item>
                 <item>

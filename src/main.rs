@@ -15,6 +15,7 @@ mod status;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -24,26 +25,68 @@ use tracing::{error, info};
 #[derive(Debug, Parser)]
 #[command(
     version,
-    about = "Fan out Redis Pub/Sub messages to named outputs with optional conflation"
+    about = "Forward raw Redis Pub/Sub messages to independently configured outputs",
+    long_about = "Forward messages from Redis SUBSCRIBE/PSUBSCRIBE to named Redis outputs. Payloads remain raw bytes by default. Outputs can publish immediately or conflate to the latest value per mapped channel.\n\n\
+For conflated outputs, each MULTI/EXEC request is chunked by both max_commands_per_exec and the exact RESP request byte target. The byte count includes the MULTI and EXEC frames and every PUBLISH array/bulk-string frame. max_bytes_per_exec is a client-side target, not discovery of the output Redis server's own limits.\n\n\
+If one PUBLISH exceeds its output target, oversized_message_policy selects send (default, preserve the full payload), truncate (remove only a payload suffix), or drop (skip that output's copy). Failed publishes are not retried; the affected operation is counted and later messages/chunks continue.\n\n\
+When input and output use the same Redis server, exclude_output_echoes defaults to true and filters mapped output channels before fan-out. exclude_sentinel_pubsub also defaults to true and filters Sentinel hello/notification channels. Both can be changed under input in the JSON configuration. Payloads and pending queues are process-local; there is no disk spool.",
+    after_help = "Examples:\n  redis-conflated-pubsub --config config.json\n  redis-conflated-pubsub --config config.json --check-config\n  redis-conflated-pubsub --config-json-schema > config.schema.json"
 )]
 struct Args {
-    #[arg(short, long, default_value = "config.json")]
+    #[arg(
+        short,
+        long,
+        value_name = "FILE",
+        default_value = "config.json",
+        help = "Path to the JSON configuration file"
+    )]
     config: PathBuf,
 
-    #[arg(long, help = "Validate the configuration and exit")]
+    #[arg(
+        long,
+        help = "Validate the selected JSON configuration and exit without connecting to Redis"
+    )]
     check_config: bool,
+
+    #[arg(
+        long,
+        help = "Print the JSON Schema for the configuration format and exit"
+    )]
+    config_json_schema: bool,
 }
 
-#[tokio::main]
-async fn main() {
-    if let Err(error) = run().await {
-        eprintln!("error: {error:#}");
-        std::process::exit(1);
-    }
+fn main() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name_fn(runtime_worker_name)
+        .build()
+        .expect("failed to initialize Tokio runtime");
+
+    runtime.block_on(async {
+        if let Err(error) = run().await {
+            eprintln!("error: {error:#}");
+            std::process::exit(1);
+        }
+    });
+}
+
+fn runtime_worker_name() -> String {
+    static NEXT_THREAD_ID: AtomicUsize = AtomicUsize::new(0);
+    format!(
+        "conflate-{}",
+        NEXT_THREAD_ID.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 async fn run() -> Result<()> {
     let args = Args::parse();
+    if args.config_json_schema {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&AppConfig::json_schema())?
+        );
+        return Ok(());
+    }
     let config = AppConfig::load(&args.config).with_context(|| {
         format!(
             "failed to load configuration from {}",
@@ -69,4 +112,42 @@ async fn run() -> Result<()> {
 
     info!("service_stopped");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    use super::Args;
+    use crate::config::AppConfig;
+
+    #[test]
+    fn long_help_documents_configuration_and_examples() {
+        let help = Args::command().render_long_help().to_string();
+        for expected in [
+            "max_bytes_per_exec",
+            "oversized_message_policy",
+            "exclude_output_echoes",
+            "exclude_sentinel_pubsub",
+            "--config-json-schema",
+        ] {
+            assert!(help.contains(expected), "missing {expected} in help");
+        }
+    }
+
+    #[test]
+    fn generated_config_schema_is_json_and_includes_filter_options() {
+        let schema = AppConfig::json_schema();
+        let serialized = serde_json::to_string(&schema).unwrap();
+        assert!(serialized.contains("exclude_output_echoes"));
+        assert!(serialized.contains("exclude_sentinel_pubsub"));
+        assert!(serialized.contains("max_bytes_per_exec"));
+        assert!(serialized.contains("oversized_message_policy"));
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["properties"]["outputs"]["minProperties"], 1);
+        assert_eq!(
+            schema["$defs"]["InputConfig"]["properties"]["subscriptions"]["minItems"],
+            1
+        );
+    }
 }

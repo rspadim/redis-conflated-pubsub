@@ -3,19 +3,22 @@ use std::{env, fs, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use redis::Client;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use url::Url;
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AppConfig {
     /// Default encoded RESP request size target for each output EXEC.
     #[serde(default = "default_max_bytes_per_exec")]
+    #[schemars(range(min = 1))]
     pub max_bytes_per_exec: usize,
     /// Policy for single PUBLISH requests that exceed their output byte target.
     #[serde(default)]
     pub oversized_message_policy: OversizedMessagePolicy,
     pub input: InputConfig,
+    #[schemars(length(min = 1))]
     pub outputs: BTreeMap<String, OutputConfig>,
     pub instance_lock: InstanceLockConfig,
     #[serde(default)]
@@ -25,6 +28,16 @@ pub struct AppConfig {
 }
 
 impl AppConfig {
+    pub fn json_schema() -> serde_json::Value {
+        let mut schema = serde_json::to_value(schemars::schema_for!(AppConfig))
+            .expect("the AppConfig JSON Schema must serialize");
+        schema["properties"]["outputs"]["minProperties"] = serde_json::json!(1);
+        schema["properties"]["outputs"]["propertyNames"]["pattern"] = serde_json::json!("\\S");
+        schema["$defs"]["InputConfig"]["properties"]["subscriptions"]["minItems"] =
+            serde_json::json!(1);
+        schema
+    }
+
     pub fn load(path: &std::path::Path) -> Result<Self> {
         let text = fs::read_to_string(path)?;
         Ok(serde_json::from_str(&text)?)
@@ -80,6 +93,7 @@ impl AppConfig {
             let (subscription_prefix, subscription_suffix) = subscription.output_mapping();
             for (name, output) in &self.outputs {
                 if same_pubsub_server(&self.input.redis, &output.redis)
+                    && self.input.exclude_output_echoes
                     && output.channel_prefix.is_empty()
                     && subscription_prefix.is_empty()
                     && subscription_suffix.is_empty()
@@ -112,17 +126,23 @@ pub fn same_pubsub_server(left: &RedisConfig, right: &RedisConfig) -> bool {
     left.host.eq_ignore_ascii_case(&right.host) && left.port == right.port && left.tls == right.tls
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InputConfig {
     pub redis: RedisConfig,
+    #[schemars(length(min = 1))]
     pub subscriptions: Vec<Subscription>,
+    #[serde(default = "default_exclude_output_echoes")]
+    pub exclude_output_echoes: bool,
+    #[serde(default = "default_exclude_sentinel_pubsub")]
+    pub exclude_sentinel_pubsub: bool,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 pub enum Subscription {
     Subscribe {
+        #[schemars(length(min = 1))]
         channel: String,
         #[serde(default)]
         output_prefix: String,
@@ -130,6 +150,7 @@ pub enum Subscription {
         output_suffix: String,
     },
     Psubscribe {
+        #[schemars(length(min = 1))]
         pattern: String,
         #[serde(default)]
         output_prefix: String,
@@ -155,7 +176,7 @@ impl Subscription {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OutputConfig {
     pub redis: RedisConfig,
@@ -166,19 +187,23 @@ pub struct OutputConfig {
     pub conflation: ConflationConfig,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RedisConfig {
+    #[schemars(length(min = 1))]
     pub host: String,
     #[serde(default = "default_port")]
+    #[schemars(range(min = 1))]
     pub port: u16,
     pub username: Option<String>,
     pub password_env: Option<String>,
     #[serde(default)]
     pub tls: bool,
     #[serde(default)]
+    #[schemars(range(min = 0))]
     pub database: i64,
     #[serde(default = "default_connect_timeout_ms")]
+    #[schemars(range(min = 1))]
     pub connect_timeout_ms: u64,
 }
 
@@ -213,20 +238,22 @@ impl RedisConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ConflationConfig {
     pub interval_ms: i64,
     #[serde(default = "default_max_commands_per_exec")]
+    #[schemars(range(min = 1))]
     pub max_commands_per_exec: usize,
     /// Optional override for the global encoded RESP request size target.
     #[serde(default)]
+    #[schemars(range(min = 1))]
     pub max_bytes_per_exec: Option<usize>,
     #[serde(default)]
     pub oversized_message_policy: Option<OversizedMessagePolicy>,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum OversizedMessagePolicy {
     /// Send the original PUBLISH as a singleton even if it exceeds the byte target.
@@ -238,7 +265,7 @@ pub enum OversizedMessagePolicy {
     Drop,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InstanceLockConfig {
     pub path: PathBuf,
@@ -274,7 +301,7 @@ impl InstanceLockConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct StatusConfig {
     pub path: Option<PathBuf>,
@@ -294,21 +321,25 @@ impl Default for StatusConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HttpStatusConfig {
     #[serde(default = "default_http_bind")]
+    #[schemars(length(min = 1))]
     pub bind: String,
     #[serde(default = "default_http_port")]
+    #[schemars(range(min = 1))]
     pub port: u16,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct LoggingConfig {
     pub directory: PathBuf,
     pub level: String,
+    #[schemars(range(min = 1))]
     pub retention_days: u64,
+    #[schemars(range(min = 1))]
     pub max_total_size_mb: u64,
 }
 
@@ -343,6 +374,14 @@ fn default_max_bytes_per_exec() -> usize {
     4 * 1024 * 1024
 }
 
+fn default_exclude_output_echoes() -> bool {
+    true
+}
+
+fn default_exclude_sentinel_pubsub() -> bool {
+    true
+}
+
 fn default_http_bind() -> String {
     "127.0.0.1".to_owned()
 }
@@ -363,6 +402,8 @@ mod tests {
 
         assert_eq!(config.input.redis.host, "localhost");
         assert_eq!(config.input.redis.database, 0);
+        assert!(config.input.exclude_output_echoes);
+        assert!(config.input.exclude_sentinel_pubsub);
         assert!(matches!(
             config.input.subscriptions.as_slice(),
             [Subscription::Psubscribe { pattern, output_prefix, output_suffix }]
@@ -406,6 +447,40 @@ mod tests {
         assert_eq!(config.outputs["output1"].channel_prefix, "db1:");
         assert!(config.status.path.is_none());
         assert!(config.status.http.is_some());
+    }
+
+    #[test]
+    fn input_exclusion_options_default_safely_and_can_be_configured() {
+        let mut config: AppConfig = serde_json::from_str(
+            r#"{
+                "input":{"redis":{"host":"input.example.net"},"subscriptions":[{"type":"psubscribe","pattern":"*"}]},
+                "outputs":{"output1":{"redis":{"host":"output.example.net"},"conflation":{"interval_ms":10}}},
+                "instance_lock":{"path":"lock"}
+            }"#,
+        )
+        .unwrap();
+
+        assert!(config.input.exclude_output_echoes);
+        assert!(config.input.exclude_sentinel_pubsub);
+        config.input.exclude_output_echoes = false;
+        config.input.exclude_sentinel_pubsub = false;
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn disabling_output_echo_exclusion_allows_unmapped_same_server_output() {
+        let mut config: AppConfig = serde_json::from_str(
+            r#"{
+                "input":{"redis":{"host":"localhost"},"subscriptions":[{"type":"psubscribe","pattern":"*"}]},
+                "outputs":{"output1":{"redis":{"host":"localhost"},"conflation":{"interval_ms":0}}},
+                "instance_lock":{"path":"lock"}
+            }"#,
+        )
+        .unwrap();
+
+        assert!(config.validate().is_err());
+        config.input.exclude_output_echoes = false;
+        config.validate().unwrap();
     }
 
     #[test]
