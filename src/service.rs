@@ -1,7 +1,7 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     sync::{Arc, atomic::Ordering},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -15,8 +15,8 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     config::{
-        AppConfig, HttpStatusConfig, InputConfig, OutputConfig, OversizedMessagePolicy,
-        RedisConfig, Subscription, same_pubsub_server,
+        AppConfig, ChannelPolicy, DeduplicationGroup, HttpStatusConfig, InputConfig, OutputConfig,
+        OversizedMessagePolicy, RedisConfig, Subscription, same_pubsub_server,
     },
     http_status, logging,
     status::{self, Metrics, OutputMetrics},
@@ -33,7 +33,19 @@ struct InboundMessage {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PendingMessage {
     output_channel: String,
+    conflation_interval_ms: i64,
+    deduplication_ttl_ms: Option<i64>,
+    deduplication_group: Option<String>,
+    /// Payload sent to Redis after applying the oversized-message policy.
     payload: Vec<u8>,
+    /// Retained only when truncate changes `payload`.
+    raw_payload: Option<Vec<u8>>,
+}
+
+impl PendingMessage {
+    fn raw_payload(&self) -> &[u8] {
+        self.raw_payload.as_deref().unwrap_or(&self.payload)
+    }
 }
 
 struct OutputSender {
@@ -51,11 +63,26 @@ struct OutputRuntimeSetup {
     oversized_policy: OversizedMessagePolicy,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct OutputMessagePolicy {
     interval_ms: i64,
+    deduplication_ttl_ms: Option<i64>,
+    deduplication_group: Option<String>,
     max_bytes_per_exec: usize,
     oversized_policy: OversizedMessagePolicy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ResolvedChannelPolicy {
+    interval_ms: i64,
+    deduplication_ttl_ms: i64,
+    deduplication_group: Option<String>,
+}
+
+struct FlushSchedule {
+    interval_ms: i64,
+    interval: Duration,
+    next_tick: time::Instant,
 }
 
 struct OutputMessageContext<'a> {
@@ -69,8 +96,528 @@ struct OutputMessageContext<'a> {
 struct OutputPublishContext<'a> {
     name: &'a str,
     failure_log: &'a mut OutputFailureLog,
+    deduplication_cache: &'a mut DeduplicationCache,
     metrics: &'a Metrics,
     output_metrics: &'a OutputMetrics,
+}
+
+struct CachedPublishedValue {
+    raw_payload: Vec<u8>,
+    published_at: time::Instant,
+    ttl: Duration,
+}
+
+#[derive(Clone, Copy)]
+struct DeduplicationGroupSettings {
+    ttl: Option<Duration>,
+    round_ms: u64,
+    restart_on_change: bool,
+    max_members: usize,
+    max_cache_bytes: usize,
+}
+
+struct CachedGroupEntry {
+    raw_payload: Vec<u8>,
+    last_used: time::Instant,
+}
+
+struct CachedDeduplicationGroup {
+    expires_at: time::Instant,
+    entries: HashMap<String, CachedGroupEntry>,
+    cache_bytes: usize,
+    warned_capacity: bool,
+}
+
+struct DeduplicationCache {
+    ttl: Option<Duration>,
+    entries: HashMap<String, CachedPublishedValue>,
+    group_settings: HashMap<String, DeduplicationGroupSettings>,
+    groups: HashMap<String, CachedDeduplicationGroup>,
+}
+
+impl DeduplicationCache {
+    #[cfg(test)]
+    fn new(ttl_ms: i64) -> Self {
+        Self::with_groups(ttl_ms, &BTreeMap::new())
+    }
+
+    fn with_groups(
+        ttl_ms: i64,
+        deduplication_groups: &BTreeMap<String, DeduplicationGroup>,
+    ) -> Self {
+        Self {
+            ttl: positive_ttl(ttl_ms),
+            entries: HashMap::new(),
+            group_settings: deduplication_groups
+                .iter()
+                .map(|(name, group)| {
+                    (
+                        name.clone(),
+                        DeduplicationGroupSettings {
+                            ttl: positive_ttl(group.ttl_ms),
+                            round_ms: group.round_ms,
+                            restart_on_change: group.restart_on_change,
+                            max_members: group.max_members,
+                            max_cache_bytes: group.max_cache_bytes,
+                        },
+                    )
+                })
+                .collect(),
+            groups: HashMap::new(),
+        }
+    }
+
+    fn should_suppress(&mut self, message: &PendingMessage, now: time::Instant) -> bool {
+        if let Some(group_name) = message.deduplication_group.as_deref() {
+            let Some(settings) = self.group_settings.get(group_name).copied() else {
+                return false;
+            };
+            if settings.ttl.is_none() {
+                self.groups.remove(group_name);
+                return false;
+            }
+            if self
+                .groups
+                .get(group_name)
+                .is_some_and(|group| now >= group.expires_at)
+            {
+                self.groups.remove(group_name);
+                return false;
+            }
+            return self
+                .groups
+                .get_mut(group_name)
+                .and_then(|group| group.entries.get_mut(&message.output_channel))
+                .is_some_and(|entry| {
+                    entry.last_used = now;
+                    entry.raw_payload.as_slice() == message.raw_payload()
+                });
+        }
+
+        let Some(cached) = self.entries.get(&message.output_channel) else {
+            return false;
+        };
+        if message
+            .deduplication_ttl_ms
+            .is_some_and(|ttl_ms| ttl_ms <= 0)
+            || now.saturating_duration_since(cached.published_at) >= cached.ttl
+        {
+            self.entries.remove(&message.output_channel);
+            return false;
+        }
+        cached.raw_payload.as_slice() == message.raw_payload()
+    }
+
+    fn remember(&mut self, messages: &[PendingMessage], now: time::Instant) {
+        self.remember_at(messages, now, epoch_millis());
+    }
+
+    fn remember_at(&mut self, messages: &[PendingMessage], now: time::Instant, now_epoch_ms: u128) {
+        let mut grouped = HashMap::<String, Vec<&PendingMessage>>::new();
+        for message in messages {
+            if let Some(group_name) = message.deduplication_group.as_deref() {
+                grouped
+                    .entry(group_name.to_owned())
+                    .or_default()
+                    .push(message);
+                continue;
+            }
+
+            let ttl = match message.deduplication_ttl_ms {
+                Some(ttl_ms) => positive_ttl(ttl_ms),
+                None => self.ttl,
+            };
+            let Some(ttl) = ttl.filter(|ttl| !ttl.is_zero()) else {
+                self.entries.remove(&message.output_channel);
+                continue;
+            };
+            self.entries.insert(
+                message.output_channel.clone(),
+                CachedPublishedValue {
+                    raw_payload: message.raw_payload().to_vec(),
+                    published_at: now,
+                    ttl,
+                },
+            );
+        }
+
+        for (group_name, messages) in grouped {
+            let Some(settings) = self.group_settings.get(&group_name).copied() else {
+                continue;
+            };
+            let Some(ttl) = settings.ttl else {
+                self.groups.remove(&group_name);
+                continue;
+            };
+            if self
+                .groups
+                .get(&group_name)
+                .is_some_and(|group| now >= group.expires_at)
+            {
+                self.groups.remove(&group_name);
+            }
+
+            let should_restart_deadline = settings.restart_on_change
+                && self.groups.get(&group_name).is_some_and(|group| {
+                    messages.iter().any(|message| {
+                        group
+                            .entries
+                            .get(&message.output_channel)
+                            .is_none_or(|previous| {
+                                previous.raw_payload.as_slice() != message.raw_payload()
+                            })
+                    })
+                });
+            let group =
+                self.groups
+                    .entry(group_name.clone())
+                    .or_insert_with(|| CachedDeduplicationGroup {
+                        expires_at: group_expiration(now, now_epoch_ms, ttl, settings.round_ms),
+                        entries: HashMap::new(),
+                        cache_bytes: 0,
+                        warned_capacity: false,
+                    });
+            if should_restart_deadline {
+                group.expires_at = group_expiration(now, now_epoch_ms, ttl, settings.round_ms);
+            }
+            for message in messages {
+                let channel = &message.output_channel;
+                let payload = message.raw_payload();
+                if let Some(previous) = group.entries.remove(channel) {
+                    group.cache_bytes = group
+                        .cache_bytes
+                        .saturating_sub(group_entry_bytes(channel, &previous.raw_payload));
+                }
+                let member_bytes = group_entry_bytes(channel, payload);
+                if member_bytes > settings.max_cache_bytes {
+                    warn_group_cache_capacity(group, &group_name, settings);
+                    continue;
+                }
+                while group.entries.len() >= settings.max_members
+                    || group.cache_bytes.saturating_add(member_bytes) > settings.max_cache_bytes
+                {
+                    let oldest = group
+                        .entries
+                        .iter()
+                        .min_by_key(|(_, entry)| entry.last_used)
+                        .map(|(channel, _)| channel.clone());
+                    let Some(oldest) = oldest else {
+                        break;
+                    };
+                    if let Some(evicted) = group.entries.remove(&oldest) {
+                        group.cache_bytes = group
+                            .cache_bytes
+                            .saturating_sub(group_entry_bytes(&oldest, &evicted.raw_payload));
+                        warn_group_cache_capacity(group, &group_name, settings);
+                    }
+                }
+                if group.entries.len() < settings.max_members
+                    && group.cache_bytes.saturating_add(member_bytes) <= settings.max_cache_bytes
+                {
+                    group.entries.insert(
+                        channel.clone(),
+                        CachedGroupEntry {
+                            raw_payload: payload.to_vec(),
+                            last_used: now,
+                        },
+                    );
+                    group.cache_bytes = group.cache_bytes.saturating_add(member_bytes);
+                } else {
+                    warn_group_cache_capacity(group, &group_name, settings);
+                }
+            }
+        }
+    }
+
+    fn prune_expired(&mut self, now: time::Instant) {
+        self.entries
+            .retain(|_, cached| now.saturating_duration_since(cached.published_at) < cached.ttl);
+        self.groups.retain(|_, group| now < group.expires_at);
+    }
+}
+
+fn group_entry_bytes(channel: &str, payload: &[u8]) -> usize {
+    channel.len().saturating_add(payload.len())
+}
+
+fn warn_group_cache_capacity(
+    group: &mut CachedDeduplicationGroup,
+    group_name: &str,
+    settings: DeduplicationGroupSettings,
+) {
+    if !group.warned_capacity {
+        warn!(
+            deduplication_group = group_name,
+            max_members = settings.max_members,
+            max_cache_bytes = settings.max_cache_bytes,
+            "deduplication_group_cache_capacity_reached; evicting an old member or bypassing cache for an oversized member"
+        );
+        group.warned_capacity = true;
+    }
+}
+
+fn positive_ttl(ttl_ms: i64) -> Option<Duration> {
+    u64::try_from(ttl_ms)
+        .ok()
+        .filter(|ttl_ms| *ttl_ms > 0)
+        .map(Duration::from_millis)
+}
+
+fn epoch_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+fn group_expiration(
+    now: time::Instant,
+    now_epoch_ms: u128,
+    ttl: Duration,
+    round_ms: u64,
+) -> time::Instant {
+    let anchor_epoch_ms = if round_ms == 0 {
+        now_epoch_ms
+    } else {
+        let round_ms = u128::from(round_ms);
+        now_epoch_ms / round_ms * round_ms
+    };
+    let expiration_epoch_ms = anchor_epoch_ms.saturating_add(ttl.as_millis());
+    let remaining_ms = expiration_epoch_ms.saturating_sub(now_epoch_ms);
+    let remaining_ms = u64::try_from(remaining_ms).unwrap_or(u64::MAX);
+    now + Duration::from_millis(remaining_ms)
+}
+
+fn resolve_channel_policy(config: &OutputConfig, channel: &str) -> ResolvedChannelPolicy {
+    let policy = config
+        .channel_policies
+        .iter()
+        .find(|policy| channel_policy_matches(policy, channel))
+        .or_else(|| config.channel_policies.iter().find(|policy| policy.default));
+    let profile = policy
+        .and_then(|policy| policy.profile.as_deref())
+        .and_then(|name| config.profiles.get(name));
+    ResolvedChannelPolicy {
+        interval_ms: profile
+            .and_then(|profile| profile.conflation_interval_ms)
+            .or_else(|| policy.and_then(|policy| policy.conflation_interval_ms))
+            .unwrap_or(config.conflation.interval_ms),
+        deduplication_ttl_ms: profile
+            .and_then(|profile| profile.deduplication_ttl_ms)
+            .or_else(|| policy.and_then(|policy| policy.deduplication_ttl_ms))
+            .unwrap_or(config.deduplication.ttl_ms),
+        deduplication_group: profile
+            .and_then(|profile| profile.deduplication_group.clone())
+            .or_else(|| policy.and_then(|policy| policy.deduplication_group.clone())),
+    }
+}
+
+fn channel_policy_matches(policy: &ChannelPolicy, channel: &str) -> bool {
+    if let Some(pattern) = policy.glob.as_deref() {
+        glob_matches(pattern, channel)
+    } else if let Some(prefix) = policy.prefix.as_deref() {
+        channel.starts_with(prefix)
+    } else if let Some(suffix) = policy.suffix.as_deref() {
+        channel.ends_with(suffix)
+    } else {
+        false
+    }
+}
+
+#[derive(Clone, Debug)]
+enum GlobToken {
+    Star,
+    Any,
+    Literal(u8),
+    Class {
+        negated: bool,
+        ranges: Vec<(u8, u8)>,
+    },
+}
+
+fn glob_matches(pattern: &str, value: &str) -> bool {
+    let tokens = parse_glob(pattern);
+    let value = value.as_bytes();
+    let mut previous = vec![false; value.len() + 1];
+    previous[0] = true;
+
+    for token in tokens {
+        let mut current = vec![false; value.len() + 1];
+        match token {
+            GlobToken::Star => {
+                current[0] = previous[0];
+                for index in 1..=value.len() {
+                    current[index] = previous[index] || current[index - 1];
+                }
+            }
+            GlobToken::Any => {
+                current[1..].copy_from_slice(&previous[..value.len()]);
+            }
+            GlobToken::Literal(expected) => {
+                for (index, actual) in value.iter().enumerate() {
+                    current[index + 1] = previous[index] && *actual == expected;
+                }
+            }
+            GlobToken::Class { negated, ranges } => {
+                for (index, actual) in value.iter().enumerate() {
+                    let included = ranges
+                        .iter()
+                        .any(|(start, end)| start <= actual && actual <= end);
+                    current[index + 1] = previous[index] && (included != negated);
+                }
+            }
+        }
+        previous = current;
+    }
+    previous[value.len()]
+}
+
+fn parse_glob(pattern: &str) -> Vec<GlobToken> {
+    let bytes = pattern.as_bytes();
+    let mut tokens = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'*' => {
+                if !matches!(tokens.last(), Some(GlobToken::Star)) {
+                    tokens.push(GlobToken::Star);
+                }
+                index += 1;
+            }
+            b'?' => {
+                tokens.push(GlobToken::Any);
+                index += 1;
+            }
+            b'\\' if index + 1 < bytes.len() => {
+                tokens.push(GlobToken::Literal(bytes[index + 1]));
+                index += 2;
+            }
+            b'[' => {
+                if let Some((class, after)) = parse_glob_class(bytes, index) {
+                    tokens.push(class);
+                    index = after;
+                } else {
+                    tokens.push(GlobToken::Literal(b'['));
+                    index += 1;
+                }
+            }
+            literal => {
+                tokens.push(GlobToken::Literal(literal));
+                index += 1;
+            }
+        }
+    }
+    tokens
+}
+
+fn parse_glob_class(bytes: &[u8], start: usize) -> Option<(GlobToken, usize)> {
+    let mut index = start + 1;
+    let negated = bytes.get(index) == Some(&b'^');
+    if negated {
+        index += 1;
+    }
+    let mut elements = Vec::<(u8, bool)>::new();
+    let mut closed = false;
+    while index < bytes.len() {
+        match bytes[index] {
+            b']' if !elements.is_empty() => {
+                closed = true;
+                index += 1;
+                break;
+            }
+            b'\\' if index + 1 < bytes.len() => {
+                elements.push((bytes[index + 1], true));
+                index += 2;
+            }
+            byte => {
+                elements.push((byte, false));
+                index += 1;
+            }
+        }
+    }
+    if !closed || elements.is_empty() {
+        return None;
+    }
+
+    let mut ranges = Vec::new();
+    let mut element_index = 0;
+    while element_index < elements.len() {
+        if element_index + 2 < elements.len() && elements[element_index + 1] == (b'-', false) {
+            ranges.push((elements[element_index].0, elements[element_index + 2].0));
+            element_index += 3;
+        } else {
+            let character = elements[element_index].0;
+            ranges.push((character, character));
+            element_index += 1;
+        }
+    }
+    Some((GlobToken::Class { negated, ranges }, index))
+}
+
+fn flush_schedules(
+    intervals_ms: impl IntoIterator<Item = i64>,
+    now: time::Instant,
+) -> Vec<FlushSchedule> {
+    let mut intervals = intervals_ms
+        .into_iter()
+        .filter(|interval_ms| *interval_ms > 0)
+        .collect::<Vec<_>>();
+    intervals.sort_unstable();
+    intervals.dedup();
+    intervals
+        .into_iter()
+        .map(|interval_ms| {
+            let interval = Duration::from_millis(interval_ms as u64);
+            FlushSchedule {
+                interval_ms,
+                interval,
+                next_tick: now + interval,
+            }
+        })
+        .collect()
+}
+
+fn advance_due_schedules(schedules: &mut [FlushSchedule], now: time::Instant) -> Vec<i64> {
+    let mut due = Vec::new();
+    for schedule in schedules {
+        if schedule.next_tick <= now {
+            due.push(schedule.interval_ms);
+            // Match MissedTickBehavior::Delay: after a delayed tick, start the
+            // next period from the time this tick is observed.
+            schedule.next_tick = now + schedule.interval;
+        }
+    }
+    due
+}
+
+fn next_schedule_tick(schedules: &[FlushSchedule]) -> Option<time::Instant> {
+    schedules.iter().map(|schedule| schedule.next_tick).min()
+}
+
+fn deduplication_prune_interval(config: &OutputConfig) -> Option<Duration> {
+    std::iter::once(config.deduplication.ttl_ms)
+        .chain(
+            config
+                .deduplication_groups
+                .values()
+                .map(|group| group.ttl_ms),
+        )
+        .chain(
+            config
+                .profiles
+                .values()
+                .filter_map(|profile| profile.deduplication_ttl_ms),
+        )
+        .chain(
+            config
+                .channel_policies
+                .iter()
+                .filter_map(|policy| policy.deduplication_ttl_ms),
+        )
+        .filter_map(|ttl_ms| u64::try_from(ttl_ms).ok())
+        .filter(|ttl_ms| *ttl_ms > 0)
+        .min()
+        .map(Duration::from_millis)
 }
 
 #[derive(Clone, Debug)]
@@ -506,11 +1053,24 @@ fn enqueue_message(
     pending: &mut HashMap<String, PendingMessage>,
     passthrough: &mut VecDeque<PendingMessage>,
     context: &mut OutputMessageContext<'_>,
+    deduplication_cache: &mut DeduplicationCache,
+    now: time::Instant,
 ) {
     let interval_ms = context.policy.interval_ms;
     let Some(pending_message) = prepare_output_message(message, context) else {
         return;
     };
+    if interval_ms <= 0 && deduplication_cache.should_suppress(&pending_message, now) {
+        context.metrics.record_output_deduplicated(
+            context.output_metrics,
+            pending_message.raw_payload().len(),
+            pending_message.payload.len(),
+        );
+        context
+            .metrics
+            .set_output_pending_keys(context.output_metrics, pending.len() + passthrough.len());
+        return;
+    }
     if interval_ms > 0 {
         if let Some(replaced) =
             pending.insert(pending_message.output_channel.clone(), pending_message)
@@ -522,14 +1082,9 @@ fn enqueue_message(
     } else {
         passthrough.push_back(pending_message);
     }
-    context.metrics.set_output_pending_keys(
-        context.output_metrics,
-        if interval_ms > 0 {
-            pending.len()
-        } else {
-            passthrough.len()
-        },
-    );
+    context
+        .metrics
+        .set_output_pending_keys(context.output_metrics, pending.len() + passthrough.len());
 }
 
 fn pending_batch(
@@ -738,12 +1293,18 @@ fn prepare_output_message(
 ) -> Option<PendingMessage> {
     let OutputMessagePolicy {
         interval_ms,
+        deduplication_ttl_ms,
+        deduplication_group,
         max_bytes_per_exec,
         oversized_policy,
-    } = context.policy;
+    } = context.policy.clone();
     let mut pending_message = PendingMessage {
         output_channel: message.output_channel,
+        conflation_interval_ms: interval_ms,
+        deduplication_ttl_ms,
+        deduplication_group,
         payload: message.payload,
+        raw_payload: None,
     };
     let atomic = interval_ms > 0;
     if publish_operation_frame_bytes(&pending_message, atomic) <= max_bytes_per_exec
@@ -779,6 +1340,7 @@ fn prepare_output_message(
                 return None;
             };
             let truncated_bytes = pending_message.payload.len() - max_payload_len;
+            pending_message.raw_payload = Some(pending_message.payload.clone());
             pending_message.payload.truncate(max_payload_len);
             context
                 .metrics
@@ -808,14 +1370,7 @@ fn clear_published_batch(
     } else {
         passthrough.pop_front();
     }
-    metrics.set_output_pending_keys(
-        output_metrics,
-        if interval_ms > 0 {
-            pending.len()
-        } else {
-            passthrough.len()
-        },
-    );
+    metrics.set_output_pending_keys(output_metrics, pending.len() + passthrough.len());
 }
 
 fn settle_failed_batch(
@@ -928,26 +1483,41 @@ impl BatchPublisher for RedisBatchPublisher<'_> {
 }
 
 async fn publish_once<P: BatchPublisher>(
-    name: &str,
     publisher: &mut P,
     batch: &[PendingMessage],
     atomic: bool,
-    failure_log: &mut OutputFailureLog,
-    metrics: &Metrics,
-    output_metrics: &OutputMetrics,
+    context: &mut OutputPublishContext<'_>,
 ) -> std::result::Result<i64, PublishFailure> {
     match publisher.publish(batch, atomic).await {
-        Ok(subscribers) => Ok(subscribers),
+        Ok(subscribers) => {
+            context
+                .deduplication_cache
+                .remember(batch, time::Instant::now());
+            Ok(subscribers)
+        }
         Err(failure) => {
+            if matches!(&failure, PublishFailure::Uncertain(_)) {
+                context
+                    .deduplication_cache
+                    .remember(batch, time::Instant::now());
+            }
             match &failure {
                 PublishFailure::NotSent(error) => {
-                    metrics.record_output_error(output_metrics, error, true);
-                    metrics.record_output_error_messages(output_metrics, batch.len());
-                    failure_log.report(name, error, batch.len());
+                    context
+                        .metrics
+                        .record_output_error(context.output_metrics, error, true);
+                    context
+                        .metrics
+                        .record_output_error_messages(context.output_metrics, batch.len());
+                    context.failure_log.report(context.name, error, batch.len());
                 }
                 PublishFailure::Uncertain(error) => {
-                    metrics.record_output_uncertain(output_metrics, error, batch.len());
-                    failure_log.report(name, error, batch.len());
+                    context.metrics.record_output_uncertain(
+                        context.output_metrics,
+                        error,
+                        batch.len(),
+                    );
+                    context.failure_log.report(context.name, error, batch.len());
                 }
             }
             Err(failure)
@@ -955,6 +1525,7 @@ async fn publish_once<P: BatchPublisher>(
     }
 }
 
+#[cfg(test)]
 async fn publish_conflated_pending<P: BatchPublisher>(
     publisher: &mut P,
     pending: &mut HashMap<String, PendingMessage>,
@@ -963,17 +1534,80 @@ async fn publish_conflated_pending<P: BatchPublisher>(
     context: &mut OutputPublishContext<'_>,
 ) {
     let mut passthrough = VecDeque::new();
-    let mut candidate_channels = pending.keys().cloned().collect::<Vec<_>>();
+    publish_conflated_interval_pending(
+        publisher,
+        pending,
+        &mut passthrough,
+        None,
+        max_commands_per_exec,
+        max_bytes_per_exec,
+        context,
+    )
+    .await;
+}
+
+async fn publish_conflated_interval_pending<P: BatchPublisher>(
+    publisher: &mut P,
+    pending: &mut HashMap<String, PendingMessage>,
+    passthrough: &mut VecDeque<PendingMessage>,
+    interval_ms: Option<i64>,
+    max_commands_per_exec: usize,
+    max_bytes_per_exec: usize,
+    context: &mut OutputPublishContext<'_>,
+) {
+    let mut candidate_channels = pending
+        .iter()
+        .filter(|(_, message)| {
+            interval_ms.is_none_or(|interval_ms| message.conflation_interval_ms == interval_ms)
+        })
+        .map(|(channel, _)| channel.clone())
+        .collect::<Vec<_>>();
     candidate_channels.sort();
     let mut offset = 0usize;
     while offset < candidate_channels.len() {
-        let batch_length = pending_batch_length(
+        let candidate_batch_length = pending_batch_length(
             max_commands_per_exec,
             max_bytes_per_exec,
             pending,
             &candidate_channels[offset..],
         );
-        let batch = candidate_channels[offset..offset + batch_length]
+        let candidate_batch = &candidate_channels[offset..offset + candidate_batch_length];
+        let now = time::Instant::now();
+        let mut eligible_channels = Vec::with_capacity(candidate_batch_length);
+        let mut deduplicated_channels = Vec::new();
+        for channel in candidate_batch {
+            let message = pending
+                .get(channel)
+                .expect("pending channel snapshot must remain present");
+            if context.deduplication_cache.should_suppress(message, now) {
+                deduplicated_channels.push(channel.clone());
+            } else {
+                eligible_channels.push(channel.clone());
+            }
+        }
+        let removed_deduplicated = !deduplicated_channels.is_empty();
+        for channel in deduplicated_channels {
+            let message = pending
+                .remove(&channel)
+                .expect("deduplicated pending channel must remain present");
+            context.metrics.record_output_deduplicated(
+                context.output_metrics,
+                message.raw_payload().len(),
+                message.payload.len(),
+            );
+        }
+        if removed_deduplicated {
+            context
+                .metrics
+                .set_output_pending_keys(context.output_metrics, pending.len() + passthrough.len());
+        }
+        if eligible_channels.is_empty() {
+            offset += candidate_batch_length;
+            tokio::task::yield_now().await;
+            continue;
+        }
+
+        let batch = eligible_channels
             .iter()
             .map(|channel| {
                 pending
@@ -982,16 +1616,8 @@ async fn publish_conflated_pending<P: BatchPublisher>(
                     .clone()
             })
             .collect::<Vec<_>>();
-        let publish_result = publish_once(
-            context.name,
-            publisher,
-            &batch,
-            true,
-            context.failure_log,
-            context.metrics,
-            context.output_metrics,
-        )
-        .await;
+        let last_candidate_index = offset + candidate_batch_length - 1;
+        let publish_result = publish_once(publisher, &batch, true, context).await;
         let subscribers = match publish_result {
             Ok(subscribers) => subscribers,
             Err(failure) => {
@@ -999,12 +1625,12 @@ async fn publish_conflated_pending<P: BatchPublisher>(
                     1,
                     &batch,
                     pending,
-                    &mut passthrough,
+                    passthrough,
                     &failure,
                     context.metrics,
                     context.output_metrics,
                 );
-                offset += batch_length;
+                offset = last_candidate_index + 1;
                 tokio::task::yield_now().await;
                 continue;
             }
@@ -1014,7 +1640,7 @@ async fn publish_conflated_pending<P: BatchPublisher>(
         clear_published_batch(
             1,
             pending,
-            &mut passthrough,
+            passthrough,
             &batch,
             context.metrics,
             context.output_metrics,
@@ -1029,39 +1655,37 @@ async fn publish_conflated_pending<P: BatchPublisher>(
             atomic = true,
             "output_batch_published"
         );
-        offset += batch_length;
+        offset = last_candidate_index + 1;
         tokio::task::yield_now().await;
     }
 }
 
 async fn publish_passthrough_pending<P: BatchPublisher>(
-    name: &str,
     publisher: &mut P,
     pending: &mut HashMap<String, PendingMessage>,
     passthrough: &mut VecDeque<PendingMessage>,
-    failure_log: &mut OutputFailureLog,
-    metrics: &Metrics,
-    output_metrics: &OutputMetrics,
+    context: &mut OutputPublishContext<'_>,
 ) {
     while !passthrough.is_empty() {
         let batch = pending_batch(0, 1, 0, pending, passthrough);
-        match publish_once(
-            name,
-            publisher,
-            &batch,
-            false,
-            failure_log,
-            metrics,
-            output_metrics,
-        )
-        .await
-        {
+        match publish_once(publisher, &batch, false, context).await {
             Ok(subscribers) => {
                 let payload_bytes = batch.iter().map(|message| message.payload.len()).sum();
-                clear_published_batch(0, pending, passthrough, &batch, metrics, output_metrics);
-                metrics.record_output_flush(output_metrics, batch.len(), payload_bytes);
+                clear_published_batch(
+                    0,
+                    pending,
+                    passthrough,
+                    &batch,
+                    context.metrics,
+                    context.output_metrics,
+                );
+                context.metrics.record_output_flush(
+                    context.output_metrics,
+                    batch.len(),
+                    payload_bytes,
+                );
                 debug!(
-                    output = name,
+                    output = context.name,
                     messages = batch.len(),
                     subscribers,
                     atomic = false,
@@ -1075,8 +1699,8 @@ async fn publish_passthrough_pending<P: BatchPublisher>(
                     pending,
                     passthrough,
                     &failure,
-                    metrics,
-                    output_metrics,
+                    context.metrics,
+                    context.output_metrics,
                 );
                 drop(batch);
             }
@@ -1098,16 +1722,30 @@ async fn publish_output(
         max_bytes_per_exec,
         oversized_policy,
     } = setup;
-    let interval_ms = config.conflation.interval_ms;
     let max_commands_per_exec = config.conflation.max_commands_per_exec;
-    let mut flush_interval = if interval_ms > 0 {
-        let interval = Duration::from_millis(interval_ms as u64);
+    let mut deduplication_cache =
+        DeduplicationCache::with_groups(config.deduplication.ttl_ms, &config.deduplication_groups);
+    let mut deduplication_prune_interval = deduplication_prune_interval(&config).map(|interval| {
         let mut ticker = time::interval_at(time::Instant::now() + interval, interval);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        Some(ticker)
-    } else {
-        None
-    };
+        ticker
+    });
+    let mut flush_schedules = flush_schedules(
+        std::iter::once(config.conflation.interval_ms)
+            .chain(
+                config
+                    .profiles
+                    .values()
+                    .filter_map(|profile| profile.conflation_interval_ms),
+            )
+            .chain(
+                config
+                    .channel_policies
+                    .iter()
+                    .filter_map(|policy| policy.conflation_interval_ms),
+            ),
+        time::Instant::now(),
+    );
     let mut pending = HashMap::<String, PendingMessage>::new();
     let mut passthrough = VecDeque::<PendingMessage>::new();
     let mut failure_log = OutputFailureLog::default();
@@ -1115,21 +1753,18 @@ async fn publish_output(
     let mut connection: Option<MultiplexedConnection> = None;
     let mut input_closed = false;
     let mut flush_due = false;
+    let mut due_intervals = Vec::<i64>::new();
 
     metrics.set_output_state(&output_metrics, "running");
     loop {
-        let has_pending = if interval_ms > 0 {
-            !pending.is_empty()
-        } else {
-            !passthrough.is_empty()
-        };
-        if flush_due && has_pending {
+        let has_pending = !pending.is_empty() || !passthrough.is_empty();
+        if flush_due {
             flush_due = false;
-            metrics.set_output_state(&output_metrics, "publishing");
-            if connection.is_none() {
-                metrics.set_output_state(&output_metrics, "connecting");
-            }
-            if interval_ms > 0 {
+            if !passthrough.is_empty() {
+                metrics.set_output_state(&output_metrics, "publishing");
+                if connection.is_none() {
+                    metrics.set_output_state(&output_metrics, "connecting");
+                }
                 let mut publisher = RedisBatchPublisher {
                     config: &config,
                     client: &client,
@@ -1138,32 +1773,55 @@ async fn publish_output(
                 let mut publish_context = OutputPublishContext {
                     name: &name,
                     failure_log: &mut failure_log,
+                    deduplication_cache: &mut deduplication_cache,
                     metrics: &metrics,
                     output_metrics: &output_metrics,
                 };
-                publish_conflated_pending(
+                publish_passthrough_pending(
                     &mut publisher,
                     &mut pending,
-                    max_commands_per_exec,
-                    max_bytes_per_exec,
+                    &mut passthrough,
                     &mut publish_context,
                 )
                 .await;
                 metrics.set_output_state(&output_metrics, "running");
-            } else {
+                continue;
+            }
+        }
+
+        if !due_intervals.is_empty() {
+            let intervals = std::mem::take(&mut due_intervals);
+            for interval_ms in intervals {
+                if !pending
+                    .values()
+                    .any(|message| message.conflation_interval_ms == interval_ms)
+                {
+                    continue;
+                }
+                metrics.set_output_state(&output_metrics, "publishing");
+                if connection.is_none() {
+                    metrics.set_output_state(&output_metrics, "connecting");
+                }
                 let mut publisher = RedisBatchPublisher {
                     config: &config,
                     client: &client,
                     connection: &mut connection,
                 };
-                publish_passthrough_pending(
-                    &name,
+                let mut publish_context = OutputPublishContext {
+                    name: &name,
+                    failure_log: &mut failure_log,
+                    deduplication_cache: &mut deduplication_cache,
+                    metrics: &metrics,
+                    output_metrics: &output_metrics,
+                };
+                publish_conflated_interval_pending(
                     &mut publisher,
                     &mut pending,
                     &mut passthrough,
-                    &mut failure_log,
-                    &metrics,
-                    &output_metrics,
+                    Some(interval_ms),
+                    max_commands_per_exec,
+                    max_bytes_per_exec,
+                    &mut publish_context,
                 )
                 .await;
                 metrics.set_output_state(&output_metrics, "running");
@@ -1175,14 +1833,19 @@ async fn publish_output(
             break;
         }
 
+        let next_flush_tick = next_schedule_tick(&flush_schedules);
         tokio::select! {
             message = receiver.recv(), if !input_closed => {
                 match message {
                     Some(message) => {
+                        let channel_policy =
+                            resolve_channel_policy(&config, &message.output_channel);
                         let mut message_context = OutputMessageContext {
                             name: &name,
                             policy: OutputMessagePolicy {
-                                interval_ms,
+                                interval_ms: channel_policy.interval_ms,
+                                deduplication_ttl_ms: Some(channel_policy.deduplication_ttl_ms),
+                                deduplication_group: channel_policy.deduplication_group,
                                 max_bytes_per_exec,
                                 oversized_policy,
                             },
@@ -1195,27 +1858,49 @@ async fn publish_output(
                             &mut pending,
                             &mut passthrough,
                             &mut message_context,
+                            &mut deduplication_cache,
+                            time::Instant::now(),
                         );
-                        if interval_ms <= 0 {
+                        if channel_policy.interval_ms <= 0 {
                             flush_due = true;
                         }
                     }
                     None => {
                         input_closed = true;
                         flush_due = true;
+                        for message in pending.values() {
+                            let interval_ms = message.conflation_interval_ms;
+                            if interval_ms > 0 && !due_intervals.contains(&interval_ms) {
+                                due_intervals.push(interval_ms);
+                            }
+                        }
                     }
                 }
             }
             _ = async {
-                if let Some(interval) = flush_interval.as_mut() {
+                if let Some(next_tick) = next_flush_tick {
+                    time::sleep_until(next_tick).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            }, if !flush_schedules.is_empty() => {
+                for interval_ms in advance_due_schedules(&mut flush_schedules, time::Instant::now()) {
+                    if pending
+                        .values()
+                        .any(|message| message.conflation_interval_ms == interval_ms)
+                    {
+                        due_intervals.push(interval_ms);
+                    }
+                }
+            }
+            _ = async {
+                if let Some(interval) = deduplication_prune_interval.as_mut() {
                     interval.tick().await;
                 } else {
                     std::future::pending::<()>().await;
                 }
-            }, if interval_ms > 0 => {
-                if has_pending {
-                    flush_due = true;
-                }
+            }, if deduplication_prune_interval.is_some() => {
+                deduplication_cache.prune_expired(time::Instant::now());
             }
         }
     }
@@ -1315,6 +2000,111 @@ async fn write_status(path: std::path::PathBuf, update_interval_ms: u64, metrics
 mod tests {
     use super::*;
 
+    fn pending_message(output_channel: &str, payload: Vec<u8>) -> PendingMessage {
+        PendingMessage {
+            output_channel: output_channel.to_owned(),
+            conflation_interval_ms: 0,
+            deduplication_ttl_ms: None,
+            deduplication_group: None,
+            payload,
+            raw_payload: None,
+        }
+    }
+
+    fn pending_message_with_raw(
+        output_channel: &str,
+        payload: Vec<u8>,
+        raw_payload: Vec<u8>,
+    ) -> PendingMessage {
+        PendingMessage {
+            output_channel: output_channel.to_owned(),
+            conflation_interval_ms: 0,
+            deduplication_ttl_ms: None,
+            deduplication_group: None,
+            payload,
+            raw_payload: Some(raw_payload),
+        }
+    }
+
+    fn pending_group_message(output_channel: &str, payload: &[u8], group: &str) -> PendingMessage {
+        let mut message = pending_message(output_channel, payload.to_vec());
+        message.deduplication_group = Some(group.to_owned());
+        message
+    }
+
+    fn group_settings(
+        ttl_ms: i64,
+        restart_on_change: bool,
+    ) -> BTreeMap<String, DeduplicationGroup> {
+        group_settings_with_round(ttl_ms, restart_on_change, 0)
+    }
+
+    fn group_settings_with_round(
+        ttl_ms: i64,
+        restart_on_change: bool,
+        round_ms: u64,
+    ) -> BTreeMap<String, DeduplicationGroup> {
+        group_settings_with_limits(
+            ttl_ms,
+            restart_on_change,
+            round_ms,
+            16_384,
+            64 * 1024 * 1024,
+        )
+    }
+
+    fn group_settings_with_limits(
+        ttl_ms: i64,
+        restart_on_change: bool,
+        round_ms: u64,
+        max_members: usize,
+        max_cache_bytes: usize,
+    ) -> BTreeMap<String, DeduplicationGroup> {
+        BTreeMap::from([(
+            "shared".to_owned(),
+            DeduplicationGroup {
+                ttl_ms,
+                round_ms,
+                restart_on_change,
+                max_members,
+                max_cache_bytes,
+            },
+        )])
+    }
+
+    fn channel_policy(
+        glob: Option<&str>,
+        prefix: Option<&str>,
+        suffix: Option<&str>,
+        interval_ms: Option<i64>,
+        ttl_ms: Option<i64>,
+    ) -> ChannelPolicy {
+        ChannelPolicy {
+            glob: glob.map(str::to_owned),
+            prefix: prefix.map(str::to_owned),
+            suffix: suffix.map(str::to_owned),
+            default: false,
+            profile: None,
+            conflation_interval_ms: interval_ms,
+            deduplication_ttl_ms: ttl_ms,
+            deduplication_group: None,
+        }
+    }
+
+    fn output_config_with_policies(
+        interval_ms: i64,
+        ttl_ms: i64,
+        channel_policies: Vec<ChannelPolicy>,
+    ) -> OutputConfig {
+        serde_json::from_value(serde_json::json!({
+            "redis": { "host": "localhost" },
+            "conflation": { "interval_ms": interval_ms },
+            "deduplication": { "ttl_ms": ttl_ms },
+            "channel_policies": channel_policies,
+        }))
+        .expect("test output config should deserialize")
+    }
+
     #[derive(Default)]
     struct RecordingPublisher {
         not_sent_failures_remaining: usize,
@@ -1357,33 +2147,710 @@ mod tests {
         metrics: &Metrics,
         output_metrics: &OutputMetrics,
     ) {
-        let mut policy_log = OversizedPolicyLog::default();
-        let mut context = OutputMessageContext {
-            name: "test-output",
-            policy: OutputMessagePolicy {
+        let mut deduplication_cache = DeduplicationCache::new(0);
+        enqueue_for_test_with_cache(
+            interval_ms,
+            message,
+            pending,
+            passthrough,
+            metrics,
+            output_metrics,
+            &mut deduplication_cache,
+        );
+    }
+
+    fn enqueue_for_test_with_cache(
+        interval_ms: i64,
+        message: InboundMessage,
+        pending: &mut HashMap<String, PendingMessage>,
+        passthrough: &mut VecDeque<PendingMessage>,
+        metrics: &Metrics,
+        output_metrics: &OutputMetrics,
+        deduplication_cache: &mut DeduplicationCache,
+    ) {
+        enqueue_for_test_with_cache_at(
+            interval_ms,
+            message,
+            pending,
+            passthrough,
+            metrics,
+            output_metrics,
+            deduplication_cache,
+            time::Instant::now(),
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn enqueue_for_test_with_cache_at(
+        interval_ms: i64,
+        message: InboundMessage,
+        pending: &mut HashMap<String, PendingMessage>,
+        passthrough: &mut VecDeque<PendingMessage>,
+        metrics: &Metrics,
+        output_metrics: &OutputMetrics,
+        deduplication_cache: &mut DeduplicationCache,
+        now: time::Instant,
+    ) {
+        enqueue_for_test_with_policy_at(
+            message,
+            pending,
+            passthrough,
+            metrics,
+            output_metrics,
+            deduplication_cache,
+            now,
+            OutputMessagePolicy {
                 interval_ms,
+                deduplication_ttl_ms: None,
+                deduplication_group: None,
                 max_bytes_per_exec: 4 * 1024 * 1024,
                 oversized_policy: OversizedMessagePolicy::Send,
             },
+        );
+    }
+
+    #[test]
+    fn channel_policy_resolution_uses_first_match_and_output_fallbacks() {
+        let config = output_config_with_policies(
+            125,
+            900,
+            vec![
+                channel_policy(Some("mapped:orders:*"), None, None, Some(200), Some(50)),
+                channel_policy(None, Some("mapped:orders:"), None, Some(300), Some(75)),
+                channel_policy(None, Some("mapped:direct:"), None, Some(0), None),
+                channel_policy(None, None, Some(":disabled"), None, Some(0)),
+            ],
+        );
+
+        let mapped_channel = map_output_channel("mapped:", "", "orders:42", "", "");
+        assert_eq!(
+            resolve_channel_policy(&config, &mapped_channel),
+            ResolvedChannelPolicy {
+                interval_ms: 200,
+                deduplication_ttl_ms: 50,
+                deduplication_group: None,
+            }
+        );
+        assert_eq!(
+            resolve_channel_policy(&config, "mapped:direct:now"),
+            ResolvedChannelPolicy {
+                interval_ms: 0,
+                deduplication_ttl_ms: 900,
+                deduplication_group: None,
+            }
+        );
+        assert_eq!(
+            resolve_channel_policy(&config, "mapped:history:disabled"),
+            ResolvedChannelPolicy {
+                interval_ms: 125,
+                deduplication_ttl_ms: 0,
+                deduplication_group: None,
+            }
+        );
+        assert_eq!(
+            resolve_channel_policy(&config, "unmatched"),
+            ResolvedChannelPolicy {
+                interval_ms: 125,
+                deduplication_ttl_ms: 900,
+                deduplication_group: None,
+            }
+        );
+
+        let direct_policy = resolve_channel_policy(&config, "mapped:direct:now");
+        let metrics = Metrics::new();
+        let output_metrics = metrics.register_output("direct-policy-output");
+        let mut pending = HashMap::new();
+        let mut passthrough = VecDeque::new();
+        let mut cache = DeduplicationCache::new(config.deduplication.ttl_ms);
+        enqueue_for_test_with_policy_at(
+            InboundMessage {
+                output_channel: "mapped:direct:now".to_owned(),
+                payload: b"direct".to_vec(),
+            },
+            &mut pending,
+            &mut passthrough,
+            &metrics,
+            &output_metrics,
+            &mut cache,
+            time::Instant::now(),
+            OutputMessagePolicy {
+                interval_ms: direct_policy.interval_ms,
+                deduplication_ttl_ms: Some(direct_policy.deduplication_ttl_ms),
+                deduplication_group: direct_policy.deduplication_group,
+                max_bytes_per_exec: usize::MAX,
+                oversized_policy: OversizedMessagePolicy::Send,
+            },
+        );
+        assert!(pending.is_empty());
+        assert_eq!(passthrough.len(), 1);
+    }
+
+    #[test]
+    fn profiles_and_inline_policies_resolve_selectors_precedence_and_schedules() {
+        let config: OutputConfig = serde_json::from_value(serde_json::json!({
+            "redis": { "host": "localhost" },
+            "conflation": { "interval_ms": 125 },
+            "deduplication": { "ttl_ms": 900 },
+            "deduplication_groups": {
+                "shared": {
+                    "ttl_ms": 400,
+                    "round_ms": 0,
+                    "restart_on_change": false
+                }
+            },
+            "profiles": {
+                "reusable": {
+                    "conflation.interval_ms": 100,
+                    "deduplication.ttl_ms": 250
+                },
+                "grouped": {
+                    "conflation.interval_ms": 300,
+                    "deduplication.group": "shared"
+                },
+                "default-profile": {
+                    "conflation.interval_ms": 75
+                }
+            },
+            "channel_policies": [
+                { "default": false, "glob": "mapped:reuse:*", "profile": "reusable" },
+                { "default": false, "prefix": "mapped:group:", "profile": "grouped" },
+                { "default": false, "glob": "mapped:precedence:*", "profile": "reusable" },
+                {
+                    "default": false,
+                    "suffix": ":precedence",
+                    "conflation.interval_ms": 0,
+                    "deduplication.ttl_ms": 0
+                },
+                {
+                    "default": false,
+                    "suffix": ":inline",
+                    "conflation.interval_ms": 50,
+                    "deduplication.ttl_ms": 0
+                },
+                {
+                    "default": false,
+                    "prefix": "mapped:inline-group:",
+                    "conflation.interval_ms": 250,
+                    "deduplication.group": "shared"
+                },
+                { "default": true, "profile": "default-profile" }
+            ]
+        }))
+        .expect("profile output config should deserialize");
+
+        for source_channel in ["reuse:a", "reuse:b"] {
+            let mapped = map_output_channel("mapped:", "", source_channel, "", "");
+            assert_eq!(
+                resolve_channel_policy(&config, &mapped),
+                ResolvedChannelPolicy {
+                    interval_ms: 100,
+                    deduplication_ttl_ms: 250,
+                    deduplication_group: None,
+                }
+            );
+        }
+        assert_eq!(
+            resolve_channel_policy(&config, "mapped:group:symbol"),
+            ResolvedChannelPolicy {
+                interval_ms: 300,
+                deduplication_ttl_ms: 900,
+                deduplication_group: Some("shared".to_owned()),
+            }
+        );
+        assert_eq!(
+            resolve_channel_policy(&config, "mapped:precedence:tail:precedence"),
+            ResolvedChannelPolicy {
+                interval_ms: 100,
+                deduplication_ttl_ms: 250,
+                deduplication_group: None,
+            }
+        );
+        assert_eq!(
+            resolve_channel_policy(&config, "mapped:other:inline"),
+            ResolvedChannelPolicy {
+                interval_ms: 50,
+                deduplication_ttl_ms: 0,
+                deduplication_group: None,
+            }
+        );
+        assert_eq!(
+            resolve_channel_policy(&config, "mapped:inline-group:member"),
+            ResolvedChannelPolicy {
+                interval_ms: 250,
+                deduplication_ttl_ms: 900,
+                deduplication_group: Some("shared".to_owned()),
+            }
+        );
+        assert_eq!(
+            resolve_channel_policy(&config, "unmatched"),
+            ResolvedChannelPolicy {
+                interval_ms: 75,
+                deduplication_ttl_ms: 900,
+                deduplication_group: None,
+            }
+        );
+
+        let schedules = flush_schedules(
+            std::iter::once(config.conflation.interval_ms)
+                .chain(
+                    config
+                        .profiles
+                        .values()
+                        .filter_map(|profile| profile.conflation_interval_ms),
+                )
+                .chain(
+                    config
+                        .channel_policies
+                        .iter()
+                        .filter_map(|policy| policy.conflation_interval_ms),
+                ),
+            time::Instant::now(),
+        );
+        assert_eq!(
+            schedules
+                .iter()
+                .map(|schedule| schedule.interval_ms)
+                .collect::<Vec<_>>(),
+            [50, 75, 100, 125, 250, 300]
+        );
+        assert_eq!(
+            deduplication_prune_interval(&config),
+            Some(Duration::from_millis(250))
+        );
+    }
+
+    #[test]
+    fn output_channel_glob_supports_wildcards_classes_and_escapes() {
+        assert!(glob_matches("mapped:order:[a-c]?", "mapped:order:b7"));
+        assert!(!glob_matches("mapped:order:[a-c]?", "mapped:order:d7"));
+        assert!(glob_matches(r"literal:\*\?", "literal:*?"));
+        assert!(glob_matches("mapped:*[^0-9]", "mapped:value-x"));
+        assert!(!glob_matches("mapped:*[^0-9]", "mapped:value-7"));
+    }
+
+    #[tokio::test]
+    async fn distinct_interval_groups_keep_cadence_and_flush_only_the_due_group() {
+        let started = time::Instant::now();
+        let mut schedules = flush_schedules([200, 250, 300, 200, 0], started);
+        assert_eq!(
+            schedules
+                .iter()
+                .map(|schedule| schedule.interval_ms)
+                .collect::<Vec<_>>(),
+            [200, 250, 300]
+        );
+        let metrics = Metrics::new();
+        let output_metrics = metrics.register_output("interval-groups-output");
+        let mut pending = HashMap::new();
+        let mut passthrough = VecDeque::new();
+        for (channel, interval_ms) in [
+            ("events:200", 200),
+            ("events:250", 250),
+            ("events:300", 300),
+        ] {
+            let mut message = pending_message(channel, channel.as_bytes().to_vec());
+            message.conflation_interval_ms = interval_ms;
+            pending.insert(channel.to_owned(), message);
+        }
+        let mut cache = DeduplicationCache::new(0);
+        let mut publisher = RecordingPublisher::default();
+
+        for (elapsed_ms, due_interval_ms) in [(200, 200), (250, 250), (300, 300)] {
+            let due =
+                advance_due_schedules(&mut schedules, started + Duration::from_millis(elapsed_ms));
+            assert_eq!(due, [due_interval_ms]);
+            let mut failure_log = OutputFailureLog::default();
+            let mut context = publish_context_for_test(
+                "interval-groups-output",
+                &mut failure_log,
+                &mut cache,
+                &metrics,
+                &output_metrics,
+            );
+            publish_conflated_interval_pending(
+                &mut publisher,
+                &mut pending,
+                &mut passthrough,
+                Some(due_interval_ms),
+                256,
+                usize::MAX,
+                &mut context,
+            )
+            .await;
+            assert!(!pending.contains_key(&format!("events:{due_interval_ms}")));
+            assert_eq!(pending.len(), (300 - due_interval_ms) as usize / 50);
+        }
+
+        assert!(pending.is_empty());
+        assert_eq!(
+            publisher
+                .attempts
+                .iter()
+                .flat_map(|(_, batch)| batch.iter().map(|message| message.conflation_interval_ms))
+                .collect::<Vec<_>>(),
+            [200, 250, 300]
+        );
+        assert_eq!(
+            advance_due_schedules(&mut schedules, started + Duration::from_millis(400)),
+            [200]
+        );
+        assert_eq!(
+            advance_due_schedules(&mut schedules, started + Duration::from_millis(500)),
+            [250]
+        );
+        assert_eq!(
+            advance_due_schedules(&mut schedules, started + Duration::from_millis(600)),
+            [200, 300]
+        );
+    }
+
+    #[test]
+    fn channel_ttls_expire_independently() {
+        let now = time::Instant::now();
+        let short = pending_message("events:short", b"same".to_vec());
+        let mut short = short;
+        short.deduplication_ttl_ms = Some(10);
+        let mut long = pending_message("events:long", b"same".to_vec());
+        long.deduplication_ttl_ms = Some(100);
+        let mut cache = DeduplicationCache::new(5000);
+        cache.remember(&[short.clone(), long.clone()], now);
+
+        assert!(!cache.should_suppress(&short, now + Duration::from_millis(10)));
+        assert!(cache.should_suppress(&long, now + Duration::from_millis(10)));
+        assert!(!cache.should_suppress(&long, now + Duration::from_millis(100)));
+    }
+
+    #[test]
+    fn fixed_group_deadline_expires_all_sibling_members_together() {
+        let now = time::Instant::now();
+        let groups = group_settings(600, false);
+        let mut cache = DeduplicationCache::with_groups(5000, &groups);
+        let first_channel = pending_group_message("events:first", b"first", "shared");
+        let sibling_channel = pending_group_message("events:sibling", b"sibling", "shared");
+        let changed_first_channel = pending_group_message("events:first", b"changed", "shared");
+
+        cache.remember(std::slice::from_ref(&first_channel), now);
+        cache.remember(
+            std::slice::from_ref(&sibling_channel),
+            now + Duration::from_millis(100),
+        );
+        cache.remember(
+            std::slice::from_ref(&changed_first_channel),
+            now + Duration::from_millis(250),
+        );
+
+        assert!(cache.should_suppress(&changed_first_channel, now + Duration::from_millis(599)));
+        assert!(cache.should_suppress(&sibling_channel, now + Duration::from_millis(599)));
+        assert!(!cache.should_suppress(&changed_first_channel, now + Duration::from_millis(600)));
+        assert!(!cache.should_suppress(&sibling_channel, now + Duration::from_millis(600)));
+        assert!(!cache.groups.contains_key("shared"));
+    }
+
+    #[test]
+    fn new_group_member_renews_shared_deadline_when_enabled() {
+        let now = time::Instant::now();
+        let groups = group_settings(600, true);
+        let mut cache = DeduplicationCache::with_groups(5000, &groups);
+        let first_channel = pending_group_message("events:first", b"first", "shared");
+        let sibling_channel = pending_group_message("events:sibling", b"sibling", "shared");
+
+        cache.remember(std::slice::from_ref(&first_channel), now);
+        cache.remember(
+            std::slice::from_ref(&sibling_channel),
+            now + Duration::from_millis(100),
+        );
+
+        assert_eq!(
+            cache.groups["shared"].expires_at,
+            now + Duration::from_millis(700)
+        );
+        assert!(cache.should_suppress(&sibling_channel, now + Duration::from_millis(600)));
+        assert!(!cache.should_suppress(&sibling_channel, now + Duration::from_millis(700)));
+        assert!(!cache.groups.contains_key("shared"));
+    }
+
+    #[test]
+    fn group_cache_evicts_least_recently_used_members_at_capacity() {
+        let now = time::Instant::now();
+        let groups = group_settings_with_limits(600, true, 0, 2, 4);
+        let mut cache = DeduplicationCache::with_groups(5000, &groups);
+        let first = pending_group_message("a", b"1", "shared");
+        let second = pending_group_message("b", b"2", "shared");
+        let third = pending_group_message("c", b"3", "shared");
+
+        cache.remember_at(std::slice::from_ref(&first), now, 10_000);
+        cache.remember_at(
+            std::slice::from_ref(&second),
+            now + Duration::from_millis(1),
+            10_001,
+        );
+        assert!(cache.should_suppress(&first, now + Duration::from_millis(2)));
+        cache.remember_at(
+            std::slice::from_ref(&third),
+            now + Duration::from_millis(3),
+            10_003,
+        );
+
+        let group = &cache.groups["shared"];
+        assert_eq!(group.entries.len(), 2);
+        assert_eq!(group.cache_bytes, 4);
+        assert!(cache.should_suppress(&first, now + Duration::from_millis(4)));
+        assert!(!cache.should_suppress(&second, now + Duration::from_millis(4)));
+        assert!(cache.should_suppress(&third, now + Duration::from_millis(4)));
+    }
+
+    #[test]
+    fn group_cache_does_not_retain_a_member_larger_than_its_byte_budget() {
+        let now = time::Instant::now();
+        let groups = group_settings_with_limits(600, false, 0, 4, 5);
+        let mut cache = DeduplicationCache::with_groups(5000, &groups);
+        let large = pending_group_message("large", b"payload", "shared");
+
+        cache.remember_at(std::slice::from_ref(&large), now, 10_000);
+
+        let group = &cache.groups["shared"];
+        assert!(group.entries.is_empty());
+        assert_eq!(group.cache_bytes, 0);
+        assert!(!cache.should_suppress(&large, now + Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn group_rounding_anchors_expiry_to_epoch_window() {
+        let now = time::Instant::now();
+        let groups = group_settings_with_round(300, false, 100);
+        let mut cache = DeduplicationCache::with_groups(5000, &groups);
+        let message = pending_group_message("events:rounded", b"payload", "shared");
+
+        cache.remember_at(std::slice::from_ref(&message), now, 255);
+
+        assert_eq!(
+            cache.groups["shared"].expires_at,
+            now + Duration::from_millis(245)
+        );
+        assert!(cache.should_suppress(&message, now + Duration::from_millis(244)));
+        assert!(!cache.should_suppress(&message, now + Duration::from_millis(245)));
+    }
+
+    #[test]
+    fn zero_group_rounding_keeps_exact_ttl_deadline() {
+        let now = time::Instant::now();
+        let groups = group_settings(300, false);
+        let mut cache = DeduplicationCache::with_groups(5000, &groups);
+        let message = pending_group_message("events:exact", b"payload", "shared");
+
+        cache.remember_at(std::slice::from_ref(&message), now, 255);
+
+        assert_eq!(
+            cache.groups["shared"].expires_at,
+            now + Duration::from_millis(300)
+        );
+        assert!(cache.should_suppress(&message, now + Duration::from_millis(299)));
+        assert!(!cache.should_suppress(&message, now + Duration::from_millis(300)));
+    }
+
+    #[test]
+    fn changed_existing_group_member_renews_shared_sibling_deadline() {
+        let now = time::Instant::now();
+        let groups = group_settings(600, true);
+        let mut cache = DeduplicationCache::with_groups(5000, &groups);
+        let first_channel = pending_group_message("events:first", b"first", "shared");
+        let sibling_channel = pending_group_message("events:sibling", b"sibling", "shared");
+
+        cache.remember(std::slice::from_ref(&first_channel), now);
+        cache.remember(std::slice::from_ref(&sibling_channel), now);
+        let changed_first_channel = pending_group_message("events:first", b"changed", "shared");
+        assert!(!cache.should_suppress(&changed_first_channel, now + Duration::from_millis(300)));
+        cache.remember(
+            std::slice::from_ref(&changed_first_channel),
+            now + Duration::from_millis(300),
+        );
+
+        assert!(cache.should_suppress(&sibling_channel, now + Duration::from_millis(700)));
+        assert_eq!(
+            cache.groups["shared"].expires_at,
+            now + Duration::from_millis(900)
+        );
+        assert!(!cache.should_suppress(&sibling_channel, now + Duration::from_millis(900)));
+        assert!(!cache.groups.contains_key("shared"));
+    }
+
+    #[test]
+    fn channel_deduplication_disable_does_not_disable_conflation() {
+        let config = output_config_with_policies(
+            0,
+            5000,
+            vec![channel_policy(
+                None,
+                Some("events:"),
+                None,
+                Some(100),
+                Some(0),
+            )],
+        );
+        let resolved = resolve_channel_policy(&config, "events:live");
+        assert_eq!(resolved.interval_ms, 100);
+        assert_eq!(resolved.deduplication_ttl_ms, 0);
+
+        let metrics = Metrics::new();
+        let output_metrics = metrics.register_output("channel-no-dedup-output");
+        let mut pending = HashMap::new();
+        let mut passthrough = VecDeque::new();
+        let mut cache = DeduplicationCache::new(config.deduplication.ttl_ms);
+        for payload in [b"first".to_vec(), b"latest".to_vec()] {
+            enqueue_for_test_with_policy_at(
+                InboundMessage {
+                    output_channel: "events:live".to_owned(),
+                    payload,
+                },
+                &mut pending,
+                &mut passthrough,
+                &metrics,
+                &output_metrics,
+                &mut cache,
+                time::Instant::now(),
+                OutputMessagePolicy {
+                    interval_ms: resolved.interval_ms,
+                    deduplication_ttl_ms: Some(resolved.deduplication_ttl_ms),
+                    deduplication_group: resolved.deduplication_group.clone(),
+                    max_bytes_per_exec: usize::MAX,
+                    oversized_policy: OversizedMessagePolicy::Send,
+                },
+            );
+        }
+        assert!(passthrough.is_empty());
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending["events:live"].payload, b"latest");
+        assert!(cache.entries.is_empty());
+        assert_eq!(metrics.conflated_messages_total.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn nonpositive_group_ttl_disables_deduplication_but_keeps_conflation() {
+        let metrics = Metrics::new();
+        let output_metrics = metrics.register_output("disabled-group-output");
+        let groups = group_settings(0, true);
+        let mut cache = DeduplicationCache::with_groups(5000, &groups);
+        let mut pending = HashMap::new();
+        let mut passthrough = VecDeque::new();
+
+        for payload in [b"first".to_vec(), b"latest".to_vec()] {
+            metrics.record_output_input(&output_metrics, payload.len());
+            enqueue_for_test_with_policy_at(
+                InboundMessage {
+                    output_channel: "events:live".to_owned(),
+                    payload,
+                },
+                &mut pending,
+                &mut passthrough,
+                &metrics,
+                &output_metrics,
+                &mut cache,
+                time::Instant::now(),
+                OutputMessagePolicy {
+                    interval_ms: 100,
+                    deduplication_ttl_ms: Some(5000),
+                    deduplication_group: Some("shared".to_owned()),
+                    max_bytes_per_exec: usize::MAX,
+                    oversized_policy: OversizedMessagePolicy::Send,
+                },
+            );
+        }
+
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending["events:live"].payload, b"latest");
+        assert_eq!(metrics.conflated_messages_total.load(Ordering::Relaxed), 1);
+
+        let mut publisher = RecordingPublisher::default();
+        flush_conflated_for_test(
+            "disabled-group-output",
+            &mut publisher,
+            &mut pending,
+            &mut cache,
+            &metrics,
+            &output_metrics,
+        )
+        .await;
+
+        assert_eq!(publisher.successful_batches.len(), 1);
+        assert_eq!(publisher.successful_batches[0][0].payload, b"latest");
+        assert!(cache.groups.is_empty());
+        let output = &metrics.snapshot().outputs["disabled-group-output"];
+        assert_eq!(output.deduplicated_messages_total, 0);
+        assert_eq!(output.output_messages_total, 1);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn enqueue_for_test_with_policy_at(
+        message: InboundMessage,
+        pending: &mut HashMap<String, PendingMessage>,
+        passthrough: &mut VecDeque<PendingMessage>,
+        metrics: &Metrics,
+        output_metrics: &OutputMetrics,
+        deduplication_cache: &mut DeduplicationCache,
+        now: time::Instant,
+        policy: OutputMessagePolicy,
+    ) {
+        let mut policy_log = OversizedPolicyLog::default();
+        let mut context = OutputMessageContext {
+            name: "test-output",
+            policy,
             metrics,
             output_metrics,
             policy_log: &mut policy_log,
         };
-        enqueue_message(message, pending, passthrough, &mut context);
+        enqueue_message(
+            message,
+            pending,
+            passthrough,
+            &mut context,
+            deduplication_cache,
+            now,
+        );
     }
 
     fn publish_context_for_test<'a>(
         name: &'a str,
         failure_log: &'a mut OutputFailureLog,
+        deduplication_cache: &'a mut DeduplicationCache,
         metrics: &'a Metrics,
         output_metrics: &'a OutputMetrics,
     ) -> OutputPublishContext<'a> {
         OutputPublishContext {
             name,
             failure_log,
+            deduplication_cache,
             metrics,
             output_metrics,
         }
+    }
+
+    async fn flush_passthrough_for_test(
+        name: &str,
+        publisher: &mut RecordingPublisher,
+        pending: &mut HashMap<String, PendingMessage>,
+        passthrough: &mut VecDeque<PendingMessage>,
+        cache: &mut DeduplicationCache,
+        metrics: &Metrics,
+        output_metrics: &OutputMetrics,
+    ) {
+        let mut failure_log = OutputFailureLog::default();
+        let mut context =
+            publish_context_for_test(name, &mut failure_log, cache, metrics, output_metrics);
+        publish_passthrough_pending(publisher, pending, passthrough, &mut context).await;
+    }
+
+    async fn flush_conflated_for_test(
+        name: &str,
+        publisher: &mut RecordingPublisher,
+        pending: &mut HashMap<String, PendingMessage>,
+        cache: &mut DeduplicationCache,
+        metrics: &Metrics,
+        output_metrics: &OutputMetrics,
+    ) {
+        let mut failure_log = OutputFailureLog::default();
+        let mut context =
+            publish_context_for_test(name, &mut failure_log, cache, metrics, output_metrics);
+        publish_conflated_pending(publisher, pending, 256, usize::MAX, &mut context).await;
     }
 
     fn prepare_for_test(
@@ -1527,6 +2994,493 @@ mod tests {
     }
 
     #[test]
+    fn deduplication_compares_output_channel_and_payload_bytes_until_ttl_expiry() {
+        let ttl = Duration::from_millis(5000);
+        let started = time::Instant::now();
+        let mut cache = DeduplicationCache::new(5000);
+        let first = pending_message("events:a", vec![0, 255]);
+        cache.remember(std::slice::from_ref(&first), started);
+
+        assert!(cache.should_suppress(&first, started + Duration::from_millis(4999)));
+        assert!(!cache.should_suppress(
+            &pending_message("events:b", first.payload.clone()),
+            started + Duration::from_millis(1),
+        ));
+        assert!(!cache.should_suppress(
+            &pending_message(&first.output_channel, vec![0, 254]),
+            started + Duration::from_millis(1),
+        ));
+        assert!(!cache.should_suppress(&first, started + ttl));
+        assert!(cache.entries.is_empty());
+    }
+
+    #[test]
+    fn per_channel_cache_remembers_only_the_latest_published_payload() {
+        let now = time::Instant::now();
+        let mut cache = DeduplicationCache::new(5000);
+        let a = pending_message("events", b"A".to_vec());
+        let b = pending_message("events", b"B".to_vec());
+
+        cache.remember(std::slice::from_ref(&a), now);
+        assert!(!cache.should_suppress(&b, now + Duration::from_millis(1)));
+        cache.remember(std::slice::from_ref(&b), now + Duration::from_millis(1));
+        assert!(!cache.should_suppress(&a, now + Duration::from_millis(2)));
+        cache.remember(std::slice::from_ref(&a), now + Duration::from_millis(2));
+
+        assert!(cache.should_suppress(&a, now + Duration::from_millis(3)));
+        assert!(!cache.should_suppress(&b, now + Duration::from_millis(3)));
+    }
+
+    #[test]
+    fn deduplication_isolated_per_output_and_zero_ttl_disables_it() {
+        let now = time::Instant::now();
+        let message = pending_message("events", b"same".to_vec());
+        let mut first_output = DeduplicationCache::new(5000);
+        let mut second_output = DeduplicationCache::new(5000);
+        let mut disabled_output = DeduplicationCache::new(0);
+        let mut negative_ttl_output = DeduplicationCache::new(-1);
+        first_output.remember(std::slice::from_ref(&message), now);
+
+        assert!(first_output.should_suppress(&message, now));
+        assert!(!second_output.should_suppress(&message, now));
+        assert!(!disabled_output.should_suppress(&message, now));
+        assert!(!negative_ttl_output.should_suppress(&message, now));
+        disabled_output.remember(std::slice::from_ref(&message), now);
+        negative_ttl_output.remember(std::slice::from_ref(&message), now);
+        assert!(disabled_output.entries.is_empty());
+        assert!(negative_ttl_output.entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn conflated_value_returning_to_cached_value_is_suppressed_at_flush() {
+        let metrics = Metrics::new();
+        let output_metrics = metrics.register_output("dedup-output");
+        let mut pending = HashMap::new();
+        let mut passthrough = VecDeque::new();
+        let mut cache = DeduplicationCache::new(5000);
+        let last_published = pending_message("events", b"published".to_vec());
+        cache.remember(std::slice::from_ref(&last_published), time::Instant::now());
+
+        let changed = b"changed".to_vec();
+        metrics.record_output_input(&output_metrics, changed.len());
+        enqueue_for_test_with_cache(
+            100,
+            InboundMessage {
+                output_channel: "events".to_owned(),
+                payload: changed,
+            },
+            &mut pending,
+            &mut passthrough,
+            &metrics,
+            &output_metrics,
+            &mut cache,
+        );
+        assert_eq!(pending["events"].raw_payload(), b"changed");
+
+        let returned = b"published".to_vec();
+        metrics.record_output_input(&output_metrics, returned.len());
+        enqueue_for_test_with_cache(
+            100,
+            InboundMessage {
+                output_channel: "events".to_owned(),
+                payload: returned,
+            },
+            &mut pending,
+            &mut passthrough,
+            &metrics,
+            &output_metrics,
+            &mut cache,
+        );
+
+        assert_eq!(pending["events"].raw_payload(), b"published");
+        assert!(passthrough.is_empty());
+        assert_eq!(
+            metrics.deduplicated_messages_total.load(Ordering::Relaxed),
+            0
+        );
+
+        let mut publisher = RecordingPublisher::default();
+        let mut failure_log = OutputFailureLog::default();
+        let mut publish_context = publish_context_for_test(
+            "dedup-output",
+            &mut failure_log,
+            &mut cache,
+            &metrics,
+            &output_metrics,
+        );
+        publish_conflated_pending(
+            &mut publisher,
+            &mut pending,
+            256,
+            usize::MAX,
+            &mut publish_context,
+        )
+        .await;
+
+        assert!(pending.is_empty());
+        assert!(publisher.attempts.is_empty());
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.deduplicated_messages_total, 1);
+        assert_eq!(snapshot.deduplicated_payload_bytes_total, 9);
+        assert_eq!(snapshot.conflated_messages_total, 1);
+        assert_eq!(snapshot.conflated_payload_bytes_total, 7);
+        assert_eq!(
+            snapshot.outputs["dedup-output"].deduplicated_messages_total,
+            1
+        );
+        assert_eq!(
+            snapshot.outputs["dedup-output"].deduplicated_payload_bytes_total,
+            9
+        );
+        assert_eq!(snapshot.outputs["dedup-output"].pending_messages, 0);
+        assert_eq!(snapshot.outputs["dedup-output"].pending_payload_bytes, 0);
+        assert_eq!(snapshot.outputs["dedup-output"].pending_keys, 0);
+        assert_eq!(snapshot.pending_keys, 0);
+    }
+
+    #[tokio::test]
+    async fn conflation_publishes_only_the_final_changed_value_in_a_window() {
+        let metrics = Metrics::new();
+        let output_metrics = metrics.register_output("conflate-final-output");
+        let mut pending = HashMap::new();
+        let mut cache = DeduplicationCache::new(5000);
+        let last_published = pending_message("events", b"A".to_vec());
+        cache.remember(std::slice::from_ref(&last_published), time::Instant::now());
+
+        for payload in [b"B".to_vec(), b"C".to_vec()] {
+            metrics.record_output_input(&output_metrics, payload.len());
+            enqueue_for_test_with_cache(
+                100,
+                InboundMessage {
+                    output_channel: "events".to_owned(),
+                    payload,
+                },
+                &mut pending,
+                &mut VecDeque::new(),
+                &metrics,
+                &output_metrics,
+                &mut cache,
+            );
+        }
+        assert_eq!(pending["events"].raw_payload(), b"C");
+
+        let mut publisher = RecordingPublisher::default();
+        flush_conflated_for_test(
+            "conflate-final-output",
+            &mut publisher,
+            &mut pending,
+            &mut cache,
+            &metrics,
+            &output_metrics,
+        )
+        .await;
+
+        assert_eq!(publisher.successful_batches.len(), 1);
+        assert_eq!(publisher.successful_batches[0][0].payload, b"C");
+        assert_eq!(publisher.attempts.len(), 1);
+        let output = &metrics.snapshot().outputs["conflate-final-output"];
+        assert_eq!(output.deduplicated_messages_total, 0);
+        assert_eq!(output.conflated_messages_total, 1);
+        assert_eq!(output.output_messages_total, 1);
+        assert_eq!(output.pending_messages, 0);
+        assert_eq!(output.pending_payload_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn conflated_deduplication_skips_removed_channels_across_exec_chunks() {
+        let metrics = Metrics::new();
+        let output_metrics = metrics.register_output("chunked-dedup-output");
+        let mut pending = HashMap::new();
+        let mut passthrough = VecDeque::new();
+        let mut cache = DeduplicationCache::new(5000);
+        cache.remember(
+            &[pending_message("events:b", b"cached".to_vec())],
+            time::Instant::now(),
+        );
+
+        for (channel, payload) in [
+            ("events:a", b"first".to_vec()),
+            ("events:b", b"cached".to_vec()),
+            ("events:c", b"last".to_vec()),
+        ] {
+            metrics.record_output_input(&output_metrics, payload.len());
+            enqueue_for_test_with_cache(
+                100,
+                InboundMessage {
+                    output_channel: channel.to_owned(),
+                    payload,
+                },
+                &mut pending,
+                &mut passthrough,
+                &metrics,
+                &output_metrics,
+                &mut cache,
+            );
+        }
+
+        let mut publisher = RecordingPublisher::default();
+        let mut failure_log = OutputFailureLog::default();
+        let mut publish_context = publish_context_for_test(
+            "chunked-dedup-output",
+            &mut failure_log,
+            &mut cache,
+            &metrics,
+            &output_metrics,
+        );
+        publish_conflated_pending(
+            &mut publisher,
+            &mut pending,
+            1,
+            usize::MAX,
+            &mut publish_context,
+        )
+        .await;
+
+        let published_channels = publisher
+            .attempts
+            .iter()
+            .flat_map(|(_, batch)| batch.iter().map(|message| message.output_channel.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(published_channels, ["events:a", "events:c"]);
+        assert!(pending.is_empty());
+        let output = &metrics.snapshot().outputs["chunked-dedup-output"];
+        assert_eq!(output.deduplicated_messages_total, 1);
+        assert_eq!(output.deduplicated_payload_bytes_total, 6);
+        assert_eq!(output.pending_messages, 0);
+        assert_eq!(output.pending_payload_bytes, 0);
+        assert_eq!(output.pending_keys, 0);
+    }
+
+    #[tokio::test]
+    async fn nonpositive_ttl_keeps_normal_conflation_enabled() {
+        for ttl_ms in [0, -1] {
+            let metrics = Metrics::new();
+            let output_metrics = metrics.register_output("disabled-dedup-output");
+            let mut pending = HashMap::new();
+            let mut cache = DeduplicationCache::new(ttl_ms);
+
+            for payload in [b"first".to_vec(), b"latest".to_vec()] {
+                metrics.record_output_input(&output_metrics, payload.len());
+                enqueue_for_test_with_cache(
+                    100,
+                    InboundMessage {
+                        output_channel: "events".to_owned(),
+                        payload,
+                    },
+                    &mut pending,
+                    &mut VecDeque::new(),
+                    &metrics,
+                    &output_metrics,
+                    &mut cache,
+                );
+            }
+            assert_eq!(pending["events"].payload, b"latest");
+
+            let mut publisher = RecordingPublisher::default();
+            flush_conflated_for_test(
+                "disabled-dedup-output",
+                &mut publisher,
+                &mut pending,
+                &mut cache,
+                &metrics,
+                &output_metrics,
+            )
+            .await;
+
+            assert_eq!(publisher.successful_batches.len(), 1);
+            assert_eq!(publisher.successful_batches[0][0].payload, b"latest");
+            let output = &metrics.snapshot().outputs["disabled-dedup-output"];
+            assert_eq!(output.deduplicated_messages_total, 0);
+            assert_eq!(output.conflated_messages_total, 1);
+            assert_eq!(output.pending_messages, 0);
+            assert_eq!(output.pending_payload_bytes, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_mode_publishes_changed_values_and_suppresses_repeats() {
+        let metrics = Metrics::new();
+        let output_metrics = metrics.register_output("direct-changes-output");
+        let mut pending = HashMap::new();
+        let mut passthrough = VecDeque::new();
+        let mut cache = DeduplicationCache::new(5000);
+        let mut publisher = RecordingPublisher::default();
+
+        for payload in [b"A".to_vec(), b"B".to_vec(), b"B".to_vec()] {
+            metrics.record_output_input(&output_metrics, payload.len());
+            enqueue_for_test_with_cache(
+                0,
+                InboundMessage {
+                    output_channel: "events".to_owned(),
+                    payload,
+                },
+                &mut pending,
+                &mut passthrough,
+                &metrics,
+                &output_metrics,
+                &mut cache,
+            );
+            flush_passthrough_for_test(
+                "direct-changes-output",
+                &mut publisher,
+                &mut pending,
+                &mut passthrough,
+                &mut cache,
+                &metrics,
+                &output_metrics,
+            )
+            .await;
+        }
+
+        assert_eq!(publisher.successful_batches.len(), 2);
+        assert_eq!(publisher.successful_batches[0][0].payload, b"A");
+        assert_eq!(publisher.successful_batches[1][0].payload, b"B");
+        let output = &metrics.snapshot().outputs["direct-changes-output"];
+        assert_eq!(output.deduplicated_messages_total, 1);
+        assert_eq!(output.deduplicated_payload_bytes_total, 1);
+        assert_eq!(output.pending_messages, 0);
+        assert_eq!(output.pending_payload_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn truncate_deduplication_compares_the_raw_input_payload() {
+        let metrics = Metrics::new();
+        let output_metrics = metrics.register_output("raw-truncate-dedup-output");
+        let mut pending = HashMap::new();
+        let mut passthrough = VecDeque::new();
+        let mut cache = DeduplicationCache::new(5000);
+        let mut publisher = RecordingPublisher::default();
+        let channel = "events";
+        let max_bytes = publish_command_frame_bytes_for_lengths(channel.len(), 2);
+        let policy = OutputMessagePolicy {
+            interval_ms: 0,
+            deduplication_ttl_ms: None,
+            deduplication_group: None,
+            max_bytes_per_exec: max_bytes,
+            oversized_policy: OversizedMessagePolicy::Truncate,
+        };
+
+        for payload in [vec![0, 1, 2], vec![0, 1, 3]] {
+            metrics.record_output_input(&output_metrics, payload.len());
+            enqueue_for_test_with_policy_at(
+                InboundMessage {
+                    output_channel: channel.to_owned(),
+                    payload,
+                },
+                &mut pending,
+                &mut passthrough,
+                &metrics,
+                &output_metrics,
+                &mut cache,
+                time::Instant::now(),
+                policy.clone(),
+            );
+            flush_passthrough_for_test(
+                "raw-truncate-dedup-output",
+                &mut publisher,
+                &mut pending,
+                &mut passthrough,
+                &mut cache,
+                &metrics,
+                &output_metrics,
+            )
+            .await;
+        }
+
+        assert_eq!(publisher.successful_batches.len(), 2);
+        assert_eq!(publisher.successful_batches[0][0].payload, [0, 1]);
+        assert_eq!(publisher.successful_batches[1][0].payload, [0, 1]);
+        assert_eq!(
+            cache.entries["events"].raw_payload,
+            [0, 1, 3],
+            "the TTL cache must retain the untruncated input"
+        );
+
+        let repeated = vec![0, 1, 3];
+        metrics.record_output_input(&output_metrics, repeated.len());
+        enqueue_for_test_with_policy_at(
+            InboundMessage {
+                output_channel: channel.to_owned(),
+                payload: repeated,
+            },
+            &mut pending,
+            &mut passthrough,
+            &metrics,
+            &output_metrics,
+            &mut cache,
+            time::Instant::now(),
+            policy,
+        );
+
+        assert!(passthrough.is_empty());
+        let output = &metrics.snapshot().outputs["raw-truncate-dedup-output"];
+        assert_eq!(output.deduplicated_messages_total, 1);
+        assert_eq!(output.deduplicated_payload_bytes_total, 3);
+        assert_eq!(output.pending_messages, 0);
+        assert_eq!(output.pending_payload_bytes, 0);
+    }
+
+    #[test]
+    fn direct_queue_deduplicates_inside_ttl_and_accepts_same_value_after_expiry() {
+        let metrics = Metrics::new();
+        let output_metrics = metrics.register_output("direct-dedup-output");
+        let mut pending = HashMap::new();
+        let mut passthrough = VecDeque::new();
+        let mut cache = DeduplicationCache::new(5000);
+        let published = pending_message("events", vec![0, 255]);
+        let now = time::Instant::now();
+        cache.remember(std::slice::from_ref(&published), now);
+
+        for (payload, enqueued_at) in [
+            (published.payload.clone(), now + Duration::from_millis(1)),
+            (published.payload.clone(), now + Duration::from_millis(2)),
+        ] {
+            metrics.record_output_input(&output_metrics, payload.len());
+            enqueue_for_test_with_cache_at(
+                0,
+                InboundMessage {
+                    output_channel: published.output_channel.clone(),
+                    payload,
+                },
+                &mut pending,
+                &mut passthrough,
+                &metrics,
+                &output_metrics,
+                &mut cache,
+                enqueued_at,
+            );
+        }
+        assert!(passthrough.is_empty());
+
+        metrics.record_output_input(&output_metrics, published.payload.len());
+        enqueue_for_test_with_cache_at(
+            0,
+            InboundMessage {
+                output_channel: published.output_channel,
+                payload: published.payload,
+            },
+            &mut pending,
+            &mut passthrough,
+            &metrics,
+            &output_metrics,
+            &mut cache,
+            now + Duration::from_millis(5000),
+        );
+
+        assert_eq!(passthrough.len(), 1);
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.deduplicated_messages_total, 2);
+        assert_eq!(snapshot.deduplicated_payload_bytes_total, 4);
+        assert_eq!(snapshot.outputs["direct-dedup-output"].pending_messages, 1);
+        assert_eq!(
+            snapshot.outputs["direct-dedup-output"].pending_payload_bytes,
+            2
+        );
+        assert_eq!(snapshot.outputs["direct-dedup-output"].pending_keys, 1);
+        assert_eq!(snapshot.pending_keys, 1);
+    }
+
+    #[test]
     fn nonpositive_interval_keeps_every_incoming_message_in_order() {
         let metrics = Metrics::new();
         let output_metrics = metrics.register_output("arbitrary-name");
@@ -1593,8 +3547,14 @@ mod tests {
             ..RecordingPublisher::default()
         };
         let mut failure_log = OutputFailureLog::default();
-        let mut publish_context =
-            publish_context_for_test("custom-output", &mut failure_log, &metrics, &output_metrics);
+        let mut deduplication_cache = DeduplicationCache::new(5000);
+        let mut publish_context = publish_context_for_test(
+            "custom-output",
+            &mut failure_log,
+            &mut deduplication_cache,
+            &metrics,
+            &output_metrics,
+        );
         publish_conflated_pending(
             &mut publisher,
             &mut pending,
@@ -1626,6 +3586,14 @@ mod tests {
         );
         assert_eq!(publisher.possible_executions.len(), 1);
         assert_eq!(publisher.possible_executions[0].len(), 2);
+        assert_eq!(
+            deduplication_cache.entries["events:a"].raw_payload,
+            [0, b'a']
+        );
+        assert_eq!(
+            deduplication_cache.entries["events:b"].raw_payload,
+            [0, b'b']
+        );
 
         let published = publisher
             .successful_batches
@@ -1687,8 +3655,14 @@ mod tests {
             ..RecordingPublisher::default()
         };
         let mut failure_log = OutputFailureLog::default();
-        let mut publish_context =
-            publish_context_for_test("failed-output", &mut failure_log, &metrics, &output_metrics);
+        let mut deduplication_cache = DeduplicationCache::new(5000);
+        let mut publish_context = publish_context_for_test(
+            "failed-output",
+            &mut failure_log,
+            &mut deduplication_cache,
+            &metrics,
+            &output_metrics,
+        );
         publish_conflated_pending(
             &mut publisher,
             &mut pending,
@@ -1703,6 +3677,9 @@ mod tests {
         assert_eq!(publisher.attempts[0].1[1].output_channel, "events:b");
         assert_eq!(publisher.attempts[1].1[0].output_channel, "events:c");
         assert_eq!(publisher.successful_batches.len(), 1);
+        assert!(!deduplication_cache.entries.contains_key("events:a"));
+        assert!(!deduplication_cache.entries.contains_key("events:b"));
+        assert!(deduplication_cache.entries.contains_key("events:c"));
         let output = &metrics.snapshot().outputs["failed-output"];
         assert_eq!(output.dropped_messages_total, 2);
         assert_eq!(output.dropped_payload_bytes_total, 2);
@@ -1737,14 +3714,19 @@ mod tests {
             ..RecordingPublisher::default()
         };
         let mut failure_log = OutputFailureLog::default();
-        publish_passthrough_pending(
+        let mut deduplication_cache = DeduplicationCache::new(5000);
+        let mut publish_context = publish_context_for_test(
             "immediate-output",
+            &mut failure_log,
+            &mut deduplication_cache,
+            &metrics,
+            &output_metrics,
+        );
+        publish_passthrough_pending(
             &mut publisher,
             &mut pending,
             &mut passthrough,
-            &mut failure_log,
-            &metrics,
-            &output_metrics,
+            &mut publish_context,
         )
         .await;
 
@@ -1753,6 +3735,7 @@ mod tests {
         assert_eq!(publisher.possible_executions.len(), 1);
         assert_eq!(publisher.possible_executions[0][0].payload, [0, 255]);
         assert_eq!(publisher.successful_batches.len(), 1);
+        assert_eq!(deduplication_cache.entries["events"].raw_payload, b"later");
         assert_eq!(publisher.successful_batches[0][0].payload, b"later");
         let output = &metrics.snapshot().outputs["immediate-output"];
         assert_eq!(output.uncertain_transactions_total, 1);
@@ -1763,16 +3746,75 @@ mod tests {
         assert_eq!(output.pending_payload_bytes, 0);
     }
 
+    #[tokio::test]
+    async fn cache_records_acknowledged_and_ambiguous_sends_but_not_pre_send_failures() {
+        let metrics = Metrics::new();
+        let output_metrics = metrics.register_output("send-certainty-output");
+        let groups = group_settings(5000, true);
+        let message = pending_group_message("events", b"payload", "shared");
+
+        let mut not_sent_cache = DeduplicationCache::with_groups(5000, &groups);
+        let mut not_sent_publisher = RecordingPublisher {
+            not_sent_failures_remaining: 1,
+            ..RecordingPublisher::default()
+        };
+        let mut not_sent_log = OutputFailureLog::default();
+        {
+            let mut not_sent_context = publish_context_for_test(
+                "send-certainty-output",
+                &mut not_sent_log,
+                &mut not_sent_cache,
+                &metrics,
+                &output_metrics,
+            );
+            assert!(
+                publish_once(
+                    &mut not_sent_publisher,
+                    std::slice::from_ref(&message),
+                    false,
+                    &mut not_sent_context,
+                )
+                .await
+                .is_err()
+            );
+        }
+        assert!(not_sent_cache.entries.is_empty());
+        assert!(not_sent_cache.groups.is_empty());
+        assert!(!not_sent_cache.should_suppress(&message, time::Instant::now()));
+
+        let mut uncertain_cache = DeduplicationCache::with_groups(5000, &groups);
+        let mut uncertain_publisher = RecordingPublisher {
+            uncertain_failures_remaining: 1,
+            ..RecordingPublisher::default()
+        };
+        let mut uncertain_log = OutputFailureLog::default();
+        {
+            let mut uncertain_context = publish_context_for_test(
+                "send-certainty-output",
+                &mut uncertain_log,
+                &mut uncertain_cache,
+                &metrics,
+                &output_metrics,
+            );
+            assert!(
+                publish_once(
+                    &mut uncertain_publisher,
+                    std::slice::from_ref(&message),
+                    false,
+                    &mut uncertain_context,
+                )
+                .await
+                .is_err()
+            );
+        }
+        assert!(uncertain_cache.should_suppress(&message, time::Instant::now()));
+        assert!(uncertain_cache.groups.contains_key("shared"));
+    }
+
     #[test]
     fn transaction_byte_limit_splits_at_the_exact_wire_size_boundary() {
-        let first = PendingMessage {
-            output_channel: "events:a".to_owned(),
-            payload: vec![0; 8],
-        };
-        let second = PendingMessage {
-            output_channel: "events:b".to_owned(),
-            payload: vec![255; 12],
-        };
+        let first = pending_message("events:a", vec![0; 8]);
+        let second = pending_message("events:b", vec![255; 12]);
         let pair = [first.clone(), second.clone()];
         let exact_limit = exec_transaction_frame_bytes(&pair);
         let pending = HashMap::from([
@@ -1800,14 +3842,8 @@ mod tests {
 
     #[test]
     fn oversized_send_keeps_the_message_as_a_singleton_chunk() {
-        let message = PendingMessage {
-            output_channel: "events:large".to_owned(),
-            payload: vec![0xff; 128],
-        };
-        let later = PendingMessage {
-            output_channel: "events:small".to_owned(),
-            payload: b"later".to_vec(),
-        };
+        let message = pending_message("events:large", vec![0xff; 128]);
+        let later = pending_message("events:small", b"later".to_vec());
         let limit = exec_transaction_frame_bytes(std::slice::from_ref(&later));
         assert!(exec_transaction_frame_bytes(std::slice::from_ref(&message)) > limit);
         let pending = HashMap::from([
@@ -1827,10 +3863,9 @@ mod tests {
         let output_metrics = metrics.register_output("truncate-output");
         let payload = vec![0, 255, 1, 254, 2, 253];
         metrics.record_output_input(&output_metrics, payload.len());
-        let expected_message = PendingMessage {
-            output_channel: "events:binary".to_owned(),
-            payload: payload[..3].to_vec(),
-        };
+        let mut expected_message =
+            pending_message_with_raw("events:binary", payload[..3].to_vec(), payload.clone());
+        expected_message.conflation_interval_ms = 10;
         let max_bytes = publish_operation_frame_bytes(&expected_message, true);
         let mut policy_log = OversizedPolicyLog::default();
 
@@ -1838,6 +3873,8 @@ mod tests {
             "truncate-output",
             OutputMessagePolicy {
                 interval_ms: 10,
+                deduplication_ttl_ms: None,
+                deduplication_group: None,
                 max_bytes_per_exec: max_bytes,
                 oversized_policy: OversizedMessagePolicy::Truncate,
             },
@@ -1866,13 +3903,8 @@ mod tests {
         let output_metrics = metrics.register_output("too-small-output");
         metrics.record_output_input(&output_metrics, 3);
         let channel = "events:long-channel";
-        let max_bytes = publish_operation_frame_bytes(
-            &PendingMessage {
-                output_channel: channel.to_owned(),
-                payload: Vec::new(),
-            },
-            true,
-        ) - 1;
+        let max_bytes =
+            publish_operation_frame_bytes(&pending_message(channel, Vec::new()), true) - 1;
         let mut policy_log = OversizedPolicyLog::default();
 
         assert!(
@@ -1880,6 +3912,8 @@ mod tests {
                 "too-small-output",
                 OutputMessagePolicy {
                     interval_ms: 10,
+                    deduplication_ttl_ms: None,
+                    deduplication_group: None,
                     max_bytes_per_exec: max_bytes,
                     oversized_policy: OversizedMessagePolicy::Truncate,
                 },
@@ -1913,6 +3947,8 @@ mod tests {
             "direct-truncate-output",
             OutputMessagePolicy {
                 interval_ms: 0,
+                deduplication_ttl_ms: None,
+                deduplication_group: None,
                 max_bytes_per_exec: max_bytes,
                 oversized_policy: OversizedMessagePolicy::Truncate,
             },
@@ -1947,6 +3983,8 @@ mod tests {
                 "drop-output",
                 OutputMessagePolicy {
                     interval_ms: 0,
+                    deduplication_ttl_ms: None,
+                    deduplication_group: None,
                     max_bytes_per_exec: 1,
                     oversized_policy: OversizedMessagePolicy::Drop,
                 },
@@ -2074,17 +4112,11 @@ mod tests {
         let pending = HashMap::from([
             (
                 "replica:b".to_owned(),
-                PendingMessage {
-                    output_channel: "replica:b".to_owned(),
-                    payload: vec![0, 255],
-                },
+                pending_message("replica:b", vec![0, 255]),
             ),
             (
                 "replica:a".to_owned(),
-                PendingMessage {
-                    output_channel: "replica:a".to_owned(),
-                    payload: b"value".to_vec(),
-                },
+                pending_message("replica:a", b"value".to_vec()),
             ),
         ]);
         let batch = pending_batch(10, 256, usize::MAX, &pending, &VecDeque::new());

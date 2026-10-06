@@ -1,4 +1,5 @@
 import json
+import os
 import select
 import time
 import urllib.request
@@ -22,7 +23,7 @@ START_CHANNEL = "test-control:start"
 DONE_CHANNEL = "test-control:done"
 FEED_CHANNELS = set(FEED_CHANNELS)
 EXPECTED_INPUT_PATTERN_COUNT = 3
-STATUS_URL = "http://10.253.240.20:9090/"
+STATUS_URL = os.environ.get("STATUS_URL", "http://service:9090/")
 
 
 def wait_for_input_subscriptions():

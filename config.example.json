@@ -37,7 +37,11 @@
       "channel_suffix": "",
       "conflation": {
         "interval_ms": 0,
-        "max_commands_per_exec": 256
+        "max_commands_per_exec": 256,
+        "oversized_message_policy": "send"
+      },
+      "deduplication": {
+        "ttl_ms": 5000
       }
     },
     "output1": {
@@ -55,8 +59,62 @@
       "conflation": {
         "interval_ms": 250,
         "max_commands_per_exec": 256,
-        "max_bytes_per_exec": 2097152
-      }
+        "max_bytes_per_exec": 2097152,
+        "oversized_message_policy": "send"
+      },
+      "deduplication": {
+        "ttl_ms": 5000
+      },
+      "deduplication_groups": {
+        "shared-events": {
+          "ttl_ms": 5000,
+          "round_ms": 1000,
+          "restart_on_change": false,
+          "max_members": 16384,
+          "max_cache_bytes": 67108864
+        }
+      },
+      "profiles": {
+        "fast-shared": {
+          "conflation.interval_ms": 200,
+          "deduplication.group": "shared-events"
+        },
+        "steady-shared": {
+          "conflation.interval_ms": 250,
+          "deduplication.group": "shared-events"
+        },
+        "independent-ttl": {
+          "conflation.interval_ms": 250,
+          "deduplication.ttl_ms": 1000
+        },
+        "fallback": {
+          "conflation.interval_ms": 250,
+          "deduplication.ttl_ms": 5000
+        }
+      },
+      "channel_policies": [
+        {
+          "glob": "db1:events:sibling-fast:*",
+          "profile": "fast-shared"
+        },
+        {
+          "glob": "db1:events:sibling-standard:*",
+          "profile": "steady-shared"
+        },
+        {
+          "glob": "db1:events:independent:*",
+          "profile": "independent-ttl"
+        },
+        {
+          "glob": "db1:events:inline:*",
+          "conflation.interval_ms": 300,
+          "deduplication.ttl_ms": 1500
+        },
+        {
+          "default": true,
+          "profile": "fallback"
+        }
+      ]
     }
   },
   "instance_lock": {

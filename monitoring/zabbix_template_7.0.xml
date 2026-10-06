@@ -90,10 +90,38 @@
                     <tags><tag><tag>component</tag><value>application</value></tag></tags>
                 </item>
                 <item>
+                    <uuid>10000000000040008000000000000020</uuid>
+                    <name>Output payload bytes total</name><type>TRAP</type><key>redis_conflated_pubsub.output_payload_bytes_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><value_type>UNSIGNED</value_type><units>B</units>
+                    <description>Total payload bytes included in successfully published output batches.</description>
+                    <tags><tag><tag>component</tag><value>application</value></tag></tags>
+                </item>
+                <item>
                     <uuid>1000000000004000800000000000000c</uuid>
                     <name>Conflated messages total</name><type>TRAP</type><key>redis_conflated_pubsub.conflated_messages_total</key>
                     <delay>0</delay><history>7d</history><trends>365d</trends><value_type>UNSIGNED</value_type>
                     <description>Total older messages replaced by newer messages for the same channel.</description>
+                    <tags><tag><tag>component</tag><value>application</value></tag></tags>
+                </item>
+                <item>
+                    <uuid>10000000000040008000000000000021</uuid>
+                    <name>Conflated payload bytes total</name><type>TRAP</type><key>redis_conflated_pubsub.conflated_payload_bytes_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><value_type>UNSIGNED</value_type><units>B</units>
+                    <description>Total payload bytes superseded by newer messages for the same channel.</description>
+                    <tags><tag><tag>component</tag><value>application</value></tag></tags>
+                </item>
+                <item>
+                    <uuid>1000000000004000800000000000001e</uuid>
+                    <name>Deduplicated messages total</name><type>TRAP</type><key>redis_conflated_pubsub.deduplicated_messages_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><value_type>UNSIGNED</value_type>
+                    <description>Total messages suppressed by per-output TTL deduplication.</description>
+                    <tags><tag><tag>component</tag><value>application</value></tag></tags>
+                </item>
+                <item>
+                    <uuid>1000000000004000800000000000001f</uuid>
+                    <name>Deduplicated payload bytes total</name><type>TRAP</type><key>redis_conflated_pubsub.deduplicated_payload_bytes_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><value_type>UNSIGNED</value_type><units>B</units>
+                    <description>Total raw input payload bytes suppressed by per-output TTL deduplication.</description>
                     <tags><tag><tag>component</tag><value>application</value></tag></tags>
                 </item>
                 <item>
@@ -107,7 +135,7 @@
                     <uuid>1000000000004000800000000000000e</uuid>
                     <name>Dropped messages total</name><type>TRAP</type><key>redis_conflated_pubsub.dropped_messages_total</key>
                     <delay>0</delay><history>7d</history><trends>365d</trends><value_type>UNSIGNED</value_type>
-                    <description>Total output messages skipped by the configured oversized-message policy.</description>
+                    <description>Output messages skipped by oversized-message policy or dropped after definitive pre-send failures; failed messages are not retried.</description>
                     <tags><tag><tag>component</tag><value>application</value></tag></tags>
                 </item>
                 <item>
@@ -121,7 +149,7 @@
                     <uuid>1000000000004000800000000000001d</uuid>
                     <name>Dropped payload bytes total</name><type>TRAP</type><key>redis_conflated_pubsub.dropped_payload_bytes_total</key>
                     <delay>0</delay><history>7d</history><trends>365d</trends><value_type>UNSIGNED</value_type><units>B</units>
-                    <description>Total payload bytes skipped by the configured oversized-message policy.</description>
+                    <description>Payload bytes skipped by oversized-message policy or dropped after definitive pre-send failures.</description>
                     <tags><tag><tag>component</tag><value>application</value></tag></tags>
                 </item>
                 <item>

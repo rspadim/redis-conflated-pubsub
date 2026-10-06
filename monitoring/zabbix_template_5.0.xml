@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <zabbix_export>
     <version>5.0</version>
-    <date>2026-10-05T00:00:00Z</date>
+    <date>2026-10-06T00:00:00Z</date>
     <groups>
         <group>
             <name>Templates/Applications</name>
@@ -110,11 +110,46 @@
                     <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
                 </item>
                 <item>
+                    <name>Output payload bytes total</name>
+                    <type>2</type>
+                    <key>redis_conflated_pubsub.output_payload_bytes_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><status>0</status><value_type>3</value_type>
+                    <units>B</units>
+                    <description>Total payload bytes included in successfully published output batches.</description>
+                    <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
+                </item>
+                <item>
                     <name>Conflated messages total</name>
                     <type>2</type>
                     <key>redis_conflated_pubsub.conflated_messages_total</key>
                     <delay>0</delay><history>7d</history><trends>365d</trends><status>0</status><value_type>3</value_type>
                     <description>Total older messages replaced by newer messages for the same channel.</description>
+                    <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
+                </item>
+                <item>
+                    <name>Conflated payload bytes total</name>
+                    <type>2</type>
+                    <key>redis_conflated_pubsub.conflated_payload_bytes_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><status>0</status><value_type>3</value_type>
+                    <units>B</units>
+                    <description>Total payload bytes superseded by newer messages for the same channel.</description>
+                    <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
+                </item>
+                <item>
+                    <name>Deduplicated messages total</name>
+                    <type>2</type>
+                    <key>redis_conflated_pubsub.deduplicated_messages_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><status>0</status><value_type>3</value_type>
+                    <description>Total messages suppressed by per-output TTL deduplication.</description>
+                    <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
+                </item>
+                <item>
+                    <name>Deduplicated payload bytes total</name>
+                    <type>2</type>
+                    <key>redis_conflated_pubsub.deduplicated_payload_bytes_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><status>0</status><value_type>3</value_type>
+                    <units>B</units>
+                    <description>Total raw input payload bytes suppressed by per-output TTL deduplication.</description>
                     <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
                 </item>
                 <item>
@@ -130,7 +165,7 @@
                     <type>2</type>
                     <key>redis_conflated_pubsub.dropped_messages_total</key>
                     <delay>0</delay><history>7d</history><trends>365d</trends><status>0</status><value_type>3</value_type>
-                    <description>Total output messages skipped by the configured oversized-message policy.</description>
+                    <description>Output messages skipped by oversized-message policy or dropped after definitive pre-send failures; failed messages are not retried.</description>
                     <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
                 </item>
                 <item>
@@ -147,7 +182,7 @@
                     <key>redis_conflated_pubsub.dropped_payload_bytes_total</key>
                     <delay>0</delay><history>7d</history><trends>365d</trends><status>0</status><value_type>3</value_type>
                     <units>B</units>
-                    <description>Total payload bytes skipped by the configured oversized-message policy.</description>
+                    <description>Payload bytes skipped by oversized-message policy or dropped after definitive pre-send failures.</description>
                     <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
                 </item>
                 <item>

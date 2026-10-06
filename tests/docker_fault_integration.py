@@ -1,4 +1,5 @@
 import json
+import os
 import select
 import socket
 import time
@@ -8,9 +9,9 @@ from collections import Counter
 from redis_resp import close, connect, read_response, send_command
 
 
-PROXY_HOST = "10.253.240.50"
+PROXY_HOST = os.environ.get("PROXY_HOST", "fault-proxy")
 PROXY_STATS_PORT = 9091
-FAULT_APP_HOST = "10.253.240.60"
+FAULT_APP_HOST = os.environ.get("FAULT_APP_HOST", "fault-service")
 STATUS_URL = f"http://{FAULT_APP_HOST}:9090/"
 OUTPUT_NAME = "output1"
 OUTPUT_PREFIX = b"fault-output:mapped:"

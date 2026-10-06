@@ -9,8 +9,8 @@ from collections import Counter
 from redis_resp import close, connect, read_response, send_command
 
 
-STATUS_URL = os.environ.get("STATUS_URL", "http://10.253.242.20:9090/")
-PROXY_HOST = os.environ.get("PROXY_HOST", "10.253.242.50")
+STATUS_URL = os.environ.get("STATUS_URL", "http://service-protocol:9090/")
+PROXY_HOST = os.environ.get("PROXY_HOST", "counting-proxy")
 PROXY_STATS_PORT = int(os.environ.get("PROXY_STATS_PORT", "9091"))
 OUTPUT_NAMES = ("chunked", "send", "truncate", "drop", "immediate")
 REDIS_QUERY_LIMIT = 1024 * 1024

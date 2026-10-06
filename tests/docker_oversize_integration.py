@@ -7,7 +7,7 @@ import urllib.request
 from redis_resp import close, connect, read_response, send_command
 
 
-STATUS_URL = os.environ.get("STATUS_URL", "http://10.253.241.20:9090/")
+STATUS_URL = os.environ.get("STATUS_URL", "http://service-oversize:9090/")
 OUTPUT_NAME = "oversize-output"
 OUTPUT_PATTERN = "oversize-out:*"
 PUBLICATIONS = (

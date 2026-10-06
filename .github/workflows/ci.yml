@@ -54,12 +54,12 @@ jobs:
           if-no-files-found: error
 
   redis-integration:
-    name: Redis Pub/Sub delivery and protocol limits
+    name: Redis Pub/Sub, protocol limits, and channel-policy TTL/conflation E2Es
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-      - name: Run Redis Pub/Sub and protocol E2Es
+      - name: Run Redis Pub/Sub, protocol, and channel-policy TTL/conflation E2Es
         shell: bash
         run: |
           set -euo pipefail
@@ -67,6 +67,7 @@ jobs:
             docker compose -p redis-conflated-ci -f compose.test.yml --profile fault down --volumes --remove-orphans || true
             docker compose -p redis-conflated-ci-protocol -f compose.protocol.test.yml down --volumes --remove-orphans || true
             docker compose -p redis-conflated-ci-oversize -f compose.oversize.test.yml down --volumes --remove-orphans || true
+            docker compose -p redis-conflated-ci-ttl -f compose.ttl.test.yml down --volumes --remove-orphans || true
           }
           trap cleanup EXIT
 
@@ -79,7 +80,14 @@ jobs:
           docker compose -p redis-conflated-ci-oversize -f compose.oversize.test.yml up --build --abort-on-container-exit --exit-code-from oversize-integration-test
           docker compose -p redis-conflated-ci-oversize -f compose.oversize.test.yml down --volumes
 
+          docker compose -p redis-conflated-ci-ttl -f compose.ttl.test.yml up --build --remove-orphans --abort-on-container-exit --exit-code-from ttl-integration-test
+          docker compose -p redis-conflated-ci-ttl -f compose.ttl.test.yml down --volumes --remove-orphans
+
           docker compose -p redis-conflated-ci -f compose.test.yml --profile fault up --build --abort-on-container-exit --exit-code-from fault-integration fault-integration
+
+      - name: Clean up channel-policy TTL/conflation Compose stack
+        if: always()
+        run: docker compose -p redis-conflated-ci-ttl -f compose.ttl.test.yml down --volumes --remove-orphans || true
 
   monitoring-validation:
     name: Validate Zabbix monitoring files

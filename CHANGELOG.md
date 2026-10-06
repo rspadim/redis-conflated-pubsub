@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.3 — 2026-10-06
+
+- Added per-output profiles with partial conflation/TTL overrides. Ordered `channel_policies` select the first matching profile or inline rule, then the required final `default` rule; existing configurations without policies remain backward compatible.
+- Channels with distinct conflation intervals are scheduled independently, each using its configured interval.
+- Added named, output-local TTL groups with clock-rounded shared expiry, fixed or reanchored deadlines, and bounded caches (`max_members`, `max_cache_bytes`). Positive runtime durations are capped at 365 days to avoid timer overflow.
+- Added existing global `output_payload_bytes_total` and `conflated_payload_bytes_total` counters to the Zabbix collector and 5.0/7.0 templates; `schema_version` remains 5.
+
+## 0.1.2 — 2026-10-06
+
+- Added per-output duplicate suppression with signed integer `outputs.<name>.deduplication.ttl_ms`, defaulting to 5000 ms; values `<= 0` disable deduplication without changing interval or conflation behavior. The memory-only cache remembers the latest successfully or outcome-ambiguous raw payload per mapped output channel: consecutive identical payloads are suppressed until the TTL expires, while a changed payload is published and replaces the remembered value (so A→B→A publishes all three). Each output has a separate cache, with no Redis keys or disk spool.
+- Added global and per-output `deduplicated_messages_total` and `deduplicated_payload_bytes_total` metrics, plus collector and Zabbix 5.0/7.0 template support. The additive status fields retain `schema_version: 5`.
+- Added a Docker end-to-end TTL test in `compose.ttl.test.yml`.
+
 ## 0.1.1 — 2026-10-06
 
 - Added global and per-output RESP request-size targets and split conflated flushes by exact encoded transaction bytes and command count.

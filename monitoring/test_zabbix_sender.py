@@ -8,7 +8,7 @@ import zabbix_sender
 
 def sample_status():
     status = {
-        "schema_version": 1,
+        "schema_version": 5,
         "state": "running",
         "updated_at": "2026-10-05T12:00:00.000Z",
         "started_at": "2026-10-05T11:00:00.000Z",
@@ -17,6 +17,10 @@ def sample_status():
         "last_flush_at": None,
         "last_error": 'Redis "connection" failed\nretrying',
         "input_payload_bytes_total": 8192,
+        "output_payload_bytes_total": 4096,
+        "conflated_payload_bytes_total": 1024,
+        "deduplicated_messages_total": 3,
+        "deduplicated_payload_bytes_total": 128,
         "outputs": {
             "output2": {"messages_total": 2, "errors_total": 0},
             "output1": {"messages_total": 12, "errors_total": 1},
@@ -28,19 +32,47 @@ def sample_status():
 
 
 class ZabbixSenderTests(unittest.TestCase):
+    def test_requires_global_deduplication_counters(self):
+        for field in (
+            "deduplicated_messages_total",
+            "deduplicated_payload_bytes_total",
+        ):
+            with self.subTest(field=field):
+                status = sample_status()
+                del status[field]
+
+                with self.assertRaisesRegex(ValueError, field):
+                    zabbix_sender.validate_status(status)
+
     def test_builds_one_numeric_and_quoted_text_value_per_item(self):
         payload = zabbix_sender.build_sender_input(
             "Redis Service", "redis_conflated_pubsub.", sample_status(), 1
         )
         lines = payload.splitlines()
 
-        self.assertEqual(len(lines), 27)
+        self.assertEqual(len(lines), 31)
         self.assertIn('"Redis Service" redis_conflated_pubsub.health 1', lines)
         self.assertIn(
             '"Redis Service" redis_conflated_pubsub.input_messages_total 0', lines
         )
         self.assertIn(
             '"Redis Service" redis_conflated_pubsub.input_payload_bytes_total 8192',
+            lines,
+        )
+        self.assertIn(
+            '"Redis Service" redis_conflated_pubsub.output_payload_bytes_total 4096',
+            lines,
+        )
+        self.assertIn(
+            '"Redis Service" redis_conflated_pubsub.conflated_payload_bytes_total 1024',
+            lines,
+        )
+        self.assertIn(
+            '"Redis Service" redis_conflated_pubsub.deduplicated_messages_total 3',
+            lines,
+        )
+        self.assertIn(
+            '"Redis Service" redis_conflated_pubsub.deduplicated_payload_bytes_total 128',
             lines,
         )
         self.assertIn(
@@ -66,7 +98,7 @@ class ZabbixSenderTests(unittest.TestCase):
         run.return_value = subprocess.CompletedProcess(
             args=["zabbix_sender"],
             returncode=0,
-            stdout="processed: 27; failed: 0; total: 27\n",
+            stdout="processed: 31; failed: 0; total: 31\n",
             stderr="",
         )
         config = {
@@ -82,11 +114,11 @@ class ZabbixSenderTests(unittest.TestCase):
             1,
         )
 
-        zabbix_sender.send_batch(config, payload, 27)
+        zabbix_sender.send_batch(config, payload, 31)
 
         run.assert_called_once()
         self.assertEqual(run.call_args.kwargs["input"], payload)
-        self.assertEqual(len(payload.splitlines()), 27)
+        self.assertEqual(len(payload.splitlines()), 31)
         self.assertIn("-i", run.call_args.args[0])
         self.assertEqual(run.call_args.kwargs["timeout"], 5.0)
 
@@ -96,6 +128,8 @@ class ZabbixSenderTests(unittest.TestCase):
             {
                 "published_payload_bytes_total": 4096,
                 "conflated_payload_bytes_total": 1024,
+                "deduplicated_messages_total": 2,
+                "deduplicated_payload_bytes_total": 256,
                 "payload_reduction_percent": 75.0,
             }
         )

@@ -1,12 +1,8 @@
 services:
   redis:
-    container_name: redis-conflated-test-redis
     image: redis:7.4-alpine
-    ports:
-      - "127.0.0.1:16380:6379"
     networks:
-      e2e:
-        ipv4_address: 10.253.240.10
+      e2e: {}
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 1s
@@ -14,7 +10,6 @@ services:
       retries: 30
 
   service:
-    container_name: redis-conflated-test-app
     build:
       context: .
       dockerfile: Dockerfile
@@ -24,38 +19,34 @@ services:
       - ./tests/docker-config.json:/config/docker-config.json:ro
       - integration-state:/state
     networks:
-      e2e:
-        ipv4_address: 10.253.240.20
+      e2e: {}
     depends_on:
       redis:
         condition: service_healthy
 
   random-publisher:
-    container_name: redis-conflated-test-publisher
     image: python:3.13-alpine
     command: ["python", "/tests/random_publisher.py"]
     environment:
-      REDIS_HOST: 10.253.240.10
+      REDIS_HOST: redis
     volumes:
       - ./tests:/tests:ro
     networks:
-      e2e:
-        ipv4_address: 10.253.240.30
+      e2e: {}
     depends_on:
       redis:
         condition: service_healthy
 
   integration-test:
-    container_name: redis-conflated-test-integration
     image: python:3.13-alpine
     command: ["python", "/tests/docker_integration.py"]
     environment:
-      REDIS_HOST: 10.253.240.10
+      REDIS_HOST: redis
+      STATUS_URL: http://service:9090/
     volumes:
       - ./tests:/tests:ro
     networks:
-      e2e:
-        ipv4_address: 10.253.240.40
+      e2e: {}
     depends_on:
       service:
         condition: service_started
@@ -64,11 +55,10 @@ services:
 
   fault-proxy:
     profiles: ["fault"]
-    container_name: redis-conflated-fault-proxy
     image: python:3.13-alpine
     command: ["python", "/tests/redis_fault_proxy.py"]
     environment:
-      REDIS_HOST: 10.253.240.10
+      REDIS_HOST: redis
       REDIS_PORT: 6379
       PROXY_PORT: 6379
       STATS_PORT: 9091
@@ -76,8 +66,7 @@ services:
     volumes:
       - ./tests:/tests:ro
     networks:
-      e2e:
-        ipv4_address: 10.253.240.50
+      e2e: {}
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('127.0.0.1',6379),2); s.close()"]
       interval: 1s
@@ -89,7 +78,6 @@ services:
 
   fault-service:
     profiles: ["fault"]
-    container_name: redis-conflated-fault-app
     build:
       context: .
       dockerfile: Dockerfile
@@ -99,26 +87,24 @@ services:
       - ./tests/docker-fault-config.json:/config/docker-fault-config.json:ro
       - fault-state:/state
     networks:
-      e2e:
-        ipv4_address: 10.253.240.60
+      e2e: {}
     depends_on:
       fault-proxy:
         condition: service_healthy
 
   fault-integration:
     profiles: ["fault"]
-    container_name: redis-conflated-fault-integration
     image: python:3.13-alpine
     command: ["python", "/tests/docker_fault_integration.py"]
     environment:
-      REDIS_HOST: 10.253.240.10
-      PROXY_HOST: 10.253.240.50
-      FAULT_APP_HOST: 10.253.240.60
+      REDIS_HOST: redis
+      PROXY_HOST: fault-proxy
+      FAULT_APP_HOST: fault-service
+      STATUS_URL: http://fault-service:9090/
     volumes:
       - ./tests:/tests:ro
     networks:
-      e2e:
-        ipv4_address: 10.253.240.70
+      e2e: {}
     depends_on:
       fault-service:
         condition: service_started
@@ -128,15 +114,9 @@ services:
         condition: service_healthy
 
 volumes:
-  integration-state:
-    name: redis-conflated-test-state
-  fault-state:
-    name: redis-conflated-fault-state
+  integration-state: {}
+  fault-state: {}
 
 networks:
   e2e:
-    name: redis-conflated-test-network
     driver: bridge
-    ipam:
-      config:
-        - subnet: 10.253.240.0/24

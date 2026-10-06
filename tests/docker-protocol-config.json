@@ -3,7 +3,7 @@
   "oversized_message_policy": "send",
   "input": {
     "redis": {
-      "host": "10.253.242.10",
+      "host": "redis-protocol",
       "port": 6379,
       "username": null,
       "password_env": null,
@@ -31,7 +31,7 @@
   "outputs": {
     "chunked": {
       "redis": {
-        "host": "10.253.242.50",
+        "host": "counting-proxy",
         "port": 6379,
         "username": null,
         "password_env": null,
@@ -49,7 +49,7 @@
     },
     "send": {
       "redis": {
-        "host": "10.253.242.50",
+        "host": "counting-proxy",
         "port": 6379,
         "username": null,
         "password_env": null,
@@ -67,7 +67,7 @@
     },
     "truncate": {
       "redis": {
-        "host": "10.253.242.50",
+        "host": "counting-proxy",
         "port": 6379,
         "username": null,
         "password_env": null,
@@ -85,7 +85,7 @@
     },
     "drop": {
       "redis": {
-        "host": "10.253.242.50",
+        "host": "counting-proxy",
         "port": 6379,
         "username": null,
         "password_env": null,
@@ -103,7 +103,7 @@
     },
     "immediate": {
       "redis": {
-        "host": "10.253.242.50",
+        "host": "counting-proxy",
         "port": 6379,
         "username": null,
         "password_env": null,

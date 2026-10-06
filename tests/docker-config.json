@@ -1,7 +1,7 @@
 {
   "input": {
     "redis": {
-      "host": "10.253.240.10",
+      "host": "redis",
       "port": 6379,
       "username": null,
       "password_env": null,
@@ -33,7 +33,7 @@
   "outputs": {
     "output0": {
       "redis": {
-        "host": "10.253.240.10",
+        "host": "redis",
         "port": 6379,
         "username": null,
         "password_env": null,
@@ -49,7 +49,7 @@
     },
     "output1": {
       "redis": {
-        "host": "10.253.240.10",
+        "host": "redis",
         "port": 6379,
         "username": null,
         "password_env": null,

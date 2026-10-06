@@ -1,11 +1,9 @@
 services:
   redis-protocol:
-    container_name: redis-conflated-protocol-redis
     image: redis:7.4-alpine
     command: ["redis-server", "--client-query-buffer-limit", "1048576"]
     networks:
-      protocol:
-        ipv4_address: 10.253.242.10
+      protocol: {}
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 1s
@@ -13,19 +11,17 @@ services:
       retries: 30
 
   counting-proxy:
-    container_name: redis-conflated-protocol-proxy
     image: python:3.13-alpine
     command: ["python", "/tests/redis_counting_proxy.py"]
     environment:
-      REDIS_HOST: 10.253.242.10
+      REDIS_HOST: redis-protocol
       REDIS_PORT: 6379
       PROXY_PORT: 6379
       STATS_PORT: 9091
     volumes:
       - ./tests:/tests:ro
     networks:
-      protocol:
-        ipv4_address: 10.253.242.50
+      protocol: {}
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('127.0.0.1',6379),2); s.close()"]
       interval: 1s
@@ -36,7 +32,6 @@ services:
         condition: service_healthy
 
   service-protocol:
-    container_name: redis-conflated-protocol-app
     build:
       context: .
       dockerfile: Dockerfile
@@ -46,8 +41,7 @@ services:
       - ./tests/docker-protocol-config.json:/config/docker-protocol-config.json:ro
       - protocol-state:/state
     networks:
-      protocol:
-        ipv4_address: 10.253.242.20
+      protocol: {}
     depends_on:
       counting-proxy:
         condition: service_healthy
@@ -55,20 +49,18 @@ services:
         condition: service_healthy
 
   protocol-integration-test:
-    container_name: redis-conflated-protocol-integration
     image: python:3.13-alpine
     command: ["python", "/tests/docker_protocol_integration.py"]
     environment:
-      REDIS_HOST: 10.253.242.10
+      REDIS_HOST: redis-protocol
       REDIS_PORT: 6379
-      STATUS_URL: http://10.253.242.20:9090/
-      PROXY_HOST: 10.253.242.50
+      STATUS_URL: http://service-protocol:9090/
+      PROXY_HOST: counting-proxy
       PROXY_STATS_PORT: 9091
     volumes:
       - ./tests:/tests:ro
     networks:
-      protocol:
-        ipv4_address: 10.253.242.30
+      protocol: {}
     depends_on:
       service-protocol:
         condition: service_started
@@ -78,13 +70,8 @@ services:
         condition: service_healthy
 
 volumes:
-  protocol-state:
-    name: redis-conflated-protocol-state
+  protocol-state: {}
 
 networks:
   protocol:
-    name: redis-conflated-protocol-network
     driver: bridge
-    ipam:
-      config:
-        - subnet: 10.253.242.0/24

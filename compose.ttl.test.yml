@@ -1,0 +1,52 @@
+# Local TTL/profile/group/channel-policy E2E test:
+# docker compose -p redis-conflated-ttl-test -f compose.ttl.test.yml up --build --abort-on-container-exit --exit-code-from ttl-integration-test
+# Cleanup:
+# docker compose -p redis-conflated-ttl-test -f compose.ttl.test.yml down --volumes --remove-orphans
+services:
+  redis-ttl:
+    image: redis:7.4-alpine
+    networks:
+      ttl: {}
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+
+  service-ttl:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["--config", "/config/docker-ttl-config.json"]
+    working_dir: /state
+    volumes:
+      - ./tests/docker-ttl-config.json:/config/docker-ttl-config.json:ro
+      - ttl-state:/state
+    networks:
+      ttl: {}
+    depends_on:
+      redis-ttl:
+        condition: service_healthy
+
+  ttl-integration-test:
+    image: python:3.13-alpine
+    command: ["python", "/tests/docker_ttl_integration.py"]
+    environment:
+      REDIS_HOST: redis-ttl
+      STATUS_URL: http://service-ttl:9090/
+    volumes:
+      - ./tests:/tests:ro
+    networks:
+      ttl: {}
+    depends_on:
+      service-ttl:
+        condition: service_started
+      redis-ttl:
+        condition: service_healthy
+
+volumes:
+  ttl-state: {}
+
+networks:
+  ttl:
+    driver: bridge

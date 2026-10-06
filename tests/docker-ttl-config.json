@@ -1,0 +1,194 @@
+{
+  "input": {
+    "redis": {
+      "host": "redis-ttl",
+      "port": 6379,
+      "username": null,
+      "password_env": null,
+      "tls": false,
+      "database": 0,
+      "connect_timeout_ms": 2000
+    },
+    "exclude_output_echoes": true,
+    "subscriptions": [
+      {
+        "type": "psubscribe",
+        "pattern": "ttl-feed:*"
+      }
+    ]
+  },
+  "outputs": {
+    "ttl": {
+      "redis": {
+        "host": "redis-ttl",
+        "port": 6379,
+        "username": null,
+        "password_env": null,
+        "tls": false,
+        "database": 1,
+        "connect_timeout_ms": 2000
+      },
+      "channel_prefix": "ttl-out:",
+      "conflation": {
+        "interval_ms": 50
+      },
+      "deduplication": {
+        "ttl_ms": 600
+      },
+      "deduplication_groups": {
+        "fixed-window": {
+          "ttl_ms": 600,
+          "round_ms": 0,
+          "restart_on_change": false
+        },
+        "restart-window": {
+          "ttl_ms": 600,
+          "round_ms": 0,
+          "restart_on_change": true
+        },
+        "floor-window": {
+          "ttl_ms": 2600,
+          "round_ms": 1000,
+          "restart_on_change": false
+        }
+      },
+      "profiles": {
+        "default": {
+          "conflation.interval_ms": 50,
+          "deduplication.ttl_ms": 600
+        },
+        "reuse-short": {
+          "conflation.interval_ms": 50,
+          "deduplication.ttl_ms": 250
+        },
+        "ungrouped": {
+          "conflation.interval_ms": 50,
+          "deduplication.ttl_ms": 400
+        },
+        "fixed-window": {
+          "conflation.interval_ms": 50,
+          "deduplication.group": "fixed-window"
+        },
+        "restart-window": {
+          "conflation.interval_ms": 50,
+          "deduplication.group": "restart-window"
+        },
+        "interval-fast": {
+          "conflation.interval_ms": 100,
+          "deduplication.ttl_ms": 600
+        },
+        "interval-slow": {
+          "conflation.interval_ms": 300,
+          "deduplication.ttl_ms": 600
+        },
+        "floor-window": {
+          "conflation.interval_ms": 0,
+          "deduplication.group": "floor-window"
+        }
+      },
+      "channel_policies": [
+        {
+          "glob": "ttl-out:ttl-feed:profile-reuse-*",
+          "profile": "reuse-short"
+        },
+        {
+          "glob": "ttl-out:ttl-feed:ungrouped-*",
+          "profile": "ungrouped"
+        },
+        {
+          "prefix": "ttl-out:ttl-feed:group-fixed-",
+          "profile": "fixed-window"
+        },
+        {
+          "glob": "ttl-out:ttl-feed:group-reset-*",
+          "profile": "restart-window"
+        },
+        {
+          "glob": "ttl-out:ttl-feed:precedence-*",
+          "profile": "reuse-short"
+        },
+        {
+          "suffix": ":precedence-suffix",
+          "conflation.interval_ms": 50,
+          "deduplication.ttl_ms": 900
+        },
+        {
+          "prefix": "ttl-out:ttl-feed:policy-prefix",
+          "profile": "reuse-short"
+        },
+        {
+          "suffix": ":suffix-inline",
+          "conflation.interval_ms": 50,
+          "deduplication.ttl_ms": 250
+        },
+        {
+          "glob": "ttl-out:ttl-feed:interval-fast",
+          "profile": "interval-fast"
+        },
+        {
+          "glob": "ttl-out:ttl-feed:interval-slow",
+          "profile": "interval-slow"
+        },
+        {
+          "glob": "ttl-out:ttl-feed:group-floor-*",
+          "profile": "floor-window"
+        },
+        {
+          "default": true,
+          "profile": "default"
+        }
+      ]
+    },
+    "window-zero": {
+      "redis": {
+        "host": "redis-ttl",
+        "port": 6379,
+        "username": null,
+        "password_env": null,
+        "tls": false,
+        "database": 2,
+        "connect_timeout_ms": 2000
+      },
+      "channel_prefix": "window-zero-out:",
+      "conflation": {
+        "interval_ms": 50
+      },
+      "deduplication": {
+        "ttl_ms": 0
+      }
+    },
+    "direct-zero": {
+      "redis": {
+        "host": "redis-ttl",
+        "port": 6379,
+        "username": null,
+        "password_env": null,
+        "tls": false,
+        "database": 3,
+        "connect_timeout_ms": 2000
+      },
+      "channel_prefix": "direct-zero-out:",
+      "conflation": {
+        "interval_ms": 0
+      },
+      "deduplication": {
+        "ttl_ms": -1
+      }
+    }
+  },
+  "instance_lock": {
+    "path": "/state/redis-conflated-ttl.lock"
+  },
+  "status": {
+    "http": {
+      "bind": "0.0.0.0",
+      "port": 9090
+    }
+  },
+  "logging": {
+    "directory": "/state/logs",
+    "level": "warn",
+    "retention_days": 2,
+    "max_total_size_mb": 10
+  }
+}

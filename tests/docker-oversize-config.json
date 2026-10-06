@@ -3,7 +3,7 @@
   "oversized_message_policy": "send",
   "input": {
     "redis": {
-      "host": "10.253.241.10",
+      "host": "redis-oversize",
       "port": 6379,
       "username": null,
       "password_env": null,
@@ -21,7 +21,7 @@
   "outputs": {
     "oversize-output": {
       "redis": {
-        "host": "10.253.241.10",
+        "host": "redis-oversize",
         "port": 6379,
         "username": null,
         "password_env": null,

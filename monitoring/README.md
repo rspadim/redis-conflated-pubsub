@@ -1,75 +1,88 @@
-# Redis Conflated Pub/Sub monitoring
+# Zabbix monitoring (v0.1.3)
 
-This directory contains a standard-library Python 3 collector, a small JSON configuration example, and importable XML templates for Zabbix 5.0 and Zabbix 7.0. The collector reads the service status over HTTP and submits values to Zabbix trapper items with one `zabbix_sender` invocation.
+This guide configures the Python 3 collector and the Zabbix 5.0 or 7.0 template. The collector reads the service status over HTTP and sends trapper-item values with `zabbix_sender`; it uses only Python standard-library modules.
+
+## Prerequisites
+
+- Redis Conflated Pub/Sub v0.1.3 running with its HTTP status listener enabled. The project configuration example uses:
+
+  ```json
+  "status": {
+    "http": {
+      "bind": "127.0.0.1",
+      "port": 9090
+    }
+  }
+  ```
+
+  The status JSON is at `GET /` (for example, `http://127.0.0.1:9090/`). If the collector runs on another machine, bind to an address it can reach and allow only trusted monitoring traffic.
+- Python 3 and `zabbix_sender` installed on the machine that will run the collector.
+- Network access from the collector to the status URL and to the configured Zabbix server or proxy (default port `10051`).
+
+## Configure and test the collector
+
+Copy the example and edit `monitoring/config.json` for your environment:
+
+```sh
+cp monitoring/config.example.json monitoring/config.json
+```
+
+Set `base_url` to the status endpoint's root URL, `zabbix_server` and `zabbix_port` to the server or proxy, and `host` to the Zabbix host's exact **technical name**. `key_prefix` must match the imported template (default: `redis_conflated_pubsub.`). Set `sender_path` to an absolute path if `zabbix_sender` is not on `PATH`.
+
+Check the endpoint, then run the collector from the same account that will schedule it:
+
+```sh
+curl --fail http://127.0.0.1:9090/
+python3 monitoring/zabbix_sender.py --config monitoring/config.json
+```
+
+With a valid status response, the collector sends 31 values in one batch. If the endpoint is unavailable or the response is invalid, it sends only `health=0` and leaves other values unchanged. The command exits with an error if `zabbix_sender` fails or Zabbix rejects values.
+
+## Import and link a template
+
+Import **one** XML template matching your Zabbix server version:
+
+| Zabbix version | Template file | Import menu |
+| --- | --- | --- |
+| 5.0 | `monitoring/zabbix_template_5.0.xml` | Configuration → Templates → Import |
+| 7.0 | `monitoring/zabbix_template_7.0.xml` | Data collection → Templates → Import |
+
+Create or select a host, link **Template Redis Conflated Pub/Sub**, and set the collector's `host` value to that host's technical name. The template items are trapper items; a Zabbix agent is not needed to run the collector. In Latest data, check that `health` is `1` and `schema_version` is `5` after a successful collection. If you configure an item's **Allowed hosts**, include the collector's source address.
 
 ## Collected values
 
-The service exposes one HTTP endpoint: `GET /` returns the status JSON. Configure `base_url` with the HTTP(S) origin (for example, `http://127.0.0.1:9090/`); the collector makes one GET request to `/`. There are no `/status` or `/health` routes. The response must be a JSON object with every field below:
+The status endpoint is `GET /`; configure `base_url` with the HTTP(S) origin, such as `http://127.0.0.1:9090/`. The collector requests `/` and sends the following item values:
 
-| Field | Zabbix item key suffix | Type |
+| Status field or derived value | Zabbix key suffix | Type / meaning |
 | --- | --- | --- |
-| `schema_version` | `schema_version` | Unsigned integer |
-| `state` | `state` | Text |
-| `updated_at` | `updated_at` | Text |
-| `started_at` | `started_at` | Text |
+| Derived from `state` | `health` | Unsigned integer: `1` when `state` is `running`, otherwise `0` |
+| `schema_version` | `schema_version` | Unsigned integer; remains `5` in v0.1.3 |
+| `state` | `state` | Text service state |
+| `updated_at`, `started_at`, `last_input_at`, `last_flush_at` | Same field name | Text timestamps; null is sent as `never` |
+| `last_error` | `last_error` | Text; null is sent as `none` |
 | `uptime_seconds` | `uptime_seconds` | Unsigned integer, seconds |
-| `input_messages_total` | `input_messages_total` | Unsigned integer |
-| `input_payload_bytes_total` | `input_payload_bytes_total` | Unsigned integer, bytes |
-| `output_batches_total` | `output_batches_total` | Unsigned integer |
-| `output_messages_total` | `output_messages_total` | Unsigned integer |
-| `conflated_messages_total` | `conflated_messages_total` | Unsigned integer |
+| `input_messages_total`, `input_payload_bytes_total` | Same field name | Input message count and bytes |
+| `output_batches_total`, `output_messages_total`, `output_payload_bytes_total` | Same field name | Published batch, message, and payload-byte totals |
+| `conflated_messages_total`, `conflated_payload_bytes_total` | Same field name | Superseded message count and payload-byte total |
+| `deduplicated_messages_total` | `deduplicated_messages_total` | Unsigned integer, TTL-suppressed messages across outputs |
+| `deduplicated_payload_bytes_total` | `deduplicated_payload_bytes_total` | Unsigned integer, raw input payload bytes suppressed across outputs |
 | `excluded_messages_total` | `excluded_messages_total` | Unsigned integer |
-| `dropped_messages_total` | `dropped_messages_total` | Unsigned integer |
-| `dropped_payload_bytes_total` | `dropped_payload_bytes_total` | Unsigned integer, bytes |
-| `truncated_messages_total` | `truncated_messages_total` | Unsigned integer |
-| `truncated_payload_bytes_total` | `truncated_payload_bytes_total` | Unsigned integer, bytes |
-| `publish_errors_total` | `publish_errors_total` | Unsigned integer |
-| `publish_error_messages_total` | `publish_error_messages_total` | Unsigned integer |
-| `uncertain_transactions_total` | `uncertain_transactions_total` | Unsigned integer |
-| `uncertain_messages_total` | `uncertain_messages_total` | Unsigned integer |
-| `input_reconnects_total` | `input_reconnects_total` | Unsigned integer |
-| `output_reconnects_total` | `output_reconnects_total` | Unsigned integer |
-| `outputs` | `outputs_json` | Object keyed by output name; compact JSON Text |
+| `dropped_messages_total`, `dropped_payload_bytes_total` | Same field name | Oversized-policy drops and definitive pre-send failures; failed messages are not retried |
+| `truncated_messages_total`, `truncated_payload_bytes_total` | Same field name | Messages truncated and payload bytes removed |
+| `publish_errors_total`, `publish_error_messages_total` | Same field name | Publish failures and affected messages |
+| `uncertain_transactions_total`, `uncertain_messages_total` | Same field name | Uncertain publish transactions and affected messages |
+| `input_reconnects_total`, `output_reconnects_total` | Same field name | Redis reconnect counts |
 | `pending_keys` | `pending_keys` | Unsigned integer |
-| `last_input_at` | `last_input_at` | Text or null |
-| `last_flush_at` | `last_flush_at` | Text or null |
-| `last_error` | `last_error` | Text or null |
+| `outputs` | `outputs_json` | Compact JSON text map of per-output metrics |
 
-The `outputs` field maps arbitrary output names (for example, `output1`) to objects containing that destination's metrics, including published and conflated payload byte counters and payload reduction percentages. The collector preserves the complete map as compact JSON in the `outputs_json` text trapper item, so each named destination and its metrics are visible together in Zabbix Latest Data. Global metrics remain separate items, including `input_payload_bytes_total`. The Zabbix `health` item is derived from the same response: `state == "running"` produces `1`, otherwise `0`; it is not a separate HTTP endpoint. If the root request fails or its response is invalid, the collector sends only `health=0` and leaves all other item values untouched rather than inventing zero counters. Null timestamps are sent as `never`, and a null error is sent as `none`. Error text is limited to 2,048 characters and line breaks are normalized for sender input.
+The v0.1.3 deduplication counters are additive; **`schema_version` remains `5`**. The per-output JSON includes destination-level published, conflated, deduplicated, and payload-byte metrics. Its deduplication byte counts use the same raw-input-payload semantics as the global counters. The default item keys use the `redis_conflated_pubsub.` prefix; if you change `key_prefix`, update the imported template's item keys to match. Error text is limited to 2,048 characters and line breaks are normalized for sender input.
 
-The default item keys use the `redis_conflated_pubsub.` prefix, for example `redis_conflated_pubsub.input_messages_total`. If `key_prefix` is changed in the collector configuration, update the item keys in the imported template to use that same prefix.
+## Run on a schedule
 
-## Setup
-
-1. Enable the service HTTP listener that serves the status JSON at `GET /`. The project example uses `status.http.bind` set to `127.0.0.1` and port `9090`; adjust `base_url` in the monitoring configuration if the listener uses another address or port. Keep the listener restricted to trusted monitoring clients.
-2. Install Python 3 and the `zabbix_sender` utility on the machine that will run the collector. The script uses Python standard-library modules only.
-3. Import exactly one template matching the Zabbix server version: `zabbix_template_5.0.xml` for Zabbix 5.0 or `zabbix_template_7.0.xml` for Zabbix 7.0.
-4. Create or select the monitored host and link the imported template. Set the `host` value in the JSON configuration to the host's technical name in Zabbix (not its visible name).
-5. Copy `config.example.json` to `config.json` and set `zabbix_server`, `zabbix_port`, `base_url`, and `host` for the environment. The `sender_path` value may be an absolute path if `zabbix_sender` is not in the collector's `PATH`.
-6. Test the collector from the same account that will run it:
-
-   ```sh
-   cp monitoring/config.example.json monitoring/config.json
-   python3 monitoring/zabbix_sender.py --config monitoring/config.json
-   ```
-
-   If the root request fails or its response is invalid, the collector sends only the health item with value `0` and leaves counters untouched. The command fails if `zabbix_sender` fails or reports rejected values.
-
-## Cron example
-
-Run the collector once per minute; it sends all 27 values in one batch when the root response is valid:
+For example, run the collector once per minute with cron:
 
 ```cron
 * * * * * /usr/bin/python3 /opt/redis-conflated-pubsub/monitoring/zabbix_sender.py --config /etc/redis-conflated-pubsub/monitoring.json >> /var/log/redis-conflated-pubsub-monitoring.log 2>&1
 ```
 
-Use absolute paths because cron has a limited `PATH` and working directory. The service status snapshot may update more frequently than the collector schedule; each collection sends the latest available snapshot. If the root request fails or its response is invalid, the script submits a health value only rather than fabricated zero counters.
-
-## Zabbix sender and agent notes
-
-- Every template item is a Zabbix trapper item. `zabbix_sender` connects directly to the configured Zabbix server or proxy; the Zabbix agent does not execute the collector unless you explicitly arrange that separately.
-- The account running the collector must be able to execute `zabbix_sender`, reach the status listener, and connect to the configured Zabbix server/proxy port (default `10051`).
-- The host name in the configuration must match the Zabbix technical host name exactly. Trapper items must be enabled and the template must be linked to that host.
-- Restrict each trapper item's **Allowed hosts** setting to the collector's source address where appropriate. The default template leaves it unset so the allowed sender address can be configured for each deployment.
-- If using the Zabbix agent account to run a UserParameter or scheduled job, grant it read access to this directory and execute access to Python and `zabbix_sender`; keep `config.json` readable only by the intended account.
-- Zabbix item history is retained for seven days. Numeric items also keep trends for 365 days; text state, timestamp, error, and per-output JSON items do not create trends.
+Use absolute paths because cron has a limited `PATH` and working directory. Each run sends the latest status snapshot. The Zabbix agent does not run the collector; `zabbix_sender` connects directly to the configured server or proxy.

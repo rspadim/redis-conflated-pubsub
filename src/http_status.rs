@@ -244,7 +244,7 @@ mod tests {
         assert_eq!(response.status, 200);
         assert_eq!(response.content_type, "application/json");
         assert_eq!(snapshot["state"], "running");
-        assert_eq!(snapshot["schema_version"], 4);
+        assert_eq!(snapshot["schema_version"], 5);
     }
 
     #[test]

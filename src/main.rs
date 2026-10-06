@@ -5,7 +5,8 @@
 //! and never retried; the output continues with later chunks. Byte limits count the complete RESP
 //! request, including MULTI/EXEC framing. Oversized messages default to `send`; `truncate` removes
 //! only a payload suffix, and `drop` skips the affected output message. Status exposes dropped,
-//! truncated, publish-error, and uncertain message counters plus per-output `pending_messages`.
+//! truncated, deduplicated, publish-error, and uncertain message counters plus per-output
+//! `pending_messages`. Per-output deduplication caches are memory-only and expire by TTL.
 
 mod config;
 mod http_status;
@@ -29,6 +30,9 @@ use tracing::{error, info};
     long_about = "Forward messages from Redis SUBSCRIBE/PSUBSCRIBE to named Redis outputs. Payloads remain raw bytes by default. Outputs can publish immediately or conflate to the latest value per mapped channel.\n\n\
 For conflated outputs, each MULTI/EXEC request is chunked by both max_commands_per_exec and the exact RESP request byte target. The byte count includes the MULTI and EXEC frames and every PUBLISH array/bulk-string frame. max_bytes_per_exec is a client-side target, not discovery of the output Redis server's own limits.\n\n\
 If one PUBLISH exceeds its output target, oversized_message_policy selects send (default, preserve the full payload), truncate (remove only a payload suffix), or drop (skip that output's copy). Failed publishes are not retried; the affected operation is counted and later messages/chunks continue.\n\n\
+Each output can configure outputs.<name>.deduplication.ttl_ms as a signed integer (default 5000; nonpositive disables only deduplication; positive durations are limited to 365 days). Deduplication compares the exact mapped output channel and raw incoming payload bytes, including bytes removed by truncate. The cache remembers only the latest successfully or uncertainly published payload per channel: A->B->A publishes all three values, while consecutive repeats are suppressed until the TTL expires. In direct mode, changed values pass immediately; in conflated mode, only the final pending value per channel is compared immediately before each chunk is sent. Caches are independent, in-memory per output, and expired entries are periodically pruned.\n\n\
+Output-local deduplication_groups set ttl_ms, round_ms, restart_on_change, max_members, and max_cache_bytes; round_ms floors the Unix-epoch TTL-start timestamp to a bucket (0 disables rounding). Shared expiry starts on the first successful or uncertain publication. With restart_on_change=true, a new member's first successful or uncertain publication or a changed final value successfully or uncertainly published restarts it; restart_on_change=false keeps it fixed. Each group cache defaults to 16384 members and 64 MiB of channel-name plus payload data (maximum 100000 members and 256 MiB); old entries are evicted at capacity, while a single item over the byte limit is not cached (but still published). Profiles contain partial conflation and TTL/group overrides.\n\n\
+channel_policies are ordered rules for the final mapped output channel. Each rule has exactly one glob, prefix, or suffix selector, or default: true as the last catch-all rule, and chooses either a profile or inline conflation.interval_ms, deduplication.ttl_ms, or deduplication.group values. Only the first match applies; unmatched channels use output-level defaults. Runtime validation checks that the default is last and that round_ms does not exceed a positive group TTL. Positive intervals and TTLs are limited to 365 days.\n\n\
 When input and output use the same Redis server, exclude_output_echoes defaults to true and filters mapped output channels before fan-out. exclude_sentinel_pubsub also defaults to true and filters Sentinel hello/notification channels. Both can be changed under input in the JSON configuration. Payloads and pending queues are process-local; there is no disk spool.",
     after_help = "Examples:\n  redis-conflated-pubsub --config config.json\n  redis-conflated-pubsub --config config.json --check-config\n  redis-conflated-pubsub --config-json-schema > config.schema.json"
 )]
@@ -124,11 +128,36 @@ mod tests {
     #[test]
     fn long_help_documents_configuration_and_examples() {
         let help = Args::command().render_long_help().to_string();
+        let help = help.split_whitespace().collect::<Vec<_>>().join(" ");
         for expected in [
             "max_bytes_per_exec",
             "oversized_message_policy",
             "exclude_output_echoes",
             "exclude_sentinel_pubsub",
+            "outputs.<name>.deduplication.ttl_ms",
+            "deduplication_groups",
+            "round_ms",
+            "floors the Unix-epoch TTL-start timestamp",
+            "0 disables rounding",
+            "restart_on_change",
+            "Shared expiry starts",
+            "new member's first successful or uncertain publication",
+            "changed final value successfully or uncertainly published",
+            "restart_on_change=false keeps it fixed",
+            "Profiles contain partial",
+            "max_members",
+            "max_cache_bytes",
+            "limited to 365 days",
+            "channel_policies",
+            "exactly one glob, prefix, or suffix selector",
+            "default: true as the last catch-all rule",
+            "Only the first match applies",
+            "chooses either a profile or inline",
+            "conflation.interval_ms",
+            "deduplication.ttl_ms",
+            "deduplication.group",
+            "final mapped output channel",
+            "unmatched channels use output-level defaults",
             "--config-json-schema",
         ] {
             assert!(help.contains(expected), "missing {expected} in help");
@@ -143,11 +172,17 @@ mod tests {
         assert!(serialized.contains("exclude_sentinel_pubsub"));
         assert!(serialized.contains("max_bytes_per_exec"));
         assert!(serialized.contains("oversized_message_policy"));
+        assert!(serialized.contains("deduplication"));
+        assert!(serialized.contains("ttl_ms"));
         assert_eq!(schema["type"], "object");
         assert_eq!(schema["properties"]["outputs"]["minProperties"], 1);
         assert_eq!(
             schema["$defs"]["InputConfig"]["properties"]["subscriptions"]["minItems"],
             1
         );
+        let deduplication_ttl = &schema["$defs"]["DeduplicationConfig"]["properties"]["ttl_ms"];
+        assert_eq!(deduplication_ttl["type"], "integer");
+        assert_eq!(deduplication_ttl["default"], 5000);
+        assert!(deduplication_ttl.get("minimum").is_none());
     }
 }

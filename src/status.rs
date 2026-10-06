@@ -24,6 +24,8 @@ pub struct Metrics {
     pub output_payload_bytes_total: AtomicU64,
     pub conflated_messages_total: AtomicU64,
     pub conflated_payload_bytes_total: AtomicU64,
+    pub deduplicated_messages_total: AtomicU64,
+    pub deduplicated_payload_bytes_total: AtomicU64,
     pub excluded_messages_total: AtomicU64,
     pub dropped_messages_total: AtomicU64,
     pub dropped_payload_bytes_total: AtomicU64,
@@ -52,6 +54,8 @@ pub struct OutputMetrics {
     output_payload_bytes_total: AtomicU64,
     conflated_messages_total: AtomicU64,
     conflated_payload_bytes_total: AtomicU64,
+    deduplicated_messages_total: AtomicU64,
+    deduplicated_payload_bytes_total: AtomicU64,
     dropped_messages_total: AtomicU64,
     dropped_payload_bytes_total: AtomicU64,
     truncated_messages_total: AtomicU64,
@@ -79,6 +83,8 @@ impl OutputMetrics {
             output_payload_bytes_total: AtomicU64::new(0),
             conflated_messages_total: AtomicU64::new(0),
             conflated_payload_bytes_total: AtomicU64::new(0),
+            deduplicated_messages_total: AtomicU64::new(0),
+            deduplicated_payload_bytes_total: AtomicU64::new(0),
             dropped_messages_total: AtomicU64::new(0),
             dropped_payload_bytes_total: AtomicU64::new(0),
             truncated_messages_total: AtomicU64::new(0),
@@ -112,6 +118,10 @@ impl OutputMetrics {
             conflated_messages_total: self.conflated_messages_total.load(Ordering::Relaxed),
             conflated_payload_bytes_total: self
                 .conflated_payload_bytes_total
+                .load(Ordering::Relaxed),
+            deduplicated_messages_total: self.deduplicated_messages_total.load(Ordering::Relaxed),
+            deduplicated_payload_bytes_total: self
+                .deduplicated_payload_bytes_total
                 .load(Ordering::Relaxed),
             dropped_messages_total: self.dropped_messages_total.load(Ordering::Relaxed),
             dropped_payload_bytes_total: self.dropped_payload_bytes_total.load(Ordering::Relaxed),
@@ -153,6 +163,8 @@ impl Metrics {
             output_payload_bytes_total: AtomicU64::new(0),
             conflated_messages_total: AtomicU64::new(0),
             conflated_payload_bytes_total: AtomicU64::new(0),
+            deduplicated_messages_total: AtomicU64::new(0),
+            deduplicated_payload_bytes_total: AtomicU64::new(0),
             excluded_messages_total: AtomicU64::new(0),
             dropped_messages_total: AtomicU64::new(0),
             dropped_payload_bytes_total: AtomicU64::new(0),
@@ -260,6 +272,30 @@ impl Metrics {
         output
             .pending_payload_bytes
             .fetch_sub(payload_bytes, Ordering::Relaxed);
+    }
+
+    pub fn record_output_deduplicated(
+        &self,
+        output: &OutputMetrics,
+        payload_bytes: usize,
+        pending_payload_bytes: usize,
+    ) {
+        let payload_bytes = payload_bytes as u64;
+        let pending_payload_bytes = pending_payload_bytes as u64;
+        self.deduplicated_messages_total
+            .fetch_add(1, Ordering::Relaxed);
+        self.deduplicated_payload_bytes_total
+            .fetch_add(payload_bytes, Ordering::Relaxed);
+        output
+            .deduplicated_messages_total
+            .fetch_add(1, Ordering::Relaxed);
+        output
+            .deduplicated_payload_bytes_total
+            .fetch_add(payload_bytes, Ordering::Relaxed);
+        output.pending_messages.fetch_sub(1, Ordering::Relaxed);
+        output
+            .pending_payload_bytes
+            .fetch_sub(pending_payload_bytes, Ordering::Relaxed);
     }
 
     pub fn record_output_dropped(
@@ -394,7 +430,7 @@ impl Metrics {
 
     pub fn snapshot(&self) -> StatusSnapshot {
         StatusSnapshot {
-            schema_version: 4,
+            schema_version: 5,
             state: self.state.lock().unwrap().clone(),
             updated_at: timestamp(),
             started_at: self.started_at.to_rfc3339_opts(SecondsFormat::Millis, true),
@@ -407,6 +443,10 @@ impl Metrics {
             conflated_messages_total: self.conflated_messages_total.load(Ordering::Relaxed),
             conflated_payload_bytes_total: self
                 .conflated_payload_bytes_total
+                .load(Ordering::Relaxed),
+            deduplicated_messages_total: self.deduplicated_messages_total.load(Ordering::Relaxed),
+            deduplicated_payload_bytes_total: self
+                .deduplicated_payload_bytes_total
                 .load(Ordering::Relaxed),
             excluded_messages_total: self.excluded_messages_total.load(Ordering::Relaxed),
             dropped_messages_total: self.dropped_messages_total.load(Ordering::Relaxed),
@@ -450,6 +490,8 @@ pub struct StatusSnapshot {
     pub output_payload_bytes_total: u64,
     pub conflated_messages_total: u64,
     pub conflated_payload_bytes_total: u64,
+    pub deduplicated_messages_total: u64,
+    pub deduplicated_payload_bytes_total: u64,
     pub excluded_messages_total: u64,
     pub dropped_messages_total: u64,
     pub dropped_payload_bytes_total: u64,
@@ -481,6 +523,8 @@ pub struct OutputStatusSnapshot {
     pub output_payload_bytes_total: u64,
     pub conflated_messages_total: u64,
     pub conflated_payload_bytes_total: u64,
+    pub deduplicated_messages_total: u64,
+    pub deduplicated_payload_bytes_total: u64,
     pub dropped_messages_total: u64,
     pub dropped_payload_bytes_total: u64,
     pub truncated_messages_total: u64,
@@ -555,7 +599,7 @@ mod tests {
 
         let json: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
         assert_eq!(json["state"], "running");
-        assert_eq!(json["schema_version"], 4);
+        assert_eq!(json["schema_version"], 5);
         assert_eq!(json["input_messages_total"], 2);
         assert_eq!(json["input_payload_bytes_total"], 18);
     }
@@ -628,6 +672,33 @@ mod tests {
     }
 
     #[test]
+    fn deduplication_metrics_count_raw_bytes_and_clear_truncated_pending_payload() {
+        let metrics = Metrics::new();
+        let output = metrics.register_output("dedup-output");
+        metrics.record_output_input(&output, 5);
+        metrics.record_output_truncated(&output, 3);
+        metrics.record_output_deduplicated(&output, 5, 2);
+
+        let snapshot = serde_json::to_value(metrics.snapshot()).unwrap();
+        assert_eq!(snapshot["schema_version"], 5);
+        assert_eq!(snapshot["deduplicated_messages_total"], 1);
+        assert_eq!(snapshot["deduplicated_payload_bytes_total"], 5);
+        assert_eq!(
+            snapshot["outputs"]["dedup-output"]["deduplicated_messages_total"],
+            1
+        );
+        assert_eq!(
+            snapshot["outputs"]["dedup-output"]["deduplicated_payload_bytes_total"],
+            5
+        );
+        assert_eq!(snapshot["outputs"]["dedup-output"]["pending_messages"], 0);
+        assert_eq!(
+            snapshot["outputs"]["dedup-output"]["pending_payload_bytes"],
+            0
+        );
+    }
+
+    #[test]
     fn oversized_policy_counters_and_pending_bytes_are_exposed_per_output() {
         let metrics = Metrics::new();
         let output = metrics.register_output("policy-output");
@@ -636,7 +707,7 @@ mod tests {
         metrics.record_output_dropped(&output, 1, 6);
 
         let snapshot = serde_json::to_value(metrics.snapshot()).unwrap();
-        assert_eq!(snapshot["schema_version"], 4);
+        assert_eq!(snapshot["schema_version"], 5);
         assert_eq!(snapshot["dropped_messages_total"], 1);
         assert_eq!(snapshot["dropped_payload_bytes_total"], 6);
         assert_eq!(snapshot["truncated_messages_total"], 1);

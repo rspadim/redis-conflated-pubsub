@@ -9,7 +9,19 @@ permissions:
   contents: write
 
 jobs:
+  validate-tag:
+    name: Verify release tag
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require the tag to match Cargo.toml
+        shell: bash
+        run: |
+          version="$(sed -n 's/^version = \"\(.*\)\"$/\1/p' Cargo.toml | head -n 1)"
+          test "$GITHUB_REF_NAME" = "v$version"
+
   build:
+    needs: validate-tag
     name: Build ${{ matrix.artifact }}
     strategy:
       fail-fast: false
