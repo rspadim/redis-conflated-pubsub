@@ -3,6 +3,20 @@
 # Cleanup:
 # docker compose -p redis-conflated-ttl-test -f compose.ttl.test.yml down --volumes --remove-orphans
 services:
+  config-seed:
+    image: alpine:3.22
+    command: ["sh", "-c", "cp /input/docker-ttl-config.json /state/docker-ttl-config.json && tail -f /dev/null"]
+    volumes:
+      - ./tests/docker-ttl-config.json:/input/docker-ttl-config.json:ro
+      - ttl-state:/state
+    networks:
+      ttl: {}
+    healthcheck:
+      test: ["CMD", "test", "-f", "/state/docker-ttl-config.json"]
+      interval: 1s
+      timeout: 1s
+      retries: 10
+
   redis-ttl:
     image: redis:7.4-alpine
     networks:
@@ -17,25 +31,29 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    command: ["--config", "/config/docker-ttl-config.json"]
+    command: ["--config", "/state/docker-ttl-config.json"]
     working_dir: /state
     volumes:
-      - ./tests/docker-ttl-config.json:/config/docker-ttl-config.json:ro
       - ttl-state:/state
     networks:
       ttl: {}
     depends_on:
       redis-ttl:
         condition: service_healthy
+      config-seed:
+        condition: service_healthy
 
   ttl-integration-test:
+    pid: "service:service-ttl"
     image: python:3.13-alpine
     command: ["python", "/tests/docker_ttl_integration.py"]
     environment:
       REDIS_HOST: redis-ttl
       STATUS_URL: http://service-ttl:9090/
+      SERVICE_PID: "1"
     volumes:
       - ./tests:/tests:ro
+      - ttl-state:/state
     networks:
       ttl: {}
     depends_on:

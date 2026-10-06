@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use anyhow::{Context, Result};
 use clap::Parser;
 use config::AppConfig;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -33,7 +33,7 @@ If one PUBLISH exceeds its output target, oversized_message_policy selects send 
 Each output can configure outputs.<name>.deduplication.ttl_ms as a signed integer (default 5000; nonpositive disables only deduplication; positive durations are limited to 365 days). Deduplication compares the exact mapped output channel and raw incoming payload bytes, including bytes removed by truncate. The cache remembers only the latest successfully or uncertainly published payload per channel: A->B->A publishes all three values, while consecutive repeats are suppressed until the TTL expires. In direct mode, changed values pass immediately; in conflated mode, only the final pending value per channel is compared immediately before each chunk is sent. Caches are independent, in-memory per output, and expired entries are periodically pruned.\n\n\
 Output-local deduplication_groups set ttl_ms, round_ms, restart_on_change, max_members, and max_cache_bytes; round_ms floors the Unix-epoch TTL-start timestamp to a bucket (0 disables rounding). Shared expiry starts on the first successful or uncertain publication. With restart_on_change=true, a new member's first successful or uncertain publication or a changed final value successfully or uncertainly published restarts it; restart_on_change=false keeps it fixed. Each group cache defaults to 16384 members and 64 MiB of channel-name plus payload data (maximum 100000 members and 256 MiB); old entries are evicted at capacity, while a single item over the byte limit is not cached (but still published). Profiles contain partial conflation and TTL/group overrides.\n\n\
 channel_policies are ordered rules for the final mapped output channel. Each rule has exactly one glob, prefix, or suffix selector, or default: true as the last catch-all rule, and chooses either a profile or inline conflation.interval_ms, deduplication.ttl_ms, or deduplication.group values. Only the first match applies; unmatched channels use output-level defaults. Runtime validation checks that the default is last and that round_ms does not exceed a positive group TTL. Positive intervals and TTLs are limited to 365 days.\n\n\
-When input and output use the same Redis server, exclude_output_echoes defaults to true and filters mapped output channels before fan-out. exclude_sentinel_pubsub also defaults to true and filters Sentinel hello/notification channels. Both can be changed under input in the JSON configuration. Payloads and pending queues are process-local; there is no disk spool.",
+When input and output use the same Redis server, exclude_output_echoes defaults to true and filters mapped output channels before fan-out. exclude_sentinel_pubsub also defaults to true and filters Sentinel hello/notification channels. Both can be changed under input in the JSON configuration. On Unix, SIGHUP reloads a valid configuration; an invalid file leaves the current runtime active. An accepted reload drains pending output queues and restarts input/output workers, creating a brief Pub/Sub input gap and resetting status counters. Changes to logging or instance_lock still require a full systemd restart. Payloads and pending queues are process-local; there is no disk spool.",
     after_help = "Examples:\n  redis-conflated-pubsub --config config.json\n  redis-conflated-pubsub --config config.json --check-config\n  redis-conflated-pubsub --config-json-schema > config.schema.json"
 )]
 struct Args {
@@ -106,12 +106,42 @@ async fn run() -> Result<()> {
 
     let _instance_lock = config.instance_lock.acquire()?;
     let _logging_guard = logging::init(&config.logging)?;
-    let metrics = Arc::new(status::Metrics::new());
+    let mut shutdown_signals = service::ShutdownSignals::new()?;
+    let mut active_config = config;
+    let mut metrics = Arc::new(status::Metrics::new());
+    let mut fallback_config = None;
 
     info!(version = env!("CARGO_PKG_VERSION"), "service_started");
-    if let Err(error) = service::run(config, metrics.clone()).await {
-        error!(error = %error, "service_failed");
-        return Err(error);
+    loop {
+        let run_result = service::run(
+            active_config.clone(),
+            Arc::clone(&metrics),
+            &args.config,
+            &mut shutdown_signals,
+        )
+        .await;
+        let outcome = match run_result {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let Some(previous_config) = fallback_config.take() else {
+                    error!(error = %error, "service_failed");
+                    return Err(error);
+                };
+                warn!(error = %error, "configuration_reload_start_failed; restoring previous configuration");
+                active_config = previous_config;
+                metrics = Arc::new(status::Metrics::new());
+                continue;
+            }
+        };
+        match outcome {
+            service::RunOutcome::Shutdown => break,
+            service::RunOutcome::Reload(next_config) => {
+                fallback_config = Some(active_config.clone());
+                active_config = *next_config;
+                metrics = Arc::new(status::Metrics::new());
+                info!("service_configuration_reloaded");
+            }
+        }
     }
 
     info!("service_stopped");
@@ -158,6 +188,11 @@ mod tests {
             "deduplication.group",
             "final mapped output channel",
             "unmatched channels use output-level defaults",
+            "SIGHUP reloads a valid configuration",
+            "invalid file leaves the current runtime active",
+            "logging or instance_lock still require a full systemd restart",
+            "brief Pub/Sub input gap",
+            "resetting status counters",
             "--config-json-schema",
         ] {
             assert!(help.contains(expected), "missing {expected} in help");

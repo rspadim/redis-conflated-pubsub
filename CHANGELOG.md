@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.4 — Unreleased
+
+- Added Unix `SIGHUP` configuration reload. The new file is parsed and validated before switching; invalid configuration leaves the current runtime active. Accepted reloads drain pending output queues and restart input/output workers in-process, briefly interrupting Pub/Sub input and resetting status counters. Logging and instance-lock changes still require a full process restart.
+
 ## 0.1.3 — 2026-10-06
 
 - Added per-output profiles with partial conflation/TTL overrides. Ordered `channel_policies` select the first matching profile or inline rule, then the required final `default` rule; existing configurations without policies remain backward compatible.

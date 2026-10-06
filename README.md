@@ -149,6 +149,16 @@ Each ordered `channel_policies` entry has exactly one selector: `glob`, `prefix`
 
 Positive intervals retain the latest message per mapped channel and flush in `MULTI`/`EXEC` transactions. `max_bytes_per_exec` is a per-request target; `max_commands_per_exec` limits commands per transaction. `oversized_message_policy` is `send` (default), `truncate`, or `drop`.
 
+## Reload configuration on Unix (v0.1.4+)
+
+Starting with v0.1.4, send `SIGHUP` to reload the configured JSON without restarting the systemd unit. Until that version is deployed, v0.1.3 requires a normal service restart:
+
+```sh
+sudo systemctl kill --signal=HUP --kill-whom=main redis-conflated-pubsub.service
+```
+
+The service validates the file before switching; an invalid configuration is rejected and the current runtime keeps running. A valid reload drains pending output queues and restarts the Redis input/output workers, so there is a brief Pub/Sub input gap and messages may be missed (Pub/Sub has no replay). Status counters and uptime reset. Changes to `logging` or `instance_lock`, or updating the executable itself, still require a full service restart.
+
 ## Remote input to local Redis
 
 This example forwards `test-feed:*` from a remote Redis input to local Redis at `127.0.0.1:16379`, DB 1. Replace the input endpoint and adjust credentials and limits as needed.

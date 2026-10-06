@@ -1,10 +1,11 @@
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
+    path::Path,
     sync::{Arc, atomic::Ordering},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use futures_util::StreamExt;
 use redis::aio::MultiplexedConnection;
 use tokio::{
@@ -23,6 +24,66 @@ use crate::{
 };
 
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
+
+#[derive(Debug)]
+pub enum RunOutcome {
+    Shutdown,
+    Reload(Box<AppConfig>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ServiceSignal {
+    Shutdown,
+    Reload,
+}
+
+pub struct ShutdownSignals {
+    #[cfg(unix)]
+    interrupt: tokio::signal::unix::Signal,
+    #[cfg(unix)]
+    terminate: tokio::signal::unix::Signal,
+    #[cfg(unix)]
+    hangup: tokio::signal::unix::Signal,
+}
+
+impl ShutdownSignals {
+    pub fn new() -> Result<Self> {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+
+            Ok(Self {
+                interrupt: signal(SignalKind::interrupt())
+                    .context("failed to install SIGINT handler")?,
+                terminate: signal(SignalKind::terminate())
+                    .context("failed to install SIGTERM handler")?,
+                hangup: signal(SignalKind::hangup()).context("failed to install SIGHUP handler")?,
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(Self {})
+        }
+    }
+
+    async fn recv(&mut self) -> Result<ServiceSignal> {
+        #[cfg(unix)]
+        {
+            tokio::select! {
+                _ = self.interrupt.recv() => Ok(ServiceSignal::Shutdown),
+                _ = self.terminate.recv() => Ok(ServiceSignal::Shutdown),
+                _ = self.hangup.recv() => Ok(ServiceSignal::Reload),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            tokio::signal::ctrl_c()
+                .await
+                .context("failed to listen for Ctrl-C")?;
+            Ok(ServiceSignal::Shutdown)
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 struct InboundMessage {
@@ -633,7 +694,12 @@ impl OutputChannelFilter {
     }
 }
 
-pub async fn run(config: AppConfig, metrics: Arc<Metrics>) -> Result<()> {
+pub async fn run(
+    config: AppConfig,
+    metrics: Arc<Metrics>,
+    config_path: &Path,
+    shutdown_signals: &mut ShutdownSignals,
+) -> Result<RunOutcome> {
     let input_client = config.input.redis.client()?;
     let http_listener = bind_status_http(config.status.http.as_ref()).await?;
     let global_max_bytes_per_exec = config.max_bytes_per_exec;
@@ -755,11 +821,28 @@ pub async fn run(config: AppConfig, metrics: Arc<Metrics>) -> Result<()> {
     });
 
     info!(outputs = config.outputs.len(), "service_ready");
-    wait_for_shutdown_signal()
-        .await
-        .context("failed to listen for shutdown signal")?;
+    let run_outcome = loop {
+        match shutdown_signals.recv().await? {
+            ServiceSignal::Shutdown => break RunOutcome::Shutdown,
+            ServiceSignal::Reload => {
+                let next_config = match load_reload_config(&config, config_path) {
+                    Ok(next_config) => next_config,
+                    Err(error) => {
+                        warn!(error = %error, "configuration_reload_rejected");
+                        continue;
+                    }
+                };
+                info!("configuration_reload_accepted");
+                metrics.set_state("reloading");
+                break RunOutcome::Reload(Box::new(next_config));
+            }
+        }
+    };
 
-    info!("shutdown_signal_received");
+    match &run_outcome {
+        RunOutcome::Shutdown => info!("shutdown_signal_received"),
+        RunOutcome::Reload(_) => info!("configuration_reload_draining_outputs"),
+    }
     input_task.abort();
     let _ = input_task.await;
 
@@ -777,12 +860,32 @@ pub async fn run(config: AppConfig, metrics: Arc<Metrics>) -> Result<()> {
     }
     if let Some(status_task) = status_task {
         status_task.abort();
+        let _ = status_task.await;
     }
     if let Some(http_task) = http_task {
         http_task.abort();
+        let _ = http_task.await;
     }
     cleanup_task.abort();
-    Ok(())
+    let _ = cleanup_task.await;
+    Ok(run_outcome)
+}
+
+fn reload_process_settings_unchanged(current: &AppConfig, next: &AppConfig) -> bool {
+    current.instance_lock.path == next.instance_lock.path
+        && current.logging.directory == next.logging.directory
+        && current.logging.level == next.logging.level
+        && current.logging.retention_days == next.logging.retention_days
+        && current.logging.max_total_size_mb == next.logging.max_total_size_mb
+}
+
+fn load_reload_config(current: &AppConfig, path: &Path) -> Result<AppConfig> {
+    let next = AppConfig::load(path).context("failed to load configuration after SIGHUP")?;
+    next.validate()?;
+    if !reload_process_settings_unchanged(current, &next) {
+        bail!("changes to instance_lock or logging require a full service restart");
+    }
+    Ok(next)
 }
 
 fn output_echo_filters(
@@ -863,28 +966,6 @@ async fn bind_status_http(
         })?;
     info!(address = %listener.local_addr()?, "http_status_server_started");
     Ok(Some(listener))
-}
-
-async fn wait_for_shutdown_signal() -> Result<()> {
-    #[cfg(unix)]
-    {
-        let mut terminate =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .context("failed to install SIGTERM handler")?;
-        tokio::select! {
-            result = tokio::signal::ctrl_c() => {
-                result.context("failed to listen for Ctrl-C")
-            }
-            _ = terminate.recv() => Ok(()),
-        }
-    }
-
-    #[cfg(not(unix))]
-    {
-        tokio::signal::ctrl_c()
-            .await
-            .context("failed to listen for Ctrl-C")
-    }
 }
 
 async fn read_input(
@@ -1999,6 +2080,64 @@ async fn write_status(path: std::path::PathBuf, update_interval_ms: u64, metrics
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sighup_is_reported_as_a_configuration_reload() {
+        use std::process::Command;
+
+        let mut signals = ShutdownSignals::new().unwrap();
+        let waiting = tokio::spawn(async move { signals.recv().await.unwrap() });
+        tokio::task::yield_now().await;
+        let pid = std::process::id().to_string();
+        let status = Command::new("kill")
+            .args(["-HUP", pid.as_str()])
+            .status()
+            .expect("kill command should be available on Unix");
+        assert!(status.success());
+        assert_eq!(waiting.await.unwrap(), ServiceSignal::Reload);
+    }
+
+    #[test]
+    fn reload_rejects_instance_lock_or_logging_changes() {
+        let current: AppConfig = serde_json::from_str(include_str!("../config.example.json"))
+            .expect("example config should deserialize");
+        let mut next = current.clone();
+        assert!(reload_process_settings_unchanged(&current, &next));
+
+        next.logging.level = "debug".to_owned();
+        assert!(!reload_process_settings_unchanged(&current, &next));
+
+        next = current.clone();
+        next.instance_lock.path.push(".new");
+        assert!(!reload_process_settings_unchanged(&current, &next));
+    }
+
+    #[test]
+    fn reload_config_is_parsed_and_validated_before_acceptance() {
+        let current: AppConfig = serde_json::from_str(include_str!("../config.example.json"))
+            .expect("example config should deserialize");
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.json");
+        std::fs::write(&path, include_str!("../config.example.json")).unwrap();
+
+        let loaded = load_reload_config(&current, &path).unwrap();
+        assert_eq!(loaded.outputs.len(), current.outputs.len());
+
+        std::fs::write(&path, "{ invalid json").unwrap();
+        assert!(load_reload_config(&current, &path).is_err());
+
+        let mut incompatible: serde_json::Value =
+            serde_json::from_str(include_str!("../config.example.json")).unwrap();
+        incompatible["logging"]["level"] = serde_json::json!("debug");
+        std::fs::write(&path, serde_json::to_vec(&incompatible).unwrap()).unwrap();
+        assert!(
+            load_reload_config(&current, &path)
+                .unwrap_err()
+                .to_string()
+                .contains("logging require a full service restart")
+        );
+    }
 
     fn pending_message(output_channel: &str, payload: Vec<u8>) -> PendingMessage {
         PendingMessage {

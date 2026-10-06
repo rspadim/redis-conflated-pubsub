@@ -1,6 +1,7 @@
 import json
 import os
 import select
+import signal
 import time
 import urllib.request
 
@@ -56,6 +57,64 @@ def wait_for_status(predicate, description, timeout=15):
             return latest
         time.sleep(0.05)
     raise AssertionError(f"Timed out waiting for {description}; last status: {latest}")
+
+
+def wait_for_sighup_reload(publisher_sock, publisher_reader, timeout=15):
+    deadline = time.monotonic() + timeout
+    latest = None
+    while time.monotonic() < deadline:
+        try:
+            latest = get_status()
+        except OSError:
+            time.sleep(0.05)
+            continue
+        if latest.get("state") == "running" and latest.get("input_messages_total") == 0:
+            send_command(publisher_sock, "PUBSUB", "NUMPAT")
+            if read_response(publisher_reader) == 4:
+                return latest
+        time.sleep(0.05)
+    raise AssertionError(f"Service did not finish SIGHUP reload; last status: {latest}")
+
+
+def exercise_sighup_reload(publisher_sock, publisher_reader, subscribers):
+    service_pid = os.environ.get("SERVICE_PID")
+    if not service_pid:
+        return
+
+    config_path = "/state/docker-ttl-config.json"
+    with open(config_path, "rb") as config_file:
+        original_config = config_file.read()
+    updated_config = json.loads(original_config)
+    updated_config["outputs"]["ttl"]["profiles"]["default"][
+        "deduplication.ttl_ms"
+    ] = 1200
+
+    try:
+        with open(config_path, "w", encoding="utf-8") as config_file:
+            json.dump(updated_config, config_file)
+        os.kill(int(service_pid), signal.SIGHUP)
+        wait_for_sighup_reload(publisher_sock, publisher_reader)
+        probe = "reload-probe"
+        publish_policy_event(
+            publisher_sock,
+            publisher_reader,
+            subscribers,
+            probe,
+            PAYLOAD_A,
+            ttl_expected=True,
+        )
+        time.sleep(0.85)
+        publish_policy_batch(
+            publisher_sock,
+            publisher_reader,
+            subscribers,
+            [(probe, PAYLOAD_A)],
+            ttl_items=[],
+            assert_ttl_quiet=True,
+        )
+    finally:
+        with open(config_path, "wb") as config_file:
+            config_file.write(original_config)
 
 
 def open_subscribers():
@@ -755,9 +814,11 @@ def main():
             assert metrics["pending_payload_bytes"] == 0, (name, metrics)
             assert metrics["pending_keys"] == 0, (name, metrics)
 
+        exercise_sighup_reload(publisher_sock, publisher_reader, subscribers)
+
         print(
             "TTL/profile/group E2E passed: profiles, ordered selectors and default, "
-            "individual expiry, floor-rounded and fixed/reset group expiry, and "
+            "individual expiry, floor-rounded and fixed/reset group expiry, SIGHUP reload, and "
             "independent 100/300 ms intervals behaved on mapped channels; TTL 0 "
             "still conflated at 50 ms and direct TTL 0 forwarded every input."
         )
