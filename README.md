@@ -2,7 +2,7 @@
 
 A Rust relay that forwards Redis Pub/Sub messages to independently configured Redis outputs.
 
-Current release: **v0.1.3**. [Download a platform binary](https://github.com/rspadim/redis-conflated-pubsub/releases) or see the [developer build instructions](src/README.md).
+Current release: **v0.1.4**. [Download a platform binary](https://github.com/rspadim/redis-conflated-pubsub/releases) or see the [developer build instructions](src/README.md).
 
 ## Quick start
 
@@ -151,7 +151,7 @@ Positive intervals retain the latest message per mapped channel and flush in `MU
 
 ## Reload configuration on Unix (v0.1.4+)
 
-Starting with v0.1.4, send `SIGHUP` to reload the configured JSON without restarting the systemd unit. Until that version is deployed, v0.1.3 requires a normal service restart:
+On v0.1.4 and later, send `SIGHUP` to reload the configured JSON without restarting the systemd unit. Older versions require a normal service restart:
 
 ```sh
 sudo systemctl kill --signal=HUP --kill-whom=main redis-conflated-pubsub.service

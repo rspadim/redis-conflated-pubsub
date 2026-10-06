@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.4 — Unreleased
+## 0.1.4 — 2026-10-06
 
 - Added Unix `SIGHUP` configuration reload. The new file is parsed and validated before switching; invalid configuration leaves the current runtime active. Accepted reloads drain pending output queues and restart input/output workers in-process, briefly interrupting Pub/Sub input and resetting status counters. Logging and instance-lock changes still require a full process restart.
 

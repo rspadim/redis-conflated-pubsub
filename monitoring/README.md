@@ -1,10 +1,10 @@
-# Zabbix monitoring (v0.1.3)
+# Zabbix monitoring (v0.1.4)
 
 This guide configures the Python 3 collector and the Zabbix 5.0 or 7.0 template. The collector reads the service status over HTTP and sends trapper-item values with `zabbix_sender`; it uses only Python standard-library modules.
 
 ## Prerequisites
 
-- Redis Conflated Pub/Sub v0.1.3 running with its HTTP status listener enabled. The project configuration example uses:
+- Redis Conflated Pub/Sub v0.1.4 running with its HTTP status listener enabled. The project configuration example uses:
 
   ```json
   "status": {
@@ -56,7 +56,7 @@ The status endpoint is `GET /`; configure `base_url` with the HTTP(S) origin, su
 | Status field or derived value | Zabbix key suffix | Type / meaning |
 | --- | --- | --- |
 | Derived from `state` | `health` | Unsigned integer: `1` when `state` is `running`, otherwise `0` |
-| `schema_version` | `schema_version` | Unsigned integer; remains `5` in v0.1.3 |
+| `schema_version` | `schema_version` | Unsigned integer; remains `5` in v0.1.4 |
 | `state` | `state` | Text service state |
 | `updated_at`, `started_at`, `last_input_at`, `last_flush_at` | Same field name | Text timestamps; null is sent as `never` |
 | `last_error` | `last_error` | Text; null is sent as `none` |
@@ -75,7 +75,7 @@ The status endpoint is `GET /`; configure `base_url` with the HTTP(S) origin, su
 | `pending_keys` | `pending_keys` | Unsigned integer |
 | `outputs` | `outputs_json` | Compact JSON text map of per-output metrics |
 
-The v0.1.3 deduplication counters are additive; **`schema_version` remains `5`**. The per-output JSON includes destination-level published, conflated, deduplicated, and payload-byte metrics. Its deduplication byte counts use the same raw-input-payload semantics as the global counters. The default item keys use the `redis_conflated_pubsub.` prefix; if you change `key_prefix`, update the imported template's item keys to match. Error text is limited to 2,048 characters and line breaks are normalized for sender input.
+The deduplication counters are additive; **`schema_version` remains `5`**. The per-output JSON includes destination-level published, conflated, deduplicated, and payload-byte metrics. Its deduplication byte counts use the same raw-input-payload semantics as the global counters. The default item keys use the `redis_conflated_pubsub.` prefix; if you change `key_prefix`, update the imported template's item keys to match. Error text is limited to 2,048 characters and line breaks are normalized for sender input.
 
 ## Run on a schedule
 
