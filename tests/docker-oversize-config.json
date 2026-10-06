@@ -1,0 +1,55 @@
+{
+  "max_bytes_per_exec": 4194304,
+  "oversized_message_policy": "send",
+  "input": {
+    "redis": {
+      "host": "10.253.241.10",
+      "port": 6379,
+      "username": null,
+      "password_env": null,
+      "tls": false,
+      "database": 0,
+      "connect_timeout_ms": 2000
+    },
+    "subscriptions": [
+      {
+        "type": "psubscribe",
+        "pattern": "oversize-feed:*"
+      }
+    ]
+  },
+  "outputs": {
+    "oversize-output": {
+      "redis": {
+        "host": "10.253.241.10",
+        "port": 6379,
+        "username": null,
+        "password_env": null,
+        "tls": false,
+        "database": 1,
+        "connect_timeout_ms": 2000
+      },
+      "channel_prefix": "oversize-out:",
+      "conflation": {
+        "interval_ms": 250,
+        "max_commands_per_exec": 2,
+        "max_bytes_per_exec": 2097152
+      }
+    }
+  },
+  "instance_lock": {
+    "path": "/state/redis-conflated-oversize.lock"
+  },
+  "status": {
+    "http": {
+      "bind": "0.0.0.0",
+      "port": 9090
+    }
+  },
+  "logging": {
+    "directory": "/state/logs",
+    "level": "warn",
+    "retention_days": 2,
+    "max_total_size_mb": 10
+  }
+}

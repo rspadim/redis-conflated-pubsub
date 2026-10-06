@@ -17,12 +17,19 @@ DEFAULT_CONFIG = Path(__file__).resolve().with_name("config.json")
 DEFAULT_KEY_PREFIX = "redis_conflated_pubsub."
 COUNTER_FIELDS = (
     "input_messages_total",
+    "input_payload_bytes_total",
     "output_batches_total",
     "output_messages_total",
     "conflated_messages_total",
     "excluded_messages_total",
     "dropped_messages_total",
+    "dropped_payload_bytes_total",
+    "truncated_messages_total",
+    "truncated_payload_bytes_total",
     "publish_errors_total",
+    "publish_error_messages_total",
+    "uncertain_transactions_total",
+    "uncertain_messages_total",
     "input_reconnects_total",
     "output_reconnects_total",
     "pending_keys",
@@ -37,6 +44,8 @@ TEXT_FIELDS = (
     "last_flush_at",
     "last_error",
 )
+OUTPUTS_FIELD = "outputs"
+OUTPUTS_JSON_FIELD = "outputs_json"
 KEY_PREFIX_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 SENDER_SUMMARY_PATTERN = re.compile(
     r"processed:\s*(\d+);\s*failed:\s*(\d+);\s*total:\s*(\d+)",
@@ -102,6 +111,8 @@ def root_endpoint_url(base_url: str) -> str:
 
 def validate_status(status: Dict[str, Any]) -> None:
     missing_fields = [field for field in COUNTER_FIELDS + TEXT_FIELDS if field not in status]
+    if OUTPUTS_FIELD not in status:
+        missing_fields.append(OUTPUTS_FIELD)
     if missing_fields:
         raise ValueError(
             "status response is missing fields: {}".format(", ".join(missing_fields))
@@ -117,6 +128,27 @@ def validate_status(status: Dict[str, Any]) -> None:
         value = status[field]
         if value is not None and not isinstance(value, str):
             raise ValueError("status field {!r} must be a string or null".format(field))
+
+    outputs = status[OUTPUTS_FIELD]
+    if not isinstance(outputs, dict):
+        raise ValueError("status field 'outputs' must be an object keyed by output name")
+    for name, metrics in outputs.items():
+        if not isinstance(name, str) or not isinstance(metrics, dict):
+            raise ValueError("each status output must be an object keyed by its output name")
+    try:
+        compact_outputs_json(outputs)
+    except (TypeError, ValueError) as error:
+        raise ValueError("status field 'outputs' must contain valid JSON values") from error
+
+
+def compact_outputs_json(outputs: Dict[str, Any]) -> str:
+    return json.dumps(
+        outputs,
+        ensure_ascii=True,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
 
 
 def collect(base_url: str, timeout: float) -> Tuple[Optional[Dict[str, Any]], int]:
@@ -151,6 +183,7 @@ def build_sender_input(host: str, prefix: str, status: Dict[str, Any], health: i
     values: List[Tuple[str, Any]] = [("health", health)]
     values.extend((field, status[field]) for field in COUNTER_FIELDS)
     values.extend((field, status[field]) for field in TEXT_FIELDS)
+    values.append((OUTPUTS_JSON_FIELD, compact_outputs_json(status[OUTPUTS_FIELD])))
     values = [
         (field, value[:2048] if field == "last_error" and isinstance(value, str) else value)
         for field, value in values
@@ -237,7 +270,7 @@ def main() -> int:
             payload = build_sender_input(
                 config["host"], config["key_prefix"], status, health
             )
-            send_batch(config, payload, len(COUNTER_FIELDS) + len(TEXT_FIELDS) + 1)
+            send_batch(config, payload, len(COUNTER_FIELDS) + len(TEXT_FIELDS) + 2)
     except (OSError, ValueError, RuntimeError, URLError, subprocess.SubprocessError) as error:
         print("monitoring collection failed: {}".format(error), file=sys.stderr)
         return 1

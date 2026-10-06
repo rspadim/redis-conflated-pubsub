@@ -14,20 +14,28 @@ The service exposes one HTTP endpoint: `GET /` returns the status JSON. Configur
 | `started_at` | `started_at` | Text |
 | `uptime_seconds` | `uptime_seconds` | Unsigned integer, seconds |
 | `input_messages_total` | `input_messages_total` | Unsigned integer |
+| `input_payload_bytes_total` | `input_payload_bytes_total` | Unsigned integer, bytes |
 | `output_batches_total` | `output_batches_total` | Unsigned integer |
 | `output_messages_total` | `output_messages_total` | Unsigned integer |
 | `conflated_messages_total` | `conflated_messages_total` | Unsigned integer |
 | `excluded_messages_total` | `excluded_messages_total` | Unsigned integer |
 | `dropped_messages_total` | `dropped_messages_total` | Unsigned integer |
+| `dropped_payload_bytes_total` | `dropped_payload_bytes_total` | Unsigned integer, bytes |
+| `truncated_messages_total` | `truncated_messages_total` | Unsigned integer |
+| `truncated_payload_bytes_total` | `truncated_payload_bytes_total` | Unsigned integer, bytes |
 | `publish_errors_total` | `publish_errors_total` | Unsigned integer |
+| `publish_error_messages_total` | `publish_error_messages_total` | Unsigned integer |
+| `uncertain_transactions_total` | `uncertain_transactions_total` | Unsigned integer |
+| `uncertain_messages_total` | `uncertain_messages_total` | Unsigned integer |
 | `input_reconnects_total` | `input_reconnects_total` | Unsigned integer |
 | `output_reconnects_total` | `output_reconnects_total` | Unsigned integer |
+| `outputs` | `outputs_json` | Object keyed by output name; compact JSON Text |
 | `pending_keys` | `pending_keys` | Unsigned integer |
 | `last_input_at` | `last_input_at` | Text or null |
 | `last_flush_at` | `last_flush_at` | Text or null |
 | `last_error` | `last_error` | Text or null |
 
-The Zabbix `health` item is derived from the same response: `state == "running"` produces `1`, otherwise `0`; it is not a separate HTTP endpoint. If the root request fails or its response is invalid, the collector sends only `health=0` and leaves all other item values untouched rather than inventing zero counters. Null timestamps are sent as `never`, and a null error is sent as `none`. Error text is limited to 2,048 characters and line breaks are normalized for sender input.
+The `outputs` field maps arbitrary output names (for example, `output1`) to objects containing that destination's metrics, including published and conflated payload byte counters and payload reduction percentages. The collector preserves the complete map as compact JSON in the `outputs_json` text trapper item, so each named destination and its metrics are visible together in Zabbix Latest Data. Global metrics remain separate items, including `input_payload_bytes_total`. The Zabbix `health` item is derived from the same response: `state == "running"` produces `1`, otherwise `0`; it is not a separate HTTP endpoint. If the root request fails or its response is invalid, the collector sends only `health=0` and leaves all other item values untouched rather than inventing zero counters. Null timestamps are sent as `never`, and a null error is sent as `none`. Error text is limited to 2,048 characters and line breaks are normalized for sender input.
 
 The default item keys use the `redis_conflated_pubsub.` prefix, for example `redis_conflated_pubsub.input_messages_total`. If `key_prefix` is changed in the collector configuration, update the item keys in the imported template to use that same prefix.
 
@@ -49,7 +57,7 @@ The default item keys use the `redis_conflated_pubsub.` prefix, for example `red
 
 ## Cron example
 
-Run the collector once per minute; it sends all 19 values in one batch when the root response is valid:
+Run the collector once per minute; it sends all 27 values in one batch when the root response is valid:
 
 ```cron
 * * * * * /usr/bin/python3 /opt/redis-conflated-pubsub/monitoring/zabbix_sender.py --config /etc/redis-conflated-pubsub/monitoring.json >> /var/log/redis-conflated-pubsub-monitoring.log 2>&1
@@ -64,4 +72,4 @@ Use absolute paths because cron has a limited `PATH` and working directory. The 
 - The host name in the configuration must match the Zabbix technical host name exactly. Trapper items must be enabled and the template must be linked to that host.
 - Restrict each trapper item's **Allowed hosts** setting to the collector's source address where appropriate. The default template leaves it unset so the allowed sender address can be configured for each deployment.
 - If using the Zabbix agent account to run a UserParameter or scheduled job, grant it read access to this directory and execute access to Python and `zabbix_sender`; keep `config.json` readable only by the intended account.
-- Zabbix item history is retained for seven days. Numeric items also keep trends for 365 days; text state, timestamp, and error items do not create trends.
+- Zabbix item history is retained for seven days. Numeric items also keep trends for 365 days; text state, timestamp, error, and per-output JSON items do not create trends.

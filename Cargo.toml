@@ -3,7 +3,7 @@ name = "redis-conflated-pubsub"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
-description = "A Redis Pub/Sub bridge that publishes conflated messages in atomic batches"
+description = "A Redis Pub/Sub fan-out bridge with per-output conflation"
 license = "MIT"
 repository = "https://github.com/rspadim/redis-conflated-pubsub"
 

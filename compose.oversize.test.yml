@@ -1,0 +1,61 @@
+services:
+  redis-oversize:
+    container_name: redis-conflated-oversize-redis
+    image: redis:7.4-alpine
+    command: ["redis-server", "--client-query-buffer-limit", "1048576"]
+    networks:
+      oversize:
+        ipv4_address: 10.253.241.10
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+
+  service-oversize:
+    container_name: redis-conflated-oversize-app
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["--config", "/config/docker-oversize-config.json"]
+    working_dir: /state
+    volumes:
+      - ./tests/docker-oversize-config.json:/config/docker-oversize-config.json:ro
+      - oversize-state:/state
+    networks:
+      oversize:
+        ipv4_address: 10.253.241.20
+    depends_on:
+      redis-oversize:
+        condition: service_healthy
+
+  oversize-integration-test:
+    container_name: redis-conflated-oversize-integration
+    image: python:3.13-alpine
+    command: ["python", "/tests/docker_oversize_integration.py"]
+    environment:
+      REDIS_HOST: 10.253.241.10
+      REDIS_PORT: 6379
+      STATUS_URL: http://10.253.241.20:9090/
+    volumes:
+      - ./tests:/tests:ro
+    networks:
+      oversize:
+        ipv4_address: 10.253.241.30
+    depends_on:
+      service-oversize:
+        condition: service_started
+      redis-oversize:
+        condition: service_healthy
+
+volumes:
+  oversize-state:
+    name: redis-conflated-oversize-state
+
+networks:
+  oversize:
+    name: redis-conflated-oversize-network
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.253.241.0/24

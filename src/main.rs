@@ -1,3 +1,12 @@
+//! Redis Pub/Sub is at-most-once: messages published while the input is disconnected cannot be
+//! replayed. Queues and pending output batches are kept only in process memory, so a process crash
+//! can discard them. No disk spool is used, and payload bytes are never written to status files or
+//! logs. A failed PUBLISH or EXEC chunk is removed from pending, accounted as dropped or uncertain,
+//! and never retried; the output continues with later chunks. Byte limits count the complete RESP
+//! request, including MULTI/EXEC framing. Oversized messages default to `send`; `truncate` removes
+//! only a payload suffix, and `drop` skips the affected output message. Status exposes dropped,
+//! truncated, publish-error, and uncertain message counters plus per-output `pending_messages`.
+
 mod config;
 mod http_status;
 mod logging;
@@ -15,7 +24,7 @@ use tracing::{error, info};
 #[derive(Debug, Parser)]
 #[command(
     version,
-    about = "Conflate Redis Pub/Sub messages and publish atomic batches"
+    about = "Fan out Redis Pub/Sub messages to named outputs with optional conflation"
 )]
 struct Args {
     #[arg(short, long, default_value = "config.json")]

@@ -1,3 +1,4 @@
+import json
 import subprocess
 import unittest
 from unittest.mock import patch
@@ -15,6 +16,11 @@ def sample_status():
         "last_input_at": None,
         "last_flush_at": None,
         "last_error": 'Redis "connection" failed\nretrying',
+        "input_payload_bytes_total": 8192,
+        "outputs": {
+            "output2": {"messages_total": 2, "errors_total": 0},
+            "output1": {"messages_total": 12, "errors_total": 1},
+        },
     }
     for field in zabbix_sender.COUNTER_FIELDS:
         status.setdefault(field, 0)
@@ -28,10 +34,14 @@ class ZabbixSenderTests(unittest.TestCase):
         )
         lines = payload.splitlines()
 
-        self.assertEqual(len(lines), 19)
+        self.assertEqual(len(lines), 27)
         self.assertIn('"Redis Service" redis_conflated_pubsub.health 1', lines)
         self.assertIn(
             '"Redis Service" redis_conflated_pubsub.input_messages_total 0', lines
+        )
+        self.assertIn(
+            '"Redis Service" redis_conflated_pubsub.input_payload_bytes_total 8192',
+            lines,
         )
         self.assertIn(
             '"Redis Service" redis_conflated_pubsub.state "running"', lines
@@ -44,13 +54,19 @@ class ZabbixSenderTests(unittest.TestCase):
             '"Redis \\"connection\\" failed retrying"',
             lines,
         )
+        self.assertIn(
+            '"Redis Service" redis_conflated_pubsub.outputs_json '
+            '"{\\"output1\\":{\\"errors_total\\":1,\\"messages_total\\":12},'
+            '\\"output2\\":{\\"errors_total\\":0,\\"messages_total\\":2}}"',
+            lines,
+        )
 
     @patch.object(zabbix_sender.subprocess, "run")
     def test_sends_all_values_in_one_zabbix_sender_call(self, run):
         run.return_value = subprocess.CompletedProcess(
             args=["zabbix_sender"],
             returncode=0,
-            stdout="processed: 19; failed: 0; total: 19\n",
+            stdout="processed: 27; failed: 0; total: 27\n",
             stderr="",
         )
         config = {
@@ -66,13 +82,34 @@ class ZabbixSenderTests(unittest.TestCase):
             1,
         )
 
-        zabbix_sender.send_batch(config, payload, 19)
+        zabbix_sender.send_batch(config, payload, 27)
 
         run.assert_called_once()
         self.assertEqual(run.call_args.kwargs["input"], payload)
-        self.assertEqual(len(payload.splitlines()), 19)
+        self.assertEqual(len(payload.splitlines()), 27)
         self.assertIn("-i", run.call_args.args[0])
         self.assertEqual(run.call_args.kwargs["timeout"], 5.0)
+
+    def test_preserves_named_output_payload_metrics_in_compact_json(self):
+        status = sample_status()
+        status["outputs"]["output1"].update(
+            {
+                "published_payload_bytes_total": 4096,
+                "conflated_payload_bytes_total": 1024,
+                "payload_reduction_percent": 75.0,
+            }
+        )
+
+        payload = zabbix_sender.build_sender_input(
+            "monitored-host", "redis_conflated_pubsub.", status, 1
+        )
+        outputs_line = next(
+            line for line in payload.splitlines() if "outputs_json " in line
+        )
+        encoded_outputs = outputs_line.partition("outputs_json ")[2]
+        outputs_json = json.loads(encoded_outputs)
+
+        self.assertEqual(json.loads(outputs_json), status["outputs"])
 
     @patch.object(zabbix_sender, "fetch_json")
     def test_derives_health_from_the_single_root_status_endpoint(self, fetch_json):
@@ -145,6 +182,21 @@ class ZabbixSenderTests(unittest.TestCase):
             payload.splitlines(),
             ['"monitored-host" redis_conflated_pubsub.health 0'],
         )
+
+    @patch.object(zabbix_sender, "fetch_json")
+    def test_rejects_outputs_that_are_not_a_map_of_metric_objects(self, fetch_json):
+        for outputs in ([], {"output1": 5}):
+            with self.subTest(outputs=outputs):
+                status_response = sample_status()
+                status_response["outputs"] = outputs
+                fetch_json.return_value = (200, status_response)
+
+                status, health = zabbix_sender.collect(
+                    "http://127.0.0.1:9090", 1.0
+                )
+
+                self.assertIsNone(status)
+                self.assertEqual(health, 0)
 
     @patch.object(zabbix_sender.sys, "argv", ["zabbix_sender.py"])
     @patch.object(zabbix_sender, "load_config")

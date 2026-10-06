@@ -1,0 +1,128 @@
+{
+  "max_bytes_per_exec": 4194304,
+  "oversized_message_policy": "send",
+  "input": {
+    "redis": {
+      "host": "10.253.242.10",
+      "port": 6379,
+      "username": null,
+      "password_env": null,
+      "tls": false,
+      "database": 0,
+      "connect_timeout_ms": 3000
+    },
+    "subscriptions": [
+      {
+        "type": "psubscribe",
+        "pattern": "oversize-feed:*"
+      }
+    ]
+  },
+  "outputs": {
+    "chunked": {
+      "redis": {
+        "host": "10.253.242.50",
+        "port": 6379,
+        "username": null,
+        "password_env": null,
+        "tls": false,
+        "database": 1,
+        "connect_timeout_ms": 3000
+      },
+      "channel_prefix": "out:chunked:",
+      "conflation": {
+        "interval_ms": 1500,
+        "max_commands_per_exec": 256,
+        "max_bytes_per_exec": 716800,
+        "oversized_message_policy": "send"
+      }
+    },
+    "send": {
+      "redis": {
+        "host": "10.253.242.50",
+        "port": 6379,
+        "username": null,
+        "password_env": null,
+        "tls": false,
+        "database": 2,
+        "connect_timeout_ms": 3000
+      },
+      "channel_prefix": "out:send:",
+      "conflation": {
+        "interval_ms": 1500,
+        "max_commands_per_exec": 256,
+        "max_bytes_per_exec": 225280,
+        "oversized_message_policy": "send"
+      }
+    },
+    "truncate": {
+      "redis": {
+        "host": "10.253.242.50",
+        "port": 6379,
+        "username": null,
+        "password_env": null,
+        "tls": false,
+        "database": 3,
+        "connect_timeout_ms": 3000
+      },
+      "channel_prefix": "out:truncate:",
+      "conflation": {
+        "interval_ms": 1500,
+        "max_commands_per_exec": 256,
+        "max_bytes_per_exec": 225280,
+        "oversized_message_policy": "truncate"
+      }
+    },
+    "drop": {
+      "redis": {
+        "host": "10.253.242.50",
+        "port": 6379,
+        "username": null,
+        "password_env": null,
+        "tls": false,
+        "database": 4,
+        "connect_timeout_ms": 3000
+      },
+      "channel_prefix": "out:drop:",
+      "conflation": {
+        "interval_ms": 1500,
+        "max_commands_per_exec": 256,
+        "max_bytes_per_exec": 225280,
+        "oversized_message_policy": "drop"
+      }
+    },
+    "immediate": {
+      "redis": {
+        "host": "10.253.242.50",
+        "port": 6379,
+        "username": null,
+        "password_env": null,
+        "tls": false,
+        "database": 5,
+        "connect_timeout_ms": 3000
+      },
+      "channel_prefix": "out:immediate:",
+      "conflation": {
+        "interval_ms": 0,
+        "max_commands_per_exec": 256,
+        "max_bytes_per_exec": 225280,
+        "oversized_message_policy": "send"
+      }
+    }
+  },
+  "instance_lock": {
+    "path": "/state/redis-conflated-protocol.lock"
+  },
+  "status": {
+    "http": {
+      "bind": "0.0.0.0",
+      "port": 9090
+    }
+  },
+  "logging": {
+    "directory": "/state/logs",
+    "level": "warn",
+    "retention_days": 2,
+    "max_total_size_mb": 10
+  }
+}

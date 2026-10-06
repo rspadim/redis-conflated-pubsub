@@ -2,7 +2,7 @@ import os
 import socket
 
 
-REDIS_HOST = os.environ.get("REDIS_HOST", "redis")
+REDIS_HOST = os.environ.get("REDIS_HOST", "10.253.240.10")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
 
 

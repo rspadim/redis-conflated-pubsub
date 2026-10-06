@@ -85,6 +85,15 @@
                     <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
                 </item>
                 <item>
+                    <name>Input payload bytes total</name>
+                    <type>2</type>
+                    <key>redis_conflated_pubsub.input_payload_bytes_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><status>0</status><value_type>3</value_type>
+                    <units>B</units>
+                    <description>Total payload bytes received from input Redis Pub/Sub.</description>
+                    <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
+                </item>
+                <item>
                     <name>Output batches total</name>
                     <type>2</type>
                     <key>redis_conflated_pubsub.output_batches_total</key>
@@ -121,7 +130,33 @@
                     <type>2</type>
                     <key>redis_conflated_pubsub.dropped_messages_total</key>
                     <delay>0</delay><history>7d</history><trends>365d</trends><status>0</status><value_type>3</value_type>
-                    <description>Total messages dropped because of configured size or capacity limits.</description>
+                    <description>Total output messages skipped by the configured oversized-message policy.</description>
+                    <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
+                </item>
+                <item>
+                    <name>Truncated messages total</name>
+                    <type>2</type>
+                    <key>redis_conflated_pubsub.truncated_messages_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><status>0</status><value_type>3</value_type>
+                    <description>Total output messages whose payloads were truncated by policy.</description>
+                    <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
+                </item>
+                <item>
+                    <name>Dropped payload bytes total</name>
+                    <type>2</type>
+                    <key>redis_conflated_pubsub.dropped_payload_bytes_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><status>0</status><value_type>3</value_type>
+                    <units>B</units>
+                    <description>Total payload bytes skipped by the configured oversized-message policy.</description>
+                    <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
+                </item>
+                <item>
+                    <name>Truncated payload bytes total</name>
+                    <type>2</type>
+                    <key>redis_conflated_pubsub.truncated_payload_bytes_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><status>0</status><value_type>3</value_type>
+                    <units>B</units>
+                    <description>Total payload bytes removed by the configured truncation policy.</description>
                     <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
                 </item>
                 <item>
@@ -130,6 +165,30 @@
                     <key>redis_conflated_pubsub.publish_errors_total</key>
                     <delay>0</delay><history>7d</history><trends>365d</trends><status>0</status><value_type>3</value_type>
                     <description>Total failed output publish attempts.</description>
+                    <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
+                </item>
+                <item>
+                    <name>Publish error messages total</name>
+                    <type>2</type>
+                    <key>redis_conflated_pubsub.publish_error_messages_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><status>0</status><value_type>3</value_type>
+                    <description>Number of messages included in failed output publish operations.</description>
+                    <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
+                </item>
+                <item>
+                    <name>Uncertain transactions total</name>
+                    <type>2</type>
+                    <key>redis_conflated_pubsub.uncertain_transactions_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><status>0</status><value_type>3</value_type>
+                    <description>Output operations whose Redis execution outcome could not be confirmed.</description>
+                    <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
+                </item>
+                <item>
+                    <name>Uncertain messages total</name>
+                    <type>2</type>
+                    <key>redis_conflated_pubsub.uncertain_messages_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><status>0</status><value_type>3</value_type>
+                    <description>Number of messages in output operations with uncertain execution outcomes.</description>
                     <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
                 </item>
                 <item>
@@ -178,6 +237,14 @@
                     <key>redis_conflated_pubsub.last_error</key>
                     <delay>0</delay><history>7d</history><trends>0</trends><status>0</status><value_type>4</value_type>
                     <description>Most recently recorded service error, or none. Newlines are normalized for sender transport.</description>
+                    <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
+                </item>
+                <item>
+                    <name>Per-output metrics (JSON)</name>
+                    <type>2</type>
+                    <key>redis_conflated_pubsub.outputs_json</key>
+                    <delay>0</delay><history>7d</history><trends>0</trends><status>0</status><value_type>4</value_type>
+                    <description>Compact JSON map of output names to their metrics, for example output1.</description>
                     <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
                 </item>
             </items>

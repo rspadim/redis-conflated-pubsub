@@ -1,7 +1,7 @@
 {
   "input": {
     "redis": {
-      "host": "10.253.240.10",
+      "host": "10.253.240.50",
       "port": 6379,
       "username": null,
       "password_env": null,
@@ -12,44 +12,22 @@
     "subscriptions": [
       {
         "type": "psubscribe",
-        "pattern": "test-feed:*",
+        "pattern": "fault-feed:*",
         "output_prefix": "mapped:",
         "output_suffix": ":source"
       },
       {
         "type": "psubscribe",
-        "pattern": "db0:*",
-        "output_prefix": "",
-        "output_suffix": ""
-      },
-      {
-        "type": "psubscribe",
-        "pattern": "db1:*",
+        "pattern": "fault-output:*",
         "output_prefix": "",
         "output_suffix": ""
       }
     ]
   },
   "outputs": {
-    "output0": {
-      "redis": {
-        "host": "10.253.240.10",
-        "port": 6379,
-        "username": null,
-        "password_env": null,
-        "tls": false,
-        "database": 0,
-        "connect_timeout_ms": 2000
-      },
-      "channel_prefix": "db0:",
-      "channel_suffix": "",
-      "conflation": {
-        "interval_ms": 0
-      }
-    },
     "output1": {
       "redis": {
-        "host": "10.253.240.10",
+        "host": "10.253.240.50",
         "port": 6379,
         "username": null,
         "password_env": null,
@@ -57,18 +35,16 @@
         "database": 1,
         "connect_timeout_ms": 2000
       },
-      "channel_prefix": "db1:",
+      "channel_prefix": "fault-output:",
       "channel_suffix": "",
       "conflation": {
         "interval_ms": 250,
-        "max_commands_per_exec": 2,
-        "max_bytes_per_exec": 160
+        "max_commands_per_exec": 1000
       }
     }
   },
-  "max_bytes_per_exec": 4194304,
   "instance_lock": {
-    "path": "/state/redis-conflated-pubsub.lock"
+    "path": "/state/redis-conflated-fault.lock"
   },
   "status": {
     "http": {

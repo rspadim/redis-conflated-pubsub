@@ -1,7 +1,9 @@
 {
+  "max_bytes_per_exec": 4194304,
+  "oversized_message_policy": "send",
   "input": {
     "redis": {
-      "host": "redis.example.net",
+      "host": "localhost",
       "port": 6379,
       "username": null,
       "password_env": null,
@@ -10,28 +12,50 @@
       "connect_timeout_ms": 5000
     },
     "subscriptions": [
-      { "type": "psubscribe", "pattern": "*" }
+      {
+        "type": "psubscribe",
+        "pattern": "*",
+        "output_prefix": "",
+        "output_suffix": ""
+      }
     ]
   },
-  "output": {
-    "redis": {
-      "host": "redis.example.net",
-      "port": 6379,
-      "username": null,
-      "password_env": null,
-      "tls": false,
-      "database": 1,
-      "connect_timeout_ms": 5000
+  "outputs": {
+    "output0": {
+      "redis": {
+        "host": "localhost",
+        "port": 6379,
+        "username": null,
+        "password_env": null,
+        "tls": false,
+        "database": 0,
+        "connect_timeout_ms": 5000
+      },
+      "channel_prefix": "db0:",
+      "channel_suffix": "",
+      "conflation": {
+        "interval_ms": 0,
+        "max_commands_per_exec": 256
+      }
     },
-    "channel_prefix": "replica:",
-    "channel_suffix": ""
-  },
-  "conflation": {
-    "interval_ms": 250,
-    "max_pending_keys": 10000,
-    "max_pending_bytes": 52428800,
-    "max_message_bytes": 10485760,
-    "max_batch_bytes": 73400320
+    "output1": {
+      "redis": {
+        "host": "localhost",
+        "port": 6379,
+        "username": null,
+        "password_env": null,
+        "tls": false,
+        "database": 1,
+        "connect_timeout_ms": 5000
+      },
+      "channel_prefix": "db1:",
+      "channel_suffix": "",
+      "conflation": {
+        "interval_ms": 250,
+        "max_commands_per_exec": 256,
+        "max_bytes_per_exec": 2097152
+      }
+    }
   },
   "instance_lock": {
     "path": "redis-conflated-pubsub.lock"

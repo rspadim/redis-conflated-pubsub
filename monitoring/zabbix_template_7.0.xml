@@ -69,6 +69,13 @@
                     <tags><tag><tag>component</tag><value>application</value></tag></tags>
                 </item>
                 <item>
+                    <uuid>10000000000040008000000000000017</uuid>
+                    <name>Input payload bytes total</name><type>TRAP</type><key>redis_conflated_pubsub.input_payload_bytes_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><value_type>UNSIGNED</value_type><units>B</units>
+                    <description>Total payload bytes received from input Redis Pub/Sub.</description>
+                    <tags><tag><tag>component</tag><value>application</value></tag></tags>
+                </item>
+                <item>
                     <uuid>1000000000004000800000000000000a</uuid>
                     <name>Output batches total</name><type>TRAP</type><key>redis_conflated_pubsub.output_batches_total</key>
                     <delay>0</delay><history>7d</history><trends>365d</trends><value_type>UNSIGNED</value_type>
@@ -100,7 +107,28 @@
                     <uuid>1000000000004000800000000000000e</uuid>
                     <name>Dropped messages total</name><type>TRAP</type><key>redis_conflated_pubsub.dropped_messages_total</key>
                     <delay>0</delay><history>7d</history><trends>365d</trends><value_type>UNSIGNED</value_type>
-                    <description>Total messages dropped because of configured size or capacity limits.</description>
+                    <description>Total output messages skipped by the configured oversized-message policy.</description>
+                    <tags><tag><tag>component</tag><value>application</value></tag></tags>
+                </item>
+                <item>
+                    <uuid>10000000000040008000000000000018</uuid>
+                    <name>Truncated messages total</name><type>TRAP</type><key>redis_conflated_pubsub.truncated_messages_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><value_type>UNSIGNED</value_type>
+                    <description>Total output messages whose payloads were truncated by policy.</description>
+                    <tags><tag><tag>component</tag><value>application</value></tag></tags>
+                </item>
+                <item>
+                    <uuid>1000000000004000800000000000001d</uuid>
+                    <name>Dropped payload bytes total</name><type>TRAP</type><key>redis_conflated_pubsub.dropped_payload_bytes_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><value_type>UNSIGNED</value_type><units>B</units>
+                    <description>Total payload bytes skipped by the configured oversized-message policy.</description>
+                    <tags><tag><tag>component</tag><value>application</value></tag></tags>
+                </item>
+                <item>
+                    <uuid>10000000000040008000000000000019</uuid>
+                    <name>Truncated payload bytes total</name><type>TRAP</type><key>redis_conflated_pubsub.truncated_payload_bytes_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><value_type>UNSIGNED</value_type><units>B</units>
+                    <description>Total payload bytes removed by the configured truncation policy.</description>
                     <tags><tag><tag>component</tag><value>application</value></tag></tags>
                 </item>
                 <item>
@@ -108,6 +136,27 @@
                     <name>Publish errors total</name><type>TRAP</type><key>redis_conflated_pubsub.publish_errors_total</key>
                     <delay>0</delay><history>7d</history><trends>365d</trends><value_type>UNSIGNED</value_type>
                     <description>Total failed output publish attempts.</description>
+                    <tags><tag><tag>component</tag><value>application</value></tag></tags>
+                </item>
+                <item>
+                    <uuid>1000000000004000800000000000001a</uuid>
+                    <name>Publish error messages total</name><type>TRAP</type><key>redis_conflated_pubsub.publish_error_messages_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><value_type>UNSIGNED</value_type>
+                    <description>Number of messages included in failed output publish operations.</description>
+                    <tags><tag><tag>component</tag><value>application</value></tag></tags>
+                </item>
+                <item>
+                    <uuid>1000000000004000800000000000001b</uuid>
+                    <name>Uncertain transactions total</name><type>TRAP</type><key>redis_conflated_pubsub.uncertain_transactions_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><value_type>UNSIGNED</value_type>
+                    <description>Output operations whose Redis execution outcome could not be confirmed.</description>
+                    <tags><tag><tag>component</tag><value>application</value></tag></tags>
+                </item>
+                <item>
+                    <uuid>1000000000004000800000000000001c</uuid>
+                    <name>Uncertain messages total</name><type>TRAP</type><key>redis_conflated_pubsub.uncertain_messages_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><value_type>UNSIGNED</value_type>
+                    <description>Number of messages in output operations with uncertain execution outcomes.</description>
                     <tags><tag><tag>component</tag><value>application</value></tag></tags>
                 </item>
                 <item>
@@ -150,6 +199,13 @@
                     <name>Last error</name><type>TRAP</type><key>redis_conflated_pubsub.last_error</key>
                     <delay>0</delay><history>7d</history><trends>0</trends><value_type>TEXT</value_type>
                     <description>Most recently recorded service error, or none. Newlines are normalized for sender transport.</description>
+                    <tags><tag><tag>component</tag><value>application</value></tag></tags>
+                </item>
+                <item>
+                    <uuid>10000000000040008000000000000016</uuid>
+                    <name>Per-output metrics (JSON)</name><type>TRAP</type><key>redis_conflated_pubsub.outputs_json</key>
+                    <delay>0</delay><history>7d</history><trends>0</trends><value_type>TEXT</value_type>
+                    <description>Compact JSON map of output names to their metrics, for example output1.</description>
                     <tags><tag><tag>component</tag><value>application</value></tag></tags>
                 </item>
             </items>
