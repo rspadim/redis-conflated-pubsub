@@ -126,6 +126,12 @@ struct InboundMessage {
     payload: Vec<u8>,
 }
 
+#[derive(Clone, Debug)]
+struct QueuedInboundMessage {
+    message: InboundMessage,
+    enqueued_at: time::Instant,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PendingMessage {
     output_channel: String,
@@ -155,7 +161,7 @@ struct OutputSender {
     channel_prefix: String,
     channel_suffix: String,
     channel_filter: ChannelFilterSet,
-    sender: mpsc::UnboundedSender<InboundMessage>,
+    sender: mpsc::UnboundedSender<QueuedInboundMessage>,
     output_metrics: Arc<OutputMetrics>,
 }
 

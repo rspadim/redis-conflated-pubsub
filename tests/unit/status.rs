@@ -28,6 +28,9 @@ fn status_snapshot_exposes_metrics_by_arbitrary_output_name() {
     metrics.record_output_input(&output, 6);
     metrics.record_output_conflated(&output, 4);
     metrics.record_output_flush(&output, 1, 6);
+    metrics.record_output_queue_wait(&output, std::time::Duration::from_micros(10));
+    metrics.record_output_queue_wait(&output, std::time::Duration::from_micros(30));
+    metrics.record_output_publish_rtt(&output, std::time::Duration::from_micros(20));
     metrics.set_output_pending_keys(&output, 0);
 
     let snapshot = serde_json::to_value(metrics.snapshot()).unwrap();
@@ -66,6 +69,30 @@ fn status_snapshot_exposes_metrics_by_arbitrary_output_name() {
         40.0
     );
     assert_eq!(snapshot["outputs"]["custom-output"]["pending_messages"], 0);
+    assert_eq!(
+        snapshot["outputs"]["custom-output"]["queue_wait_samples"],
+        2
+    );
+    assert_eq!(
+        snapshot["outputs"]["custom-output"]["queue_wait_total_ns"],
+        40_000
+    );
+    assert_eq!(
+        snapshot["outputs"]["custom-output"]["queue_wait_max_ns"],
+        30_000
+    );
+    assert_eq!(
+        snapshot["outputs"]["custom-output"]["publish_rtt_samples"],
+        1
+    );
+    assert_eq!(
+        snapshot["outputs"]["custom-output"]["publish_rtt_total_ns"],
+        20_000
+    );
+    assert_eq!(
+        snapshot["outputs"]["custom-output"]["publish_rtt_max_ns"],
+        20_000
+    );
     assert_eq!(
         snapshot["outputs"]["custom-output"]["pending_payload_bytes"],
         0

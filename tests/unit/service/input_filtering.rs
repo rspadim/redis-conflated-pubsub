@@ -173,8 +173,8 @@ fn fan_out_counts_inputs_per_output_without_multiplying_global_input() {
     assert_eq!(snapshot.outputs["unavailable"].input_messages_total, 0);
     assert_eq!(snapshot.outputs["unavailable"].pending_messages, 0);
     assert_eq!(snapshot.outputs["unavailable"].pending_payload_bytes, 0);
-    assert_eq!(first_receiver.try_recv().unwrap().payload, b"abc");
-    assert_eq!(second_receiver.try_recv().unwrap().payload, b"abc");
+    assert_eq!(first_receiver.try_recv().unwrap().message.payload, b"abc");
+    assert_eq!(second_receiver.try_recv().unwrap().message.payload, b"abc");
 }
 
 #[test]
@@ -442,7 +442,7 @@ fn output_filter_sees_input_mapping_but_not_output_namespace() {
 
     assert!(filtered_receiver.try_recv().is_err());
     assert_eq!(
-        accepted_receiver.try_recv().unwrap().output_channel,
+        accepted_receiver.try_recv().unwrap().message.output_channel,
         "out:accepted:input:events:42:source:dest"
     );
     let snapshot = metrics.snapshot();

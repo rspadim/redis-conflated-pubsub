@@ -49,6 +49,8 @@ The same follow-up E2Es on Redis 7.4.11 also passed. Direct traffic delivered al
 
 After removing per-message stop-and-wait, direct E2Es still delivered all messages with zero pending at completion. Latest Redis 7.4.11 run: 10,314 messages/output, p50 10.23 s, p95 12.26 s, publish phase 9.82 s, drain 11.87 s. Valkey 9.1.2 sample: p50 11.01 s and p95 12.60 s. The current closed-loop benchmark did not demonstrate a latency reduction; it does not directly measure queue age or in-flight depth, so these results are not evidence that the concurrency window is ineffective. TTL/profile/group E2E passed on Redis after the change; the Redis mixed-policy E2E also passed (13.33 s total, 3,334 direct, 720 conflated, and 32 TTL events per output).
 
+To localize the remaining E2E delay, status now reports per-output worker queue wait (fan-out send to worker acceptance, including policy resolution) and Redis publish RTT aggregates. In the latest Redis 7.4.11 direct run, with 10,314 messages delivered per output and no pending work, queue-wait averages were 0.084/0.033 ms (max 1.10/0.92 ms); publish RTT averages were 0.280/0.301 ms (max 9.12/9.31 ms). Despite an end-to-end p50 of 11.11 s, these figures show the internal output MPSC queue is not taking seconds to read. The benchmark ends at Python subscriber receipt and starts before input Redis PUBLISH; input Redis-to-reader delay and subscriber/client processing are not yet separated.
+
 ## Ordered phases
 
 ### Phase 1 — Low-risk extraction (implemented)

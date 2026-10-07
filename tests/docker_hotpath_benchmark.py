@@ -124,10 +124,26 @@ def wait_for_status_totals(expected, timeout=10):
 def print_output_totals(status):
     for name in OUTPUT_NAMES:
         output = status["outputs"][name]
+        queue_samples = output["queue_wait_samples"]
+        publish_samples = output["publish_rtt_samples"]
+        queue_wait_avg_ms = (
+            output["queue_wait_total_ns"] / queue_samples / 1_000_000
+            if queue_samples
+            else 0.0
+        )
+        publish_rtt_avg_ms = (
+            output["publish_rtt_total_ns"] / publish_samples / 1_000_000
+            if publish_samples
+            else 0.0
+        )
         print(
             f"output {name} input={output['input_messages_total']} "
             f"published={output['output_messages_total']} batches={output['output_batches_total']} "
-            f"pending={output['pending_messages']}"
+            f"pending={output['pending_messages']} "
+            f"queue_wait_avg_max_ms={queue_wait_avg_ms:.3f}/"
+            f"{output['queue_wait_max_ns'] / 1_000_000:.3f} "
+            f"publish_rtt_avg_max_ms={publish_rtt_avg_ms:.3f}/"
+            f"{output['publish_rtt_max_ns'] / 1_000_000:.3f}"
         )
 
 

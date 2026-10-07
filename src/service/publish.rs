@@ -91,7 +91,11 @@ pub(super) async fn publish_once<P: BatchPublisher>(
     atomic: bool,
     context: &mut OutputPublishContext<'_>,
 ) -> std::result::Result<i64, PublishFailure> {
+    let started_at = time::Instant::now();
     let result = publisher.publish(batch, atomic).await;
+    context
+        .metrics
+        .record_output_publish_rtt(context.output_metrics, started_at.elapsed());
     settle_publish_result(batch, result, context)
 }
 
@@ -195,9 +199,11 @@ pub(super) async fn publish_batch_on_connection(
 ) -> (
     Vec<PendingMessage>,
     std::result::Result<i64, PublishFailure>,
+    Duration,
 ) {
+    let started_at = time::Instant::now();
     let result = publish_on_connection(config, &mut connection, &messages, atomic).await;
-    (messages, result)
+    (messages, result, started_at.elapsed())
 }
 
 async fn publish_on_connection(

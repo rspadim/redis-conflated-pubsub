@@ -10,7 +10,9 @@ use crate::{
     status::Metrics,
 };
 
-use super::{ChannelFilterSet, InboundMessage, MAX_RETRY_DELAY, OutputSender};
+use super::{
+    ChannelFilterSet, InboundMessage, MAX_RETRY_DELAY, OutputSender, QueuedInboundMessage,
+};
 
 #[derive(Clone, Debug)]
 pub(super) struct OutputChannelFilter {
@@ -198,9 +200,12 @@ pub(super) fn fan_out(
         metrics.record_output_input(&output.output_metrics, payload_bytes);
         if output
             .sender
-            .send(InboundMessage {
-                output_channel,
-                payload: payload.to_vec(),
+            .send(QueuedInboundMessage {
+                message: InboundMessage {
+                    output_channel,
+                    payload: payload.to_vec(),
+                },
+                enqueued_at: time::Instant::now(),
             })
             .is_err()
         {

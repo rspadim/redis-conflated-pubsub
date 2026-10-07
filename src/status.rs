@@ -87,6 +87,12 @@ pub struct OutputMetrics {
     pending_keys: AtomicU64,
     pending_messages: AtomicU64,
     pending_payload_bytes: AtomicU64,
+    queue_wait_samples: AtomicU64,
+    queue_wait_total_ns: AtomicU64,
+    queue_wait_max_ns: AtomicU64,
+    publish_rtt_samples: AtomicU64,
+    publish_rtt_total_ns: AtomicU64,
+    publish_rtt_max_ns: AtomicU64,
     last_flush_at: Mutex<Option<String>>,
     last_error: Mutex<Option<String>>,
     state: Mutex<String>,
@@ -116,6 +122,12 @@ impl OutputMetrics {
             pending_keys: AtomicU64::new(0),
             pending_messages: AtomicU64::new(0),
             pending_payload_bytes: AtomicU64::new(0),
+            queue_wait_samples: AtomicU64::new(0),
+            queue_wait_total_ns: AtomicU64::new(0),
+            queue_wait_max_ns: AtomicU64::new(0),
+            publish_rtt_samples: AtomicU64::new(0),
+            publish_rtt_total_ns: AtomicU64::new(0),
+            publish_rtt_max_ns: AtomicU64::new(0),
             last_flush_at: Mutex::new(None),
             last_error: Mutex::new(None),
             state: Mutex::new("starting".to_owned()),
@@ -164,6 +176,12 @@ impl OutputMetrics {
             pending_keys: self.pending_keys.load(Ordering::Relaxed),
             pending_messages: self.pending_messages.load(Ordering::Relaxed),
             pending_payload_bytes: self.pending_payload_bytes.load(Ordering::Relaxed),
+            queue_wait_samples: self.queue_wait_samples.load(Ordering::Relaxed),
+            queue_wait_total_ns: self.queue_wait_total_ns.load(Ordering::Relaxed),
+            queue_wait_max_ns: self.queue_wait_max_ns.load(Ordering::Relaxed),
+            publish_rtt_samples: self.publish_rtt_samples.load(Ordering::Relaxed),
+            publish_rtt_total_ns: self.publish_rtt_total_ns.load(Ordering::Relaxed),
+            publish_rtt_max_ns: self.publish_rtt_max_ns.load(Ordering::Relaxed),
             last_flush_at: self.last_flush_at.lock().unwrap().clone(),
             last_error: self.last_error.lock().unwrap().clone(),
         }
@@ -282,6 +300,24 @@ impl Metrics {
             self.pending_keys
                 .fetch_sub(previous - pending_keys, Ordering::Relaxed);
         }
+    }
+
+    pub fn record_output_queue_wait(&self, output: &OutputMetrics, duration: std::time::Duration) {
+        record_duration(
+            &output.queue_wait_samples,
+            &output.queue_wait_total_ns,
+            &output.queue_wait_max_ns,
+            duration,
+        );
+    }
+
+    pub fn record_output_publish_rtt(&self, output: &OutputMetrics, duration: std::time::Duration) {
+        record_duration(
+            &output.publish_rtt_samples,
+            &output.publish_rtt_total_ns,
+            &output.publish_rtt_max_ns,
+            duration,
+        );
     }
 
     pub fn record_output_input(&self, output: &OutputMetrics, payload_bytes: usize) {
@@ -595,8 +631,26 @@ pub struct OutputStatusSnapshot {
     /// Messages currently queued for output; given-up failed chunks are excluded.
     pub pending_messages: u64,
     pub pending_payload_bytes: u64,
+    pub queue_wait_samples: u64,
+    pub queue_wait_total_ns: u64,
+    pub queue_wait_max_ns: u64,
+    pub publish_rtt_samples: u64,
+    pub publish_rtt_total_ns: u64,
+    pub publish_rtt_max_ns: u64,
     pub last_flush_at: Option<String>,
     pub last_error: Option<String>,
+}
+
+fn record_duration(
+    samples: &AtomicU64,
+    total_ns: &AtomicU64,
+    max_ns: &AtomicU64,
+    duration: std::time::Duration,
+) {
+    let duration_ns = duration.as_nanos().min(u64::MAX as u128) as u64;
+    samples.fetch_add(1, Ordering::Relaxed);
+    total_ns.fetch_add(duration_ns, Ordering::Relaxed);
+    max_ns.fetch_max(duration_ns, Ordering::Relaxed);
 }
 
 fn reduction_percent(input: u64, output: u64) -> Option<f64> {

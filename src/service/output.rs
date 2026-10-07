@@ -27,7 +27,8 @@ use super::publish::{
 use super::{
     DeduplicationCache, InboundMessage, OutputMessageContext, OutputMessagePolicy,
     OutputPublishContext, OutputRuntimeSetup, PendingByInterval, PendingMessage,
-    ResolvedChannelPolicy, deduplication_prune_interval, pending_message_count,
+    QueuedInboundMessage, ResolvedChannelPolicy, deduplication_prune_interval,
+    pending_message_count,
 };
 
 mod flush;
@@ -35,6 +36,7 @@ mod flush;
 type DirectPublishResult = (
     Vec<PendingMessage>,
     std::result::Result<i64, PublishFailure>,
+    Duration,
 );
 type DirectPublishFuture<'a> = futures_util::future::BoxFuture<'a, DirectPublishResult>;
 
@@ -113,7 +115,7 @@ pub(super) fn direct_batch_boundary_required(
 pub(super) async fn publish_output(
     setup: OutputRuntimeSetup,
     client: redis::Client,
-    mut receiver: mpsc::UnboundedReceiver<InboundMessage>,
+    mut receiver: mpsc::UnboundedReceiver<QueuedInboundMessage>,
     metrics: Arc<Metrics>,
     output_metrics: Arc<OutputMetrics>,
 ) {
@@ -201,7 +203,7 @@ pub(super) async fn publish_output(
                 {
                     break;
                 }
-                let message = if let Some(message) = deferred_input.take() {
+                let queued_message = if let Some(message) = deferred_input.take() {
                     message
                 } else {
                     match receiver.try_recv() {
@@ -218,14 +220,22 @@ pub(super) async fn publish_output(
                         }
                     }
                 };
-                let policy = enqueue_context.resolve(&message);
-                if direct_batch_boundary_required(enqueue_context.passthrough, &message, &policy) {
-                    deferred_input = Some(message);
+                let policy = enqueue_context.resolve(&queued_message.message);
+                if direct_batch_boundary_required(
+                    enqueue_context.passthrough,
+                    &queued_message.message,
+                    &policy,
+                ) {
+                    deferred_input = Some(queued_message);
                     break;
                 }
-                drained_payload_bytes = drained_payload_bytes.saturating_add(message.payload.len());
+                let queue_wait =
+                    time::Instant::now().saturating_duration_since(queued_message.enqueued_at);
+                metrics.record_output_queue_wait(&output_metrics, queue_wait);
+                drained_payload_bytes =
+                    drained_payload_bytes.saturating_add(queued_message.message.payload.len());
                 drained_messages += 1;
-                enqueue_context.enqueue(message, policy);
+                enqueue_context.enqueue(queued_message.message, policy);
             }
         }
 
@@ -376,7 +386,7 @@ pub(super) async fn publish_output(
                 deduplication_cache.prune_expired(time::Instant::now());
             }
             completed = in_flight_direct.next(), if !in_flight_direct.is_empty() => {
-                if let Some((batch, result)) = completed {
+                if let Some((batch, result, publish_rtt)) = completed {
                     let (message_count, request_bytes) = in_flight_batches
                         .pop_front()
                         .expect("in-flight batch accounting must stay aligned");
@@ -390,6 +400,7 @@ pub(super) async fn publish_output(
                         metrics: &metrics,
                         output_metrics: &output_metrics,
                     };
+                    metrics.record_output_publish_rtt(&output_metrics, publish_rtt);
                     let result = settle_publish_result(&batch, result, &mut publish_context);
                     match result {
                         Ok(subscribers) => {
