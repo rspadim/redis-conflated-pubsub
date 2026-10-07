@@ -158,7 +158,7 @@ fn fan_out_counts_inputs_per_output_without_multiplying_global_input() {
             output_metrics: Arc::clone(&unavailable_metrics),
         },
     ];
-    metrics.record_input(3);
+    metrics.record_input(3, std::time::Duration::from_micros(5));
 
     let mut senders = senders;
     fan_out(&mut senders, "", "events", "", b"abc", &metrics);

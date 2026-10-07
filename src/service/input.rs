@@ -102,6 +102,7 @@ pub(super) async fn read_input(
                 info!("input_connected");
                 let mut stream = pubsub.on_message();
                 while let Some(message) = stream.next().await {
+                    let received_at = time::Instant::now();
                     let source_channel = message.get_channel_name();
                     if (config.exclude_sentinel_pubsub
                         && is_sentinel_pubsub_channel(source_channel))
@@ -133,7 +134,7 @@ pub(super) async fn read_input(
                         continue;
                     }
                     let (prefix, suffix) = subscription.output_mapping();
-                    metrics.record_input(message.get_payload_bytes().len());
+                    metrics.record_input(message.get_payload_bytes().len(), received_at.elapsed());
                     fan_out(
                         &mut senders,
                         prefix,

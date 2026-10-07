@@ -6,6 +6,7 @@
 - Added separate bounded LRU caches for input filters, each output's filters, and each output's channel-policy resolutions. Their capacities are independently configurable; default 16,384, zero disables. The opt-in HTTP `GET /filters` endpoint exposes full cache entries and channel names; disabled by default.
 - Grouped pending conflated channel values by output interval, so each timer flushes only its own key/value bucket. Direct passthrough now submits a bounded window of Redis publishes without awaiting each response; queued messages may be sent together with MULTI/EXEC.
 - Added per-output worker-queue wait and Redis publish RTT aggregate metrics (sample count, total, and maximum) to the status snapshot.
+- Fixed the hotpath benchmark harness: subscribers now use buffered RESP reads and latencies are decomposed into publisher acknowledgement, post-ack service time, and per-output end-to-end. Corrected Redis/Valkey direct runs measured ~2 ms p50 end-to-end; earlier ~10 s figures were an artifact of the unbuffered harness reader under GIL contention.
 - Added an optional single-container Redis/Valkey bundle selected with `KV_ENGINE`, plus an example configuration and persistent data paths.
 - Completed internal service/config module extraction and moved unit tests to `tests/unit/` without expanding public runtime APIs.
 

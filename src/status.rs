@@ -20,6 +20,9 @@ pub struct Metrics {
     started_clock: Instant,
     pub input_messages_total: AtomicU64,
     pub input_payload_bytes_total: AtomicU64,
+    pub input_latency_samples: AtomicU64,
+    pub input_latency_total_ns: AtomicU64,
+    pub input_latency_max_ns: AtomicU64,
     pub output_batches_total: AtomicU64,
     pub output_messages_total: AtomicU64,
     pub output_payload_bytes_total: AtomicU64,
@@ -195,6 +198,9 @@ impl Metrics {
             started_clock: Instant::now(),
             input_messages_total: AtomicU64::new(0),
             input_payload_bytes_total: AtomicU64::new(0),
+            input_latency_samples: AtomicU64::new(0),
+            input_latency_total_ns: AtomicU64::new(0),
+            input_latency_max_ns: AtomicU64::new(0),
             output_batches_total: AtomicU64::new(0),
             output_messages_total: AtomicU64::new(0),
             output_payload_bytes_total: AtomicU64::new(0),
@@ -223,10 +229,16 @@ impl Metrics {
         }
     }
 
-    pub fn record_input(&self, payload_bytes: usize) {
+    pub fn record_input(&self, payload_bytes: usize, read_latency: std::time::Duration) {
         self.input_messages_total.fetch_add(1, Ordering::Relaxed);
         self.input_payload_bytes_total
             .fetch_add(payload_bytes as u64, Ordering::Relaxed);
+        record_duration(
+            &self.input_latency_samples,
+            &self.input_latency_total_ns,
+            &self.input_latency_max_ns,
+            read_latency,
+        );
         *self.last_input_at.lock().unwrap() = Some(timestamp());
     }
 
@@ -525,6 +537,9 @@ impl Metrics {
             uptime_seconds: self.started_clock.elapsed().as_secs(),
             input_messages_total: self.input_messages_total.load(Ordering::Relaxed),
             input_payload_bytes_total: self.input_payload_bytes_total.load(Ordering::Relaxed),
+            input_latency_samples: self.input_latency_samples.load(Ordering::Relaxed),
+            input_latency_total_ns: self.input_latency_total_ns.load(Ordering::Relaxed),
+            input_latency_max_ns: self.input_latency_max_ns.load(Ordering::Relaxed),
             output_batches_total: self.output_batches_total.load(Ordering::Relaxed),
             output_messages_total: self.output_messages_total.load(Ordering::Relaxed),
             output_payload_bytes_total: self.output_payload_bytes_total.load(Ordering::Relaxed),
@@ -573,6 +588,9 @@ pub struct StatusSnapshot {
     pub uptime_seconds: u64,
     pub input_messages_total: u64,
     pub input_payload_bytes_total: u64,
+    pub input_latency_samples: u64,
+    pub input_latency_total_ns: u64,
+    pub input_latency_max_ns: u64,
     pub output_batches_total: u64,
     pub output_messages_total: u64,
     pub output_payload_bytes_total: u64,

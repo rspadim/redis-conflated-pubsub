@@ -23,7 +23,9 @@ HOT_CHANNEL_COUNT = 64
 def connect_output(database):
     sock = socket.create_connection((OUTPUT_HOST, 6379), timeout=10)
     sock.settimeout(30)
-    reader = sock.makefile("rb", buffering=0)
+    # Buffered reads: the concurrent phase reads every message, and the
+    # unbuffered variant paid a syscall per RESP fragment under the GIL.
+    reader = sock.makefile("rb")
     send_command(sock, "SELECT", database)
     assert read_response(reader) == "OK"
     return sock, reader
@@ -184,53 +186,75 @@ def main():
         )
 
         start_barrier = threading.Barrier(PUBLISHERS + 1)
-        state_lock = threading.Lock()
-        starts = {}
-        arrivals = {}
-        latencies_ns = []
         failures = []
+        sent = {}
+        sent_lock = threading.Lock()
+        received = [{}, {}]
+        timeline = []
+        stop_sampling = threading.Event()
 
         def consume_output(output_index, subscriber):
             sock, reader, pattern = subscriber
+            local = {}
             try:
                 for _ in range(expected):
                     message = read_response(reader)
                     assert isinstance(message, list) and message[0] == b"pmessage", message
                     assert message[1] == pattern, message
-                    publisher_id, sequence = map(int, message[3].split(b":"))
-                    key = (publisher_id, sequence)
+                    publisher_id, sequence, _sent_at = map(int, message[3].split(b":"))
+                    t_recv = time.perf_counter_ns()
                     expected_channel = output_channel(
                         output_index,
                         (publisher_id * MESSAGES_PER_PUBLISHER + sequence) % HOT_CHANNEL_COUNT,
                     )
                     assert message[2] == expected_channel, (message[2], expected_channel)
-                    with state_lock:
-                        arrivals[key] = arrivals.get(key, 0) | (1 << output_index)
-                        if arrivals[key] == 0b11:
-                            latencies_ns.append(time.perf_counter_ns() - starts.pop(key))
-                            del arrivals[key]
+                    local[(publisher_id, sequence)] = t_recv
             except Exception as error:  # surfaced in the test thread after joins
-                with state_lock:
-                    failures.append((f"subscriber-{output_index}", repr(error)))
+                failures.append((f"subscriber-{output_index}", repr(error)))
+            finally:
+                received[output_index] = local
 
         def publish_messages(publisher_id):
             sock, reader = connect(0)
+            local = {}
             try:
                 start_barrier.wait()
                 for sequence in range(MESSAGES_PER_PUBLISHER):
                     channel_index = (
                         publisher_id * MESSAGES_PER_PUBLISHER + sequence
                     ) % HOT_CHANNEL_COUNT
-                    key = (publisher_id, sequence)
-                    with state_lock:
-                        starts[key] = time.perf_counter_ns()
-                    send_command(sock, "PUBLISH", source_channel(channel_index), f"{publisher_id}:{sequence}")
+                    t0 = time.perf_counter_ns()
+                    send_command(
+                        sock,
+                        "PUBLISH",
+                        source_channel(channel_index),
+                        f"{publisher_id}:{sequence}:{t0}",
+                    )
                     assert read_response(reader) >= 1
+                    local[(publisher_id, sequence)] = (t0, time.perf_counter_ns())
             except Exception as error:
-                with state_lock:
-                    failures.append((f"publisher-{publisher_id}", repr(error)))
+                failures.append((f"publisher-{publisher_id}", repr(error)))
             finally:
+                with sent_lock:
+                    sent.update(local)
                 close(sock, reader)
+
+        def sample_status():
+            while not stop_sampling.is_set():
+                try:
+                    with urllib.request.urlopen(STATUS_URL, timeout=5) as response:
+                        status = json.loads(response.read())
+                    timeline.append(
+                        (
+                            time.perf_counter(),
+                            status.get("input_messages_total", 0),
+                            status["outputs"]["out-a"].get("output_messages_total", 0),
+                            status["outputs"]["out-b"].get("output_messages_total", 0),
+                        )
+                    )
+                except Exception:
+                    pass
+                stop_sampling.wait(0.1)
 
         output_threads = [
             threading.Thread(target=consume_output, args=(index, subscriber), daemon=True)
@@ -238,6 +262,9 @@ def main():
         ]
         for thread in output_threads:
             thread.start()
+
+        sampler_thread = threading.Thread(target=sample_status, daemon=True)
+        sampler_thread.start()
 
         publisher_threads = [
             threading.Thread(target=publish_messages, args=(index,), daemon=True)
@@ -256,13 +283,34 @@ def main():
             thread.join(timeout=60)
             assert not thread.is_alive(), "output subscriber did not receive all messages"
         wall_finished = time.perf_counter()
+        stop_sampling.set()
+        sampler_thread.join(timeout=5)
         publisher_elapsed = publishers_done - wall_started
         wall_elapsed = wall_finished - wall_started
         drain_elapsed = wall_finished - publishers_done
 
         assert not failures, failures[:3]
-        assert len(latencies_ns) == expected, (len(latencies_ns), expected)
-        ordered = sorted(latencies_ns)
+        assert len(sent) == expected, (len(sent), expected)
+        assert len(received[0]) == expected, (len(received[0]), expected)
+        assert len(received[1]) == expected, (len(received[1]), expected)
+
+        input_rtt_ns = [t_ret - t0 for t0, t_ret in sent.values()]
+        e2e_ns = [[], []]
+        post_ack_ns = [[], []]
+        for key, (t0, t_ret) in sent.items():
+            for output_index in range(2):
+                t_recv = received[output_index][key]
+                e2e_ns[output_index].append(t_recv - t0)
+                post_ack_ns[output_index].append(t_recv - t_ret)
+
+        def reached_at(check, start):
+            for sample_at, input_total, out_a_total, out_b_total in timeline:
+                if check(input_total, out_a_total, out_b_total):
+                    return sample_at - start
+            return float("nan")
+
+        input_rtt_sorted = sorted(input_rtt_ns)
+        total_expected = expected + HOT_CHANNEL_COUNT + SERIAL_MESSAGES
         print(
             "hotpath-e2e "
             f"publishers={PUBLISHERS} messages_per_publisher={MESSAGES_PER_PUBLISHER} "
@@ -271,10 +319,27 @@ def main():
             f"messages={expected} publish_phase_s={publisher_elapsed:.3f} "
             f"output_drain_s={drain_elapsed:.3f} elapsed_s={wall_elapsed:.3f} "
             f"end_to_end_messages_per_second={expected / wall_elapsed:.0f} "
-            f"latency_ms_p50={percentile(ordered, 0.50):.3f} "
-            f"p95={percentile(ordered, 0.95):.3f} "
-            f"p99={percentile(ordered, 0.99):.3f} max={ordered[-1] / 1_000_000:.3f}"
+            f"input_ack_rtt_p50_p95_ms={percentile(input_rtt_sorted, 0.50):.3f}/"
+            f"{percentile(input_rtt_sorted, 0.95):.3f}"
         )
+        print(
+            "hotpath-timeline "
+            f"subscribers_done_s={wall_finished - wall_started:.3f} "
+            f"input_done_s={reached_at(lambda i, a, b: i >= total_expected, wall_started):.3f} "
+            f"out-a_done_s={reached_at(lambda i, a, b: a >= total_expected, wall_started):.3f} "
+            f"out-b_done_s={reached_at(lambda i, a, b: b >= total_expected, wall_started):.3f}"
+        )
+        for output_index, name in enumerate(OUTPUT_NAMES):
+            e2e_sorted = sorted(e2e_ns[output_index])
+            post_ack_sorted = sorted(post_ack_ns[output_index])
+            print(
+                f"hotpath-phase {name} "
+                f"e2e_p50_p95_p99_ms={percentile(e2e_sorted, 0.50):.3f}/"
+                f"{percentile(e2e_sorted, 0.95):.3f}/"
+                f"{percentile(e2e_sorted, 0.99):.3f} "
+                f"post_ack_p50_p95_ms={percentile(post_ack_sorted, 0.50):.3f}/"
+                f"{percentile(post_ack_sorted, 0.95):.3f}"
+            )
         status = wait_for_status_totals(expected + HOT_CHANNEL_COUNT + SERIAL_MESSAGES)
         print_output_totals(status)
     finally:

@@ -6,10 +6,10 @@ fn status_file_is_replaced_with_a_complete_json_snapshot() {
     let path = directory.path().join("status.json");
     let metrics = Metrics::new();
     metrics.set_state("running");
-    metrics.record_input(7);
+    metrics.record_input(7, std::time::Duration::from_micros(5));
 
     write_atomic(&path, &metrics.snapshot()).unwrap();
-    metrics.record_input(11);
+    metrics.record_input(11, std::time::Duration::from_micros(5));
     write_atomic(&path, &metrics.snapshot()).unwrap();
 
     let json: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
