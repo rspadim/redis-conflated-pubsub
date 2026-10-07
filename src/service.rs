@@ -29,9 +29,9 @@ mod publish;
 use batch::OversizedPolicyLog;
 #[cfg(test)]
 use batch::{
-    RESP_EXEC_FRAME_BYTES, RESP_MULTI_FRAME_BYTES, exec_transaction_frame_bytes, pending_batch,
-    prepare_output_message, publish_command_frame_bytes, publish_command_frame_bytes_for_lengths,
-    publish_operation_frame_bytes,
+    RESP_EXEC_FRAME_BYTES, RESP_MULTI_FRAME_BYTES, exec_transaction_frame_bytes,
+    passthrough_batch_length, pending_batch, prepare_output_message, publish_command_frame_bytes,
+    publish_command_frame_bytes_for_lengths, publish_operation_frame_bytes,
 };
 use dedup::{DeduplicationCache, deduplication_prune_interval};
 use filter::ChannelFilterSet;
@@ -43,8 +43,9 @@ use input::{
 use input::{output_echo_filters, read_input};
 #[cfg(test)]
 use output::{
-    clear_published_batch, enqueue_message, publish_conflated_interval_pending,
-    publish_conflated_pending, publish_passthrough_one, publish_passthrough_pending,
+    clear_published_batch, direct_batch_boundary_required, enqueue_message,
+    publish_conflated_interval_pending, publish_conflated_pending, publish_passthrough_batch,
+    publish_passthrough_pending,
 };
 use output::{publish_output, write_status};
 #[cfg(test)]

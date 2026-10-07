@@ -89,13 +89,13 @@ fn nonpositive_interval_keeps_every_incoming_message_in_order() {
 }
 
 #[tokio::test]
-async fn passthrough_publishes_one_item_per_worker_turn_in_order() {
+async fn passthrough_batches_ready_items_in_fifo_order_and_respects_command_cap() {
     let metrics = Metrics::new();
     let output_metrics = metrics.register_output("paced-passthrough-output");
     let mut pending = PendingByInterval::new();
     let mut passthrough = VecDeque::new();
     let mut cache = DeduplicationCache::new(0);
-    for payload in [b"first".to_vec(), b"second".to_vec()] {
+    for payload in [b"first".to_vec(), b"second".to_vec(), b"third".to_vec()] {
         metrics.record_output_input(&output_metrics, payload.len());
         enqueue_for_test_with_cache(
             0,
@@ -121,24 +121,116 @@ async fn passthrough_publishes_one_item_per_worker_turn_in_order() {
     );
 
     assert!(
-        publish_passthrough_one(&mut publisher, &mut pending, &mut passthrough, &mut context,)
-            .await
+        publish_passthrough_batch(
+            &mut publisher,
+            &mut pending,
+            &mut passthrough,
+            2,
+            usize::MAX,
+            &mut context,
+        )
+        .await
     );
     assert_eq!(publisher.successful_batches.len(), 1);
-    assert_eq!(publisher.successful_batches[0][0].payload, b"first");
-    assert_eq!(passthrough.front().unwrap().payload, b"second");
+    assert!(publisher.attempts[0].0);
+    assert_eq!(
+        publisher.successful_batches[0]
+            .iter()
+            .map(|message| message.payload.as_slice())
+            .collect::<Vec<_>>(),
+        [b"first".as_slice(), b"second".as_slice()]
+    );
+    assert_eq!(passthrough.len(), 1);
+    assert_eq!(passthrough.front().unwrap().payload, b"third");
 
     assert!(
-        publish_passthrough_one(&mut publisher, &mut pending, &mut passthrough, &mut context,)
-            .await
+        publish_passthrough_batch(
+            &mut publisher,
+            &mut pending,
+            &mut passthrough,
+            2,
+            usize::MAX,
+            &mut context,
+        )
+        .await
     );
     assert_eq!(publisher.successful_batches.len(), 2);
-    assert_eq!(publisher.successful_batches[1][0].payload, b"second");
+    assert!(!publisher.attempts[1].0);
+    assert_eq!(publisher.successful_batches[1][0].payload, b"third");
     assert!(passthrough.is_empty());
     assert!(
-        !publish_passthrough_one(&mut publisher, &mut pending, &mut passthrough, &mut context,)
-            .await
+        !publish_passthrough_batch(
+            &mut publisher,
+            &mut pending,
+            &mut passthrough,
+            2,
+            usize::MAX,
+            &mut context,
+        )
+        .await
     );
+}
+
+#[test]
+fn passthrough_exec_batch_respects_resp_byte_cap() {
+    let mut passthrough = VecDeque::new();
+    let first = pending_message("events", b"first".to_vec());
+    let second = pending_message("events", b"second".to_vec());
+    let one_command = publish_command_frame_bytes(&first);
+    let two_command_exec = exec_transaction_frame_bytes(&[first.clone(), second.clone()]);
+    passthrough.extend([first, second]);
+
+    assert_eq!(
+        passthrough_batch_length(10, two_command_exec - 1, passthrough.iter()),
+        (1, false, one_command)
+    );
+    assert_eq!(
+        passthrough_batch_length(10, two_command_exec, passthrough.iter()),
+        (2, true, two_command_exec)
+    );
+    assert!(one_command < two_command_exec);
+}
+
+#[test]
+fn direct_batch_boundary_preserves_per_channel_and_group_ttl_order() {
+    let mut queued = pending_message("events:a", b"first".to_vec());
+    queued.deduplication_ttl_ms = Some(5000);
+    let mut passthrough = VecDeque::from([queued]);
+    let same_channel = InboundMessage {
+        output_channel: "events:a".to_owned(),
+        payload: b"second".to_vec(),
+    };
+    let per_channel_policy = ResolvedChannelPolicy {
+        interval_ms: 0,
+        deduplication_ttl_ms: 5000,
+        deduplication_group: None,
+    };
+    assert!(direct_batch_boundary_required(
+        &passthrough,
+        &same_channel,
+        &per_channel_policy
+    ));
+    let different_channel = InboundMessage {
+        output_channel: "events:b".to_owned(),
+        payload: b"other".to_vec(),
+    };
+    assert!(!direct_batch_boundary_required(
+        &passthrough,
+        &different_channel,
+        &per_channel_policy
+    ));
+
+    passthrough.front_mut().unwrap().deduplication_group = Some("shared".to_owned());
+    let group_policy = ResolvedChannelPolicy {
+        interval_ms: 0,
+        deduplication_ttl_ms: 5000,
+        deduplication_group: Some("shared".to_owned()),
+    };
+    assert!(direct_batch_boundary_required(
+        &passthrough,
+        &different_channel,
+        &group_policy
+    ));
 }
 
 #[tokio::test]
@@ -366,6 +458,78 @@ async fn direct_publish_failure_is_not_retried_and_next_item_continues() {
     assert_eq!(output.output_messages_total, 1);
     assert_eq!(output.pending_messages, 0);
     assert_eq!(output.pending_payload_bytes, 0);
+}
+
+#[tokio::test]
+async fn uncertain_direct_exec_marks_whole_bounded_batch_and_continues() {
+    let metrics = Metrics::new();
+    let output_metrics = metrics.register_output("direct-exec-failure-output");
+    let mut pending = PendingByInterval::new();
+    let mut passthrough = VecDeque::new();
+    let mut cache = DeduplicationCache::new(0);
+    for payload in [b"first".to_vec(), b"second".to_vec(), b"third".to_vec()] {
+        metrics.record_output_input(&output_metrics, payload.len());
+        enqueue_for_test_with_cache(
+            0,
+            InboundMessage {
+                output_channel: "events".to_owned(),
+                payload,
+            },
+            &mut pending,
+            &mut passthrough,
+            &metrics,
+            &output_metrics,
+            &mut cache,
+        );
+    }
+    let mut publisher = RecordingPublisher {
+        uncertain_failures_remaining: 1,
+        ..RecordingPublisher::default()
+    };
+    let mut failure_log = OutputFailureLog::default();
+    let mut context = publish_context_for_test(
+        "direct-exec-failure-output",
+        &mut failure_log,
+        &mut cache,
+        &metrics,
+        &output_metrics,
+    );
+
+    assert!(
+        publish_passthrough_batch(
+            &mut publisher,
+            &mut pending,
+            &mut passthrough,
+            2,
+            usize::MAX,
+            &mut context,
+        )
+        .await
+    );
+    assert!(publisher.attempts[0].0);
+    assert_eq!(publisher.attempts[0].1.len(), 2);
+    assert_eq!(publisher.possible_executions[0].len(), 2);
+    assert_eq!(passthrough.len(), 1);
+
+    assert!(
+        publish_passthrough_batch(
+            &mut publisher,
+            &mut pending,
+            &mut passthrough,
+            2,
+            usize::MAX,
+            &mut context,
+        )
+        .await
+    );
+    assert!(!publisher.attempts[1].0);
+    assert_eq!(publisher.successful_batches[0][0].payload, b"third");
+    assert!(passthrough.is_empty());
+    let output = &metrics.snapshot().outputs["direct-exec-failure-output"];
+    assert_eq!(output.uncertain_transactions_total, 1);
+    assert_eq!(output.uncertain_messages_total, 2);
+    assert_eq!(output.output_messages_total, 1);
+    assert_eq!(output.pending_messages, 0);
 }
 
 #[tokio::test]

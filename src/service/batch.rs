@@ -66,6 +66,44 @@ pub(super) fn pending_batch_length(
     batch_length
 }
 
+pub(super) fn passthrough_batch_length<'a>(
+    max_commands_per_exec: usize,
+    max_bytes_per_exec: usize,
+    candidates: impl Iterator<Item = &'a PendingMessage>,
+) -> (usize, bool, usize) {
+    let mut batch_length = 0usize;
+    let mut batch_bytes = 0usize;
+    for message in candidates.take(max_commands_per_exec) {
+        let message_bytes = publish_command_frame_bytes(message);
+        if batch_length == 0 {
+            if message_bytes > max_bytes_per_exec {
+                // Preserve the existing oversized-message `Send` behavior;
+                // a single command can be sent without transaction framing.
+                return (1, false, message_bytes);
+            }
+            batch_bytes = message_bytes;
+            batch_length = 1;
+            continue;
+        }
+
+        let transaction_bytes = batch_bytes
+            .saturating_add(message_bytes)
+            .saturating_add(RESP_MULTI_FRAME_BYTES + RESP_EXEC_FRAME_BYTES);
+        if transaction_bytes > max_bytes_per_exec {
+            break;
+        }
+        batch_bytes = batch_bytes.saturating_add(message_bytes);
+        batch_length += 1;
+    }
+    let atomic = batch_length > 1;
+    let request_bytes = batch_bytes.saturating_add(if atomic {
+        RESP_MULTI_FRAME_BYTES + RESP_EXEC_FRAME_BYTES
+    } else {
+        0
+    });
+    (batch_length, atomic, request_bytes)
+}
+
 pub(super) const RESP_MULTI_FRAME_BYTES: usize = 15;
 pub(super) const RESP_EXEC_FRAME_BYTES: usize = 14;
 const RESP_COMMAND_ARRAY_HEADER_BYTES: usize = 4; // `*3\r\n`

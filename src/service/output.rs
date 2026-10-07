@@ -1,40 +1,114 @@
 use std::{
     collections::{HashMap, VecDeque},
+    future::poll_fn,
     sync::Arc,
+    task::Poll,
     time::Duration,
 };
 
+use futures_util::{StreamExt, stream::FuturesOrdered};
 use redis::aio::MultiplexedConnection;
 use tokio::{
     sync::mpsc,
     time::{self, MissedTickBehavior},
 };
-use tracing::error;
+use tracing::{debug, error};
 
 use crate::status::{self, Metrics, OutputMetrics};
 
-use super::batch::OversizedPolicyLog;
+use super::batch::{OversizedPolicyLog, passthrough_batch_length};
 use super::policy::{
     CompiledChannelPolicies, advance_due_schedules, flush_schedules, next_schedule_tick,
 };
-use super::publish::{OutputFailureLog, RedisBatchPublisher};
+use super::publish::{
+    OutputFailureLog, PublishFailure, RedisBatchPublisher, ensure_output_connection,
+    publish_batch_on_connection, settle_publish_result,
+};
 use super::{
     DeduplicationCache, InboundMessage, OutputMessageContext, OutputMessagePolicy,
     OutputPublishContext, OutputRuntimeSetup, PendingByInterval, PendingMessage,
-    deduplication_prune_interval, pending_message_count,
+    ResolvedChannelPolicy, deduplication_prune_interval, pending_message_count,
 };
 
 mod flush;
 
-#[cfg(test)]
+type DirectPublishResult = (
+    Vec<PendingMessage>,
+    std::result::Result<i64, PublishFailure>,
+);
+type DirectPublishFuture<'a> = futures_util::future::BoxFuture<'a, DirectPublishResult>;
+
 pub(super) use flush::clear_published_batch;
 #[cfg(test)]
 pub(super) use flush::publish_conflated_pending;
 #[cfg(test)]
+pub(super) use flush::publish_passthrough_batch;
+#[cfg(test)]
 pub(super) use flush::publish_passthrough_pending;
-pub(super) use flush::{
-    enqueue_message, publish_conflated_interval_pending, publish_passthrough_one,
-};
+pub(super) use flush::{enqueue_message, publish_conflated_interval_pending};
+
+struct OutputEnqueueContext<'a> {
+    name: &'a str,
+    config: &'a crate::config::OutputConfig,
+    channel_policies: &'a CompiledChannelPolicies,
+    max_bytes_per_exec: usize,
+    oversized_policy: crate::config::OversizedMessagePolicy,
+    pending: &'a mut PendingByInterval,
+    passthrough: &'a mut VecDeque<PendingMessage>,
+    deduplication_cache: &'a mut DeduplicationCache,
+    metrics: &'a Metrics,
+    output_metrics: &'a OutputMetrics,
+    policy_log: &'a mut OversizedPolicyLog,
+}
+
+impl OutputEnqueueContext<'_> {
+    fn resolve(&self, message: &InboundMessage) -> ResolvedChannelPolicy {
+        self.channel_policies
+            .resolve(self.config, &message.output_channel)
+    }
+
+    fn enqueue(&mut self, message: InboundMessage, policy: ResolvedChannelPolicy) {
+        let mut message_context = OutputMessageContext {
+            name: self.name,
+            policy: OutputMessagePolicy {
+                interval_ms: policy.interval_ms,
+                deduplication_ttl_ms: Some(policy.deduplication_ttl_ms),
+                deduplication_group: policy.deduplication_group,
+                max_bytes_per_exec: self.max_bytes_per_exec,
+                oversized_policy: self.oversized_policy,
+            },
+            metrics: self.metrics,
+            output_metrics: self.output_metrics,
+            policy_log: self.policy_log,
+        };
+        enqueue_message(
+            message,
+            self.pending,
+            self.passthrough,
+            &mut message_context,
+            self.deduplication_cache,
+            time::Instant::now(),
+        );
+    }
+}
+
+pub(super) fn direct_batch_boundary_required(
+    passthrough: &VecDeque<PendingMessage>,
+    message: &InboundMessage,
+    policy: &ResolvedChannelPolicy,
+) -> bool {
+    if policy.interval_ms > 0 || passthrough.is_empty() {
+        return false;
+    }
+    let group = policy.deduplication_group.as_deref();
+    if policy.deduplication_ttl_ms <= 0 && group.is_none() {
+        return false;
+    }
+    passthrough.iter().any(|queued| {
+        queued.output_channel == message.output_channel
+            || group.is_some_and(|group| queued.deduplication_group.as_deref() == Some(group))
+    })
+}
 
 pub(super) async fn publish_output(
     setup: OutputRuntimeSetup,
@@ -87,9 +161,74 @@ pub(super) async fn publish_output(
     let mut connection: Option<MultiplexedConnection> = None;
     let mut input_closed = false;
     let mut due_intervals = Vec::<i64>::new();
+    let mut deferred_input = None;
+    // Keep in-flight messages at the front of passthrough until their replies
+    // settle, preserving FIFO accounting while later commands are in flight.
+    let mut in_flight_direct = FuturesOrdered::<DirectPublishFuture<'_>>::new();
+    let mut in_flight_batches = VecDeque::<(usize, usize)>::new();
+    let mut in_flight_direct_messages = 0usize;
+    let mut in_flight_direct_bytes = 0usize;
 
     metrics.set_output_state(&output_metrics, "running");
     loop {
+        let input_command_capacity =
+            max_commands_per_exec.saturating_sub(in_flight_direct_messages);
+        let input_byte_capacity = max_bytes_per_exec.saturating_sub(in_flight_direct_bytes);
+        if due_intervals.is_empty()
+            && passthrough.len() == in_flight_direct_messages
+            && input_command_capacity > 0
+            && (input_byte_capacity > 0 || in_flight_direct_messages == 0)
+            && (!input_closed || deferred_input.is_some())
+        {
+            let mut drained_messages = 0usize;
+            let mut drained_payload_bytes = 0usize;
+            let mut enqueue_context = OutputEnqueueContext {
+                name: &name,
+                config: &config,
+                channel_policies: &compiled_channel_policies,
+                max_bytes_per_exec,
+                oversized_policy,
+                pending: &mut pending,
+                passthrough: &mut passthrough,
+                deduplication_cache: &mut deduplication_cache,
+                metrics: &metrics,
+                output_metrics: &output_metrics,
+                policy_log: &mut policy_log,
+            };
+            loop {
+                if drained_messages >= input_command_capacity
+                    || (drained_messages > 0 && drained_payload_bytes >= input_byte_capacity)
+                {
+                    break;
+                }
+                let message = if let Some(message) = deferred_input.take() {
+                    message
+                } else {
+                    match receiver.try_recv() {
+                        Ok(message) => message,
+                        Err(mpsc::error::TryRecvError::Empty) => break,
+                        Err(mpsc::error::TryRecvError::Disconnected) => {
+                            input_closed = true;
+                            for (&interval_ms, messages) in enqueue_context.pending.iter() {
+                                if !messages.is_empty() && !due_intervals.contains(&interval_ms) {
+                                    due_intervals.push(interval_ms);
+                                }
+                            }
+                            break;
+                        }
+                    }
+                };
+                let policy = enqueue_context.resolve(&message);
+                if direct_batch_boundary_required(enqueue_context.passthrough, &message, &policy) {
+                    deferred_input = Some(message);
+                    break;
+                }
+                drained_payload_bytes = drained_payload_bytes.saturating_add(message.payload.len());
+                drained_messages += 1;
+                enqueue_context.enqueue(message, policy);
+            }
+        }
+
         for interval_ms in advance_due_schedules(&mut flush_schedules, time::Instant::now()) {
             if pending
                 .get(&interval_ms)
@@ -100,7 +239,7 @@ pub(super) async fn publish_output(
             }
         }
 
-        if !due_intervals.is_empty() {
+        if !due_intervals.is_empty() && !(connection.is_none() && !in_flight_direct.is_empty()) {
             let intervals = std::mem::take(&mut due_intervals);
             for interval_ms in intervals {
                 if pending.get(&interval_ms).is_none_or(HashMap::is_empty) {
@@ -137,37 +276,83 @@ pub(super) async fn publish_output(
             continue;
         }
 
-        // Publish at most one direct item per iteration, then re-check timers
-        // and receive input instead of draining passthrough ahead of all timers.
-        if !passthrough.is_empty() {
-            metrics.set_output_state(&output_metrics, "publishing");
+        while passthrough.len() > in_flight_direct_messages
+            && in_flight_direct_messages < max_commands_per_exec
+            && !(connection.is_none() && !in_flight_direct.is_empty())
+        {
+            let available_commands = max_commands_per_exec - in_flight_direct_messages;
+            let available_bytes = max_bytes_per_exec.saturating_sub(in_flight_direct_bytes);
+            let (batch_length, atomic, request_bytes) = passthrough_batch_length(
+                available_commands,
+                available_bytes,
+                passthrough.iter().skip(in_flight_direct_messages),
+            );
+            if batch_length == 0
+                || (in_flight_direct_messages > 0 && request_bytes > available_bytes)
+            {
+                break;
+            }
+            let batch = passthrough
+                .iter()
+                .skip(in_flight_direct_messages)
+                .take(batch_length)
+                .cloned()
+                .collect::<Vec<_>>();
+
             if connection.is_none() {
                 metrics.set_output_state(&output_metrics, "connecting");
+                if let Err(failure) =
+                    ensure_output_connection(&config, &client, &mut connection).await
+                {
+                    let mut publish_context = OutputPublishContext {
+                        name: &name,
+                        failure_log: &mut failure_log,
+                        deduplication_cache: &mut deduplication_cache,
+                        metrics: &metrics,
+                        output_metrics: &output_metrics,
+                    };
+                    let result = settle_publish_result(&batch, Err(failure), &mut publish_context);
+                    if let Err(failure) = result {
+                        flush::settle_failed_batch(
+                            0,
+                            &batch,
+                            &mut pending,
+                            &mut passthrough,
+                            &failure,
+                            &metrics,
+                            &output_metrics,
+                        );
+                    }
+                    metrics.set_output_state(&output_metrics, "running");
+                    continue;
+                }
             }
-            let mut publisher = RedisBatchPublisher {
-                config: &config,
-                client: &client,
-                connection: &mut connection,
-            };
-            let mut publish_context = OutputPublishContext {
-                name: &name,
-                failure_log: &mut failure_log,
-                deduplication_cache: &mut deduplication_cache,
-                metrics: &metrics,
-                output_metrics: &output_metrics,
-            };
-            publish_passthrough_one(
-                &mut publisher,
-                &mut pending,
-                &mut passthrough,
-                &mut publish_context,
-            )
-            .await;
-            metrics.set_output_state(&output_metrics, "running");
+
+            let connection_clone = connection
+                .as_ref()
+                .expect("output connection was initialized")
+                .clone();
+            // Polling this ordered stream submits direct commands without
+            // awaiting each Redis reply before accepting the next message.
+            let mut publish_future: DirectPublishFuture<'_> = Box::pin(
+                publish_batch_on_connection(&config, connection_clone, batch, atomic),
+            );
+            // Poll once in FIFO order so the MultiplexedConnection receives
+            // the command now; retain the future only to collect its reply.
+            let initial_poll =
+                poll_fn(|context| Poll::Ready(publish_future.as_mut().poll(context))).await;
+            if let Poll::Ready(result) = initial_poll {
+                publish_future = Box::pin(std::future::ready(result));
+            }
+            in_flight_direct.push_back(publish_future);
+            in_flight_batches.push_back((batch_length, request_bytes));
+            in_flight_direct_messages += batch_length;
+            in_flight_direct_bytes = in_flight_direct_bytes.saturating_add(request_bytes);
+            metrics.set_output_state(&output_metrics, "publishing");
         }
 
         let has_pending = pending_message_count(&pending) > 0 || !passthrough.is_empty();
-        if input_closed && !has_pending {
+        if input_closed && !has_pending && deferred_input.is_none() {
             break;
         }
 
@@ -180,17 +365,7 @@ pub(super) async fn publish_output(
                 } else {
                     std::future::pending::<()>().await;
                 }
-            }, if !flush_schedules.is_empty() => {
-                for interval_ms in advance_due_schedules(&mut flush_schedules, time::Instant::now()) {
-                    if pending
-                        .get(&interval_ms)
-                        .is_some_and(|messages| !messages.is_empty())
-                        && !due_intervals.contains(&interval_ms)
-                    {
-                        due_intervals.push(interval_ms);
-                    }
-                }
-            }
+            }, if !flush_schedules.is_empty() => {}
             _ = async {
                 if let Some(interval) = deduplication_prune_interval.as_mut() {
                     interval.tick().await;
@@ -200,32 +375,74 @@ pub(super) async fn publish_output(
             }, if deduplication_prune_interval.is_some() => {
                 deduplication_cache.prune_expired(time::Instant::now());
             }
-            message = receiver.recv(), if !input_closed => {
+            completed = in_flight_direct.next(), if !in_flight_direct.is_empty() => {
+                if let Some((batch, result)) = completed {
+                    let (message_count, request_bytes) = in_flight_batches
+                        .pop_front()
+                        .expect("in-flight batch accounting must stay aligned");
+                    debug_assert_eq!(message_count, batch.len());
+                    in_flight_direct_messages -= message_count;
+                    in_flight_direct_bytes = in_flight_direct_bytes.saturating_sub(request_bytes);
+                    let mut publish_context = OutputPublishContext {
+                        name: &name,
+                        failure_log: &mut failure_log,
+                        deduplication_cache: &mut deduplication_cache,
+                        metrics: &metrics,
+                        output_metrics: &output_metrics,
+                    };
+                    let result = settle_publish_result(&batch, result, &mut publish_context);
+                    match result {
+                        Ok(subscribers) => {
+                            let payload_bytes =
+                                batch.iter().map(|message| message.payload.len()).sum();
+                            clear_published_batch(
+                                0,
+                                &mut pending,
+                                &mut passthrough,
+                                &batch,
+                                &metrics,
+                                &output_metrics,
+                            );
+                            metrics.record_output_flush(
+                                &output_metrics,
+                                batch.len(),
+                                payload_bytes,
+                            );
+                            debug!(
+                                output = name,
+                                messages = batch.len(),
+                                subscribers,
+                                atomic = batch.len() > 1,
+                                "output_batch_published"
+                            );
+                        }
+                        Err(failure) => {
+                            connection = None;
+                            flush::settle_failed_batch(
+                                0,
+                                &batch,
+                                &mut pending,
+                                &mut passthrough,
+                                &failure,
+                                &metrics,
+                                &output_metrics,
+                            );
+                        }
+                    }
+                    if in_flight_direct.is_empty() {
+                        metrics.set_output_state(&output_metrics, "running");
+                    }
+                }
+            }
+            message = receiver.recv(), if !input_closed
+                && deferred_input.is_none()
+                && due_intervals.is_empty()
+                && passthrough.len() == in_flight_direct_messages
+                && in_flight_direct_messages < max_commands_per_exec
+                && in_flight_direct_bytes < max_bytes_per_exec => {
                 match message {
                     Some(message) => {
-                        let channel_policy = compiled_channel_policies
-                            .resolve(&config, &message.output_channel);
-                        let mut message_context = OutputMessageContext {
-                            name: &name,
-                            policy: OutputMessagePolicy {
-                                interval_ms: channel_policy.interval_ms,
-                                deduplication_ttl_ms: Some(channel_policy.deduplication_ttl_ms),
-                                deduplication_group: channel_policy.deduplication_group,
-                                max_bytes_per_exec,
-                                oversized_policy,
-                            },
-                            metrics: &metrics,
-                            output_metrics: &output_metrics,
-                            policy_log: &mut policy_log,
-                        };
-                        enqueue_message(
-                            message,
-                            &mut pending,
-                            &mut passthrough,
-                            &mut message_context,
-                            &mut deduplication_cache,
-                            time::Instant::now(),
-                        );
+                        deferred_input = Some(message);
                     }
                     None => {
                         input_closed = true;
@@ -236,8 +453,6 @@ pub(super) async fn publish_output(
                         }
                     }
                 }
-            }
-            _ = tokio::task::yield_now(), if !passthrough.is_empty() => {
             }
         }
     }

@@ -5,6 +5,8 @@ use tracing::debug;
 
 use crate::status::{Metrics, OutputMetrics};
 
+#[cfg(test)]
+use super::super::batch::passthrough_batch_length;
 use super::super::batch::{pending_batch_length, prepare_output_message};
 use super::super::publish::{BatchPublisher, PublishFailure, publish_once};
 use super::super::{
@@ -77,7 +79,9 @@ pub(in crate::service) fn clear_published_batch(
             pending.remove(&interval_ms);
         }
     } else {
-        passthrough.pop_front();
+        for _ in published {
+            passthrough.pop_front();
+        }
     }
     metrics.set_output_pending_keys(
         output_metrics,
@@ -312,6 +316,7 @@ pub(in crate::service) async fn publish_passthrough_pending<P: BatchPublisher>(
     }
 }
 
+#[cfg(test)]
 pub(in crate::service) async fn publish_passthrough_one<P: BatchPublisher>(
     publisher: &mut P,
     pending: &mut PendingByInterval,
@@ -341,6 +346,65 @@ pub(in crate::service) async fn publish_passthrough_one<P: BatchPublisher>(
                 messages = batch.len(),
                 subscribers,
                 atomic = false,
+                "output_batch_published"
+            );
+        }
+        Err(failure) => {
+            settle_failed_batch(
+                0,
+                &batch,
+                pending,
+                passthrough,
+                &failure,
+                context.metrics,
+                context.output_metrics,
+            );
+        }
+    }
+    true
+}
+
+#[cfg(test)]
+pub(in crate::service) async fn publish_passthrough_batch<P: BatchPublisher>(
+    publisher: &mut P,
+    pending: &mut PendingByInterval,
+    passthrough: &mut VecDeque<PendingMessage>,
+    max_commands_per_exec: usize,
+    max_bytes_per_exec: usize,
+    context: &mut OutputPublishContext<'_>,
+) -> bool {
+    let (batch_length, atomic, _) = passthrough_batch_length(
+        max_commands_per_exec,
+        max_bytes_per_exec,
+        passthrough.iter(),
+    );
+    if batch_length == 0 {
+        return false;
+    }
+    let batch = passthrough
+        .iter()
+        .take(batch_length)
+        .cloned()
+        .collect::<Vec<_>>();
+    match publish_once(publisher, &batch, atomic, context).await {
+        Ok(subscribers) => {
+            let payload_bytes = batch.iter().map(|message| message.payload.len()).sum();
+            clear_published_batch(
+                0,
+                pending,
+                passthrough,
+                &batch,
+                context.metrics,
+                context.output_metrics,
+            );
+            context
+                .metrics
+                .record_output_flush(context.output_metrics, batch.len(), payload_bytes);
+            debug!(
+                output = context.name,
+                messages = batch.len(),
+                subscribers,
+                atomic,
                 "output_batch_published"
             );
         }

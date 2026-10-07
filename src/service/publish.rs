@@ -91,7 +91,16 @@ pub(super) async fn publish_once<P: BatchPublisher>(
     atomic: bool,
     context: &mut OutputPublishContext<'_>,
 ) -> std::result::Result<i64, PublishFailure> {
-    match publisher.publish(batch, atomic).await {
+    let result = publisher.publish(batch, atomic).await;
+    settle_publish_result(batch, result, context)
+}
+
+pub(super) fn settle_publish_result(
+    batch: &[PendingMessage],
+    result: std::result::Result<i64, PublishFailure>,
+    context: &mut OutputPublishContext<'_>,
+) -> std::result::Result<i64, PublishFailure> {
+    match result {
         Ok(subscribers) => {
             context
                 .deduplication_cache
@@ -140,28 +149,69 @@ async fn publish_batch(
             "output publish batch is empty".to_owned(),
         ));
     }
-    if connection.is_none() {
-        let connected = match time::timeout(
-            config.redis.connect_timeout(),
-            client.get_multiplexed_async_connection(),
-        )
-        .await
-        {
-            Ok(Ok(connection)) => connection,
-            Ok(Err(error)) => {
-                return Err(PublishFailure::NotSent(error.to_string()));
-            }
-            Err(_) => {
-                return Err(PublishFailure::NotSent(
-                    "timed out connecting to output Redis".to_owned(),
-                ));
-            }
-        };
-        *connection = Some(connected);
+    ensure_output_connection(config, client, connection).await?;
+    let mut publish_connection = connection
+        .as_ref()
+        .expect("output connection was initialized")
+        .clone();
+    let result = publish_on_connection(config, &mut publish_connection, messages, atomic).await;
+    if result.is_err() {
+        *connection = None;
     }
+    result
+}
 
+pub(super) async fn ensure_output_connection(
+    config: &OutputConfig,
+    client: &redis::Client,
+    connection: &mut Option<MultiplexedConnection>,
+) -> std::result::Result<(), PublishFailure> {
+    if connection.is_some() {
+        return Ok(());
+    }
+    let connected = match time::timeout(
+        config.redis.connect_timeout(),
+        client.get_multiplexed_async_connection(),
+    )
+    .await
+    {
+        Ok(Ok(connection)) => connection,
+        Ok(Err(error)) => return Err(PublishFailure::NotSent(error.to_string())),
+        Err(_) => {
+            return Err(PublishFailure::NotSent(
+                "timed out connecting to output Redis".to_owned(),
+            ));
+        }
+    };
+    *connection = Some(connected);
+    Ok(())
+}
+
+pub(super) async fn publish_batch_on_connection(
+    config: &OutputConfig,
+    mut connection: MultiplexedConnection,
+    messages: Vec<PendingMessage>,
+    atomic: bool,
+) -> (
+    Vec<PendingMessage>,
+    std::result::Result<i64, PublishFailure>,
+) {
+    let result = publish_on_connection(config, &mut connection, &messages, atomic).await;
+    (messages, result)
+}
+
+async fn publish_on_connection(
+    config: &OutputConfig,
+    connection: &mut MultiplexedConnection,
+    messages: &[PendingMessage],
+    atomic: bool,
+) -> std::result::Result<i64, PublishFailure> {
+    if messages.is_empty() {
+        return Err(PublishFailure::NotSent(
+            "output publish batch is empty".to_owned(),
+        ));
+    }
     let result = time::timeout(config.redis.connect_timeout(), async {
-        let connection = connection.as_mut().expect("connection was initialized");
         if atomic {
             let mut pipeline = redis::pipe();
             pipeline.atomic();
@@ -188,17 +238,11 @@ async fn publish_batch(
 
     match result {
         Ok(Ok(subscribers)) => Ok(subscribers),
-        Ok(Err(error)) => {
-            *connection = None;
-            Err(PublishFailure::Uncertain(format!(
-                "Redis returned an error after a publish command was sent: {error}"
-            )))
-        }
-        Err(_) => {
-            *connection = None;
-            Err(PublishFailure::Uncertain(
-                "timed out waiting for the Redis publish response".to_owned(),
-            ))
-        }
+        Ok(Err(error)) => Err(PublishFailure::Uncertain(format!(
+            "Redis returned an error after a publish command was sent: {error}"
+        ))),
+        Err(_) => Err(PublishFailure::Uncertain(
+            "timed out waiting for the Redis publish response".to_owned(),
+        )),
     }
 }

@@ -126,7 +126,8 @@ def print_output_totals(status):
         output = status["outputs"][name]
         print(
             f"output {name} input={output['input_messages_total']} "
-            f"published={output['output_messages_total']} pending={output['pending_messages']}"
+            f"published={output['output_messages_total']} batches={output['output_batches_total']} "
+            f"pending={output['pending_messages']}"
         )
 
 
