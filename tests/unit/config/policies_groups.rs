@@ -1,6 +1,29 @@
 use super::*;
 
 #[test]
+fn channel_profiles_and_inline_policies_share_the_internal_override_view() {
+    let profile: ChannelProfile = serde_json::from_value(serde_json::json!({
+        "conflation.interval_ms": 125,
+        "deduplication.ttl_ms": 900,
+        "deduplication.group": "workers"
+    }))
+    .unwrap();
+    let policy: ChannelPolicy = serde_json::from_value(serde_json::json!({
+        "default": true,
+        "conflation.interval_ms": 125,
+        "deduplication.ttl_ms": 900,
+        "deduplication.group": "workers"
+    }))
+    .unwrap();
+
+    assert_eq!(
+        ChannelOverrides::from(&profile),
+        ChannelOverrides::from(&policy)
+    );
+    assert!(ChannelOverrides::from(&profile).has_any());
+}
+
+#[test]
 fn channel_profiles_policies_and_groups_use_literal_dotted_keys() {
     let config: AppConfig = serde_json::from_str(
             r#"{

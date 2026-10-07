@@ -1,7 +1,7 @@
 use anyhow::{Result, bail};
 
 use super::{
-    AppConfig, ChannelFilterRule, MAX_CHANNEL_CACHE_MAX_ENTRIES,
+    AppConfig, ChannelFilterRule, ChannelOverrides, MAX_CHANNEL_CACHE_MAX_ENTRIES,
     MAX_DEDUPLICATION_GROUP_CACHE_BYTES, MAX_DEDUPLICATION_GROUP_MEMBERS, MAX_RUNTIME_DURATION_MS,
     OutputConfig, RedisConfig, Subscription, same_pubsub_server,
 };
@@ -137,15 +137,7 @@ fn validate_profiles(name: &str, output: &OutputConfig) -> Result<()> {
         if profile_name.trim().is_empty() {
             bail!("outputs.{name}.profiles names must not be empty");
         }
-        if let Some(interval_ms) = profile.conflation_interval_ms {
-            validate_runtime_duration_ms(&format!("{path}.conflation.interval_ms"), interval_ms)?;
-        }
-        validate_deduplication_override(
-            output,
-            &path,
-            profile.deduplication_ttl_ms,
-            profile.deduplication_group.as_deref(),
-        )?;
+        validate_channel_overrides(output, &path, ChannelOverrides::from(profile))?;
     }
     Ok(())
 }
@@ -212,21 +204,26 @@ fn validate_channel_policies(name: &str, output: &OutputConfig) -> Result<()> {
             if !policy.has_inline_overrides() {
                 bail!("{path} must specify profile or at least one inline override");
             }
-            validate_deduplication_override(
-                output,
-                &path,
-                policy.deduplication_ttl_ms,
-                policy.deduplication_group.as_deref(),
-            )?;
-            if let Some(interval_ms) = policy.conflation_interval_ms {
-                validate_runtime_duration_ms(
-                    &format!("{path}.conflation.interval_ms"),
-                    interval_ms,
-                )?;
-            }
+            validate_channel_overrides(output, &path, ChannelOverrides::from(policy))?;
         }
     }
     Ok(())
+}
+
+fn validate_channel_overrides(
+    output: &OutputConfig,
+    path: &str,
+    overrides: ChannelOverrides<'_>,
+) -> Result<()> {
+    if let Some(interval_ms) = overrides.conflation_interval_ms {
+        validate_runtime_duration_ms(&format!("{path}.conflation.interval_ms"), interval_ms)?;
+    }
+    validate_deduplication_override(
+        output,
+        path,
+        overrides.deduplication_ttl_ms,
+        overrides.deduplication_group,
+    )
 }
 
 fn validate_echo_loop_guard(config: &AppConfig) -> Result<()> {

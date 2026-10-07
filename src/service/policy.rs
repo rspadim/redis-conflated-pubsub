@@ -5,7 +5,7 @@ use tokio::time;
 
 #[cfg(test)]
 use crate::config::DEFAULT_CHANNEL_CACHE_MAX_ENTRIES;
-use crate::config::{ChannelPolicy, OutputConfig};
+use crate::config::{ChannelOverrides, ChannelPolicy, OutputConfig};
 use crate::status::Metrics;
 
 use super::channel_cache::ChannelCache;
@@ -176,18 +176,23 @@ fn resolve_policy(config: &OutputConfig, policy: Option<&ChannelPolicy>) -> Reso
     let profile = policy
         .and_then(|policy| policy.profile.as_deref())
         .and_then(|name| config.profiles.get(name));
+    let profile_overrides = profile.map(ChannelOverrides::from);
+    let policy_overrides = policy.map(ChannelOverrides::from);
     ResolvedChannelPolicy {
-        interval_ms: profile
-            .and_then(|profile| profile.conflation_interval_ms)
-            .or_else(|| policy.and_then(|policy| policy.conflation_interval_ms))
+        interval_ms: profile_overrides
+            .and_then(|overrides| overrides.conflation_interval_ms)
+            .or_else(|| policy_overrides.and_then(|overrides| overrides.conflation_interval_ms))
             .unwrap_or(config.conflation.interval_ms),
-        deduplication_ttl_ms: profile
-            .and_then(|profile| profile.deduplication_ttl_ms)
-            .or_else(|| policy.and_then(|policy| policy.deduplication_ttl_ms))
+        deduplication_ttl_ms: profile_overrides
+            .and_then(|overrides| overrides.deduplication_ttl_ms)
+            .or_else(|| policy_overrides.and_then(|overrides| overrides.deduplication_ttl_ms))
             .unwrap_or(config.deduplication.ttl_ms),
-        deduplication_group: profile
-            .and_then(|profile| profile.deduplication_group.clone())
-            .or_else(|| policy.and_then(|policy| policy.deduplication_group.clone())),
+        deduplication_group: profile_overrides
+            .and_then(|overrides| overrides.deduplication_group.map(str::to_owned))
+            .or_else(|| {
+                policy_overrides
+                    .and_then(|overrides| overrides.deduplication_group.map(str::to_owned))
+            }),
     }
 }
 

@@ -294,11 +294,46 @@ pub struct ChannelPolicy {
     pub deduplication_group: Option<String>,
 }
 
-impl ChannelPolicy {
-    fn has_inline_overrides(&self) -> bool {
+/// Borrowed common view of profile and inline-policy overrides. The public
+/// JSON structs remain separate to preserve their flat, dotted-key schema.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ChannelOverrides<'a> {
+    pub(crate) conflation_interval_ms: Option<i64>,
+    pub(crate) deduplication_ttl_ms: Option<i64>,
+    pub(crate) deduplication_group: Option<&'a str>,
+}
+
+impl<'a> From<&'a ChannelProfile> for ChannelOverrides<'a> {
+    fn from(profile: &'a ChannelProfile) -> Self {
+        Self {
+            conflation_interval_ms: profile.conflation_interval_ms,
+            deduplication_ttl_ms: profile.deduplication_ttl_ms,
+            deduplication_group: profile.deduplication_group.as_deref(),
+        }
+    }
+}
+
+impl<'a> From<&'a ChannelPolicy> for ChannelOverrides<'a> {
+    fn from(policy: &'a ChannelPolicy) -> Self {
+        Self {
+            conflation_interval_ms: policy.conflation_interval_ms,
+            deduplication_ttl_ms: policy.deduplication_ttl_ms,
+            deduplication_group: policy.deduplication_group.as_deref(),
+        }
+    }
+}
+
+impl ChannelOverrides<'_> {
+    pub(crate) fn has_any(self) -> bool {
         self.conflation_interval_ms.is_some()
             || self.deduplication_ttl_ms.is_some()
             || self.deduplication_group.is_some()
+    }
+}
+
+impl ChannelPolicy {
+    fn has_inline_overrides(&self) -> bool {
+        ChannelOverrides::from(self).has_any()
     }
 }
 
