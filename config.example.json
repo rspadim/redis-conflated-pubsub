@@ -13,6 +13,9 @@
     },
     "exclude_output_echoes": true,
     "exclude_sentinel_pubsub": true,
+    "filters": [],
+    "filter_cache_max_entries": 16384,
+    "filter_default": "accept",
     "subscriptions": [
       {
         "type": "psubscribe",
@@ -35,6 +38,10 @@
       },
       "channel_prefix": "db0:",
       "channel_suffix": "",
+      "filters": [],
+      "filter_cache_max_entries": 16384,
+      "channel_policy_cache_max_entries": 16384,
+      "filter_default": "accept",
       "conflation": {
         "interval_ms": 0,
         "max_commands_per_exec": 256,
@@ -56,6 +63,10 @@
       },
       "channel_prefix": "db1:",
       "channel_suffix": "",
+      "filters": [],
+      "filter_cache_max_entries": 16384,
+      "channel_policy_cache_max_entries": 16384,
+      "filter_default": "accept",
       "conflation": {
         "interval_ms": 250,
         "max_commands_per_exec": 256,
@@ -123,7 +134,8 @@
   "status": {
     "http": {
       "bind": "127.0.0.1",
-      "port": 9090
+      "port": 9090,
+      "filters_endpoint_enabled": false
     }
   },
   "logging": {

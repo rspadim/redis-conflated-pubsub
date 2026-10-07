@@ -1,0 +1,91 @@
+{
+  "input": {
+    "redis": {
+      "host": "redis-filter",
+      "port": 6379,
+      "database": 0
+    },
+    "subscriptions": [
+      {
+        "type": "psubscribe",
+        "pattern": "feed:*",
+        "output_prefix": "mapped:",
+        "output_suffix": ":source"
+      }
+    ],
+    "filters": [
+      {
+        "glob": "feed:input-denied",
+        "action": "deny"
+      }
+    ],
+    "filter_cache_max_entries": 8,
+    "filter_default": "accept"
+  },
+  "outputs": {
+    "regex-filtered": {
+      "redis": {
+        "host": "redis-filter",
+        "port": 6379,
+        "database": 1
+      },
+      "channel_prefix": "out-a:",
+      "channel_suffix": ":dest",
+      "conflation": {
+        "interval_ms": 0
+      },
+      "filters": [
+        {
+          "regex": "^mapped:feed:regex-denied:source$",
+          "action": "deny"
+        }
+      ],
+      "filter_cache_max_entries": 12,
+      "channel_policy_cache_max_entries": 5,
+      "filter_default": "accept",
+      "channel_policies": [{"default": true, "conflation.interval_ms": 0}]
+    },
+    "glob-filtered": {
+      "redis": {
+        "host": "redis-filter",
+        "port": 6379,
+        "database": 2
+      },
+      "channel_prefix": "out-b:",
+      "channel_suffix": ":dest",
+      "conflation": {
+        "interval_ms": 0
+      },
+      "filters": [
+        {
+          "glob": "out-b:mapped:feed:output-prefix-leak:source:dest",
+          "action": "deny"
+        },
+        {
+          "glob": "mapped:feed:glob-denied:source",
+          "action": "deny"
+        }
+      ],
+      "filter_cache_max_entries": 10,
+      "channel_policy_cache_max_entries": 7,
+      "filter_default": "accept",
+      "channel_policies": [{"default": true, "conflation.interval_ms": 0}]
+    }
+  },
+  "instance_lock": {
+    "path": "/state/redis-conflated-filter.lock"
+  },
+  "status": {
+    "http": {
+      "bind": "0.0.0.0",
+      "port": 9090,
+      "filters_endpoint_enabled": true
+    }
+  },
+  "logging": {
+    "directory": "/state/logs",
+    "level": "warn",
+    "retention_days": 2,
+    "max_total_size_mb": 10
+  }
+}

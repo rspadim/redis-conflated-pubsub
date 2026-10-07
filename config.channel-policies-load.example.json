@@ -1,0 +1,58 @@
+{
+  "max_bytes_per_exec": 4194304,
+  "input": {
+    "redis": {
+      "host": "127.0.0.1",
+      "port": 6379
+    },
+    "subscriptions": [
+      {
+        "type": "psubscribe",
+        "pattern": "load:*",
+        "output_prefix": "mapped:",
+        "output_suffix": ":source"
+      }
+    ],
+    "filter_cache_max_entries": 16384
+  },
+  "outputs": {
+    "load-test": {
+      "redis": {
+        "host": "127.0.0.1",
+        "port": 6380
+      },
+      "channel_prefix": "replica:",
+      "channel_suffix": ":destination",
+      "filter_cache_max_entries": 16384,
+      "channel_policy_cache_max_entries": 16384,
+      "conflation": {
+        "interval_ms": 0
+      },
+      "deduplication": {
+        "ttl_ms": 0
+      },
+      "channel_policies": [
+        {"glob": "replica:mapped:load:tenant-0000:*:source:destination", "conflation.interval_ms": 0, "deduplication.ttl_ms": 1000},
+        {"glob": "replica:mapped:load:tenant-0001:*:source:destination", "conflation.interval_ms": 0, "deduplication.ttl_ms": 1250},
+        {"glob": "replica:mapped:load:tenant-0002:*:source:destination", "conflation.interval_ms": 0, "deduplication.ttl_ms": 1500},
+        {"glob": "replica:mapped:load:tenant-0003:*:source:destination", "conflation.interval_ms": 0, "deduplication.ttl_ms": 1750},
+        {"glob": "replica:mapped:load:tenant-0004:*:source:destination", "conflation.interval_ms": 0, "deduplication.ttl_ms": 1000},
+        {"glob": "replica:mapped:load:tenant-0005:*:source:destination", "conflation.interval_ms": 0, "deduplication.ttl_ms": 1250},
+        {"glob": "replica:mapped:load:tenant-0006:*:source:destination", "conflation.interval_ms": 0, "deduplication.ttl_ms": 1500},
+        {"glob": "replica:mapped:load:tenant-0007:*:source:destination", "conflation.interval_ms": 0, "deduplication.ttl_ms": 1750},
+        {"glob": "replica:mapped:load:tenant-0008:*:source:destination", "conflation.interval_ms": 0, "deduplication.ttl_ms": 1000},
+        {"glob": "replica:mapped:load:tenant-0009:*:source:destination", "conflation.interval_ms": 0, "deduplication.ttl_ms": 1250},
+        {"glob": "replica:mapped:load:tenant-0010:*:source:destination", "conflation.interval_ms": 0, "deduplication.ttl_ms": 1500},
+        {"glob": "replica:mapped:load:tenant-0011:*:source:destination", "conflation.interval_ms": 0, "deduplication.ttl_ms": 1750},
+        {"glob": "replica:mapped:load:tenant-0012:*:source:destination", "conflation.interval_ms": 0, "deduplication.ttl_ms": 1000},
+        {"glob": "replica:mapped:load:tenant-0013:*:source:destination", "conflation.interval_ms": 0, "deduplication.ttl_ms": 1250},
+        {"glob": "replica:mapped:load:tenant-0014:*:source:destination", "conflation.interval_ms": 0, "deduplication.ttl_ms": 1500},
+        {"glob": "replica:mapped:load:tenant-0015:*:source:destination", "conflation.interval_ms": 0, "deduplication.ttl_ms": 1750},
+        {"default": true, "conflation.interval_ms": 0, "deduplication.ttl_ms": 0}
+      ]
+    }
+  },
+  "instance_lock": {
+    "path": "redis-conflated-channel-policies-load.lock"
+  }
+}

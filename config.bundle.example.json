@@ -1,0 +1,59 @@
+{
+  "max_bytes_per_exec": 4194304,
+  "oversized_message_policy": "send",
+  "input": {
+    "redis": {
+      "host": "127.0.0.1",
+      "port": 6379,
+      "username": null,
+      "password_env": "REDIS_PASSWORD",
+      "tls": false,
+      "database": 0,
+      "connect_timeout_ms": 5000
+    },
+    "exclude_output_echoes": true,
+    "exclude_sentinel_pubsub": false,
+    "filters": [],
+    "filter_cache_max_entries": 16384,
+    "filter_default": "accept",
+    "subscriptions": [
+      {
+        "type": "psubscribe",
+        "pattern": "*"
+      }
+    ]
+  },
+  "outputs": {
+    "redis-conflated": {
+      "redis": {
+        "host": "127.0.0.1",
+        "port": 6380,
+        "username": null,
+        "password_env": "REDIS_PASSWORD",
+        "tls": false,
+        "database": 0,
+        "connect_timeout_ms": 5000
+      },
+      "filters": [],
+      "filter_cache_max_entries": 16384,
+      "channel_policy_cache_max_entries": 16384,
+      "filter_default": "accept",
+      "conflation": {
+        "interval_ms": 250,
+        "max_commands_per_exec": 256
+      },
+      "deduplication": {
+        "ttl_ms": 0
+      }
+    }
+  },
+  "instance_lock": {
+    "path": "/state/redis-conflated-pubsub.lock"
+  },
+  "logging": {
+    "directory": "/state/logs",
+    "level": "info",
+    "retention_days": 14,
+    "max_total_size_mb": 1024
+  }
+}

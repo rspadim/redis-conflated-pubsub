@@ -35,7 +35,7 @@ If one PUBLISH exceeds its output target, oversized_message_policy selects send 
 Each output can configure outputs.<name>.deduplication.ttl_ms as a signed integer (default 5000; nonpositive disables only deduplication; positive durations are limited to 365 days). Deduplication compares the exact mapped output channel and raw incoming payload bytes, including bytes removed by truncate. The cache remembers only the latest successfully or uncertainly published payload per channel: A->B->A publishes all three values, while consecutive repeats are suppressed until the TTL expires. In direct mode, changed values pass immediately; in conflated mode, only the final pending value per channel is compared immediately before each chunk is sent. Caches are independent, in-memory per output, and expired entries are periodically pruned.\n\n\
 Output-local deduplication_groups set ttl_ms, round_ms, restart_on_change, max_members, and max_cache_bytes; round_ms floors the Unix-epoch TTL-start timestamp to a bucket (0 disables rounding). Shared expiry starts on the first successful or uncertain publication. With restart_on_change=true, a new member's first successful or uncertain publication or a changed final value successfully or uncertainly published restarts it; restart_on_change=false keeps it fixed. Each group cache defaults to 16384 members and 64 MiB of channel-name plus payload data (maximum 100000 members and 256 MiB); old entries are evicted at capacity, while a single item over the byte limit is not cached (but still published). Profiles contain partial conflation and TTL/group overrides.\n\n\
 channel_policies are ordered rules for the final mapped output channel. Each rule has exactly one glob, prefix, or suffix selector, or default: true as the last catch-all rule, and chooses either a profile or inline conflation.interval_ms, deduplication.ttl_ms, or deduplication.group values. Only the first match applies; unmatched channels use output-level defaults. Runtime validation checks that the default is last and that round_ms does not exceed a positive group TTL. Positive intervals and TTLs are limited to 365 days.\n\n\
-When input and output use the same Redis server, exclude_output_echoes defaults to true and filters mapped output channels before fan-out. exclude_sentinel_pubsub also defaults to true and filters Sentinel hello/notification channels. Both can be changed under input in the JSON configuration. On Unix, SIGHUP reloads a valid configuration; an invalid file leaves the current runtime active. An accepted reload drains pending output queues and restarts input/output workers, creating a brief Pub/Sub input gap and resetting status counters. Changes to logging or instance_lock still require a full systemd restart. Payloads and pending queues are process-local; there is no disk spool.",
+When input and output use the same Redis server, exclude_output_echoes defaults to true and filters mapped output channels before fan-out. exclude_sentinel_pubsub also defaults to true and filters Sentinel hello/notification channels. Channel filters use ordered `filters` with one `glob`, `regex`, `raw`, `single`, or `string` selector and an `accept`/`deny` action. `raw`, `single`, and `string` all compare the complete channel string literally. All rules are evaluated and the last match wins; `filter_default` defaults to `accept` if none match. Input filters see the source channel before subscription mappings; output filters see the subscription-mapped channel before that output's prefix/suffix. Selectors compile to internal enum variants and their source config is discarded after setup. `input.filter_cache_max_entries`, `outputs.<name>.filter_cache_max_entries`, and `outputs.<name>.channel_policy_cache_max_entries` independently size the local LRUs (default 16384 each, maximum 100000; zero disables that cache). `status.http.filters_endpoint_enabled` explicitly enables `GET /filters` with full cache contents; it is disabled by default. On Unix, SIGHUP reloads a valid configuration; an invalid file leaves the current runtime active. An accepted reload drains pending output queues and restarts input/output workers, creating a brief Pub/Sub input gap and resetting status counters. Changes to logging or instance_lock still require a full systemd restart. Payloads and pending queues are process-local; there is no disk spool.",
     after_help = "Examples:\n  redis-conflated-pubsub --config config.json\n  redis-conflated-pubsub --config config.json --check-config\n  redis-conflated-pubsub --config-json-schema > config.schema.json"
 )]
 struct Args {
@@ -164,75 +164,5 @@ async fn run() -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use clap::CommandFactory;
-
-    use super::Args;
-    use crate::config::AppConfig;
-
-    #[test]
-    fn long_help_documents_configuration_and_examples() {
-        let help = Args::command().render_long_help().to_string();
-        let help = help.split_whitespace().collect::<Vec<_>>().join(" ");
-        for expected in [
-            "max_bytes_per_exec",
-            "oversized_message_policy",
-            "exclude_output_echoes",
-            "exclude_sentinel_pubsub",
-            "outputs.<name>.deduplication.ttl_ms",
-            "deduplication_groups",
-            "round_ms",
-            "floors the Unix-epoch TTL-start timestamp",
-            "0 disables rounding",
-            "restart_on_change",
-            "Shared expiry starts",
-            "new member's first successful or uncertain publication",
-            "changed final value successfully or uncertainly published",
-            "restart_on_change=false keeps it fixed",
-            "Profiles contain partial",
-            "max_members",
-            "max_cache_bytes",
-            "limited to 365 days",
-            "channel_policies",
-            "exactly one glob, prefix, or suffix selector",
-            "default: true as the last catch-all rule",
-            "Only the first match applies",
-            "chooses either a profile or inline",
-            "conflation.interval_ms",
-            "deduplication.ttl_ms",
-            "deduplication.group",
-            "final mapped output channel",
-            "unmatched channels use output-level defaults",
-            "SIGHUP reloads a valid configuration",
-            "invalid file leaves the current runtime active",
-            "logging or instance_lock still require a full systemd restart",
-            "brief Pub/Sub input gap",
-            "resetting status counters",
-            "--config-json-schema",
-        ] {
-            assert!(help.contains(expected), "missing {expected} in help");
-        }
-    }
-
-    #[test]
-    fn generated_config_schema_is_json_and_includes_filter_options() {
-        let schema = AppConfig::json_schema();
-        let serialized = serde_json::to_string(&schema).unwrap();
-        assert!(serialized.contains("exclude_output_echoes"));
-        assert!(serialized.contains("exclude_sentinel_pubsub"));
-        assert!(serialized.contains("max_bytes_per_exec"));
-        assert!(serialized.contains("oversized_message_policy"));
-        assert!(serialized.contains("deduplication"));
-        assert!(serialized.contains("ttl_ms"));
-        assert_eq!(schema["type"], "object");
-        assert_eq!(schema["properties"]["outputs"]["minProperties"], 1);
-        assert_eq!(
-            schema["$defs"]["InputConfig"]["properties"]["subscriptions"]["minItems"],
-            1
-        );
-        let deduplication_ttl = &schema["$defs"]["DeduplicationConfig"]["properties"]["ttl_ms"];
-        assert_eq!(deduplication_ttl["type"], "integer");
-        assert_eq!(deduplication_ttl["default"], 5000);
-        assert!(deduplication_ttl.get("minimum").is_none());
-    }
-}
+#[path = "../tests/unit/cli_help.rs"]
+mod tests;

@@ -1,6 +1,7 @@
 /target/
 /logs/
 /config.json
+/config.bundle.json
 /status.json
 /state/
 __pycache__/

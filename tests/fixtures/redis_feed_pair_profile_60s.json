@@ -1,0 +1,634 @@
+{
+  "capture_seconds": 60.000315236,
+  "captured_date_utc": "2026-10-07",
+  "channels": {
+    "cap_reached": false,
+    "conflated_only": 0,
+    "distinct_channel_cap": 32768,
+    "distinct_counted": 7428,
+    "raw_only": 0,
+    "shared_on_both_ports": 7428,
+    "top_64_length_samples": [
+      {
+        "channel_length_bytes": 25,
+        "conflated_messages": 12,
+        "conflated_payload_bytes": 72,
+        "id": "channel_001",
+        "raw_messages": 3797,
+        "raw_payload_bytes": 22782,
+        "shape": "xxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 25,
+        "conflated_messages": 12,
+        "conflated_payload_bytes": 72,
+        "id": "channel_002",
+        "raw_messages": 3797,
+        "raw_payload_bytes": 22782,
+        "shape": "xxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 26,
+        "conflated_messages": 12,
+        "conflated_payload_bytes": 204,
+        "id": "channel_003",
+        "raw_messages": 3797,
+        "raw_payload_bytes": 64549,
+        "shape": "xxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 26,
+        "conflated_messages": 12,
+        "conflated_payload_bytes": 204,
+        "id": "channel_004",
+        "raw_messages": 3797,
+        "raw_payload_bytes": 64549,
+        "shape": "xxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 27,
+        "conflated_messages": 12,
+        "conflated_payload_bytes": 72,
+        "id": "channel_005",
+        "raw_messages": 3797,
+        "raw_payload_bytes": 22782,
+        "shape": "xxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 25,
+        "conflated_messages": 12,
+        "conflated_payload_bytes": 72,
+        "id": "channel_006",
+        "raw_messages": 3796,
+        "raw_payload_bytes": 22776,
+        "shape": "xxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 19,
+        "conflated_messages": 288,
+        "conflated_payload_bytes": 1879,
+        "id": "channel_007",
+        "raw_messages": 1864,
+        "raw_payload_bytes": 12158,
+        "shape": "xxxxxxxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 19,
+        "conflated_messages": 277,
+        "conflated_payload_bytes": 1631,
+        "id": "channel_008",
+        "raw_messages": 1864,
+        "raw_payload_bytes": 10964,
+        "shape": "xxxxxxxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 14,
+        "conflated_messages": 33,
+        "conflated_payload_bytes": 224,
+        "id": "channel_009",
+        "raw_messages": 1864,
+        "raw_payload_bytes": 12605,
+        "shape": "xxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 14,
+        "conflated_messages": 32,
+        "conflated_payload_bytes": 217,
+        "id": "channel_010",
+        "raw_messages": 1864,
+        "raw_payload_bytes": 12803,
+        "shape": "xxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 19,
+        "conflated_messages": 256,
+        "conflated_payload_bytes": 1355,
+        "id": "channel_011",
+        "raw_messages": 1258,
+        "raw_payload_bytes": 6699,
+        "shape": "xxxxxxxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 19,
+        "conflated_messages": 256,
+        "conflated_payload_bytes": 1271,
+        "id": "channel_012",
+        "raw_messages": 1258,
+        "raw_payload_bytes": 6240,
+        "shape": "xxxxxxxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 19,
+        "conflated_messages": 265,
+        "conflated_payload_bytes": 1616,
+        "id": "channel_013",
+        "raw_messages": 1233,
+        "raw_payload_bytes": 7376,
+        "shape": "xxxxxxxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 19,
+        "conflated_messages": 225,
+        "conflated_payload_bytes": 1421,
+        "id": "channel_014",
+        "raw_messages": 1233,
+        "raw_payload_bytes": 7879,
+        "shape": "xxxxxxxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 19,
+        "conflated_messages": 227,
+        "conflated_payload_bytes": 1302,
+        "id": "channel_015",
+        "raw_messages": 1079,
+        "raw_payload_bytes": 6180,
+        "shape": "xxxxxxxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 14,
+        "conflated_messages": 36,
+        "conflated_payload_bytes": 252,
+        "id": "channel_016",
+        "raw_messages": 1258,
+        "raw_payload_bytes": 8806,
+        "shape": "xxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 14,
+        "conflated_messages": 36,
+        "conflated_payload_bytes": 252,
+        "id": "channel_017",
+        "raw_messages": 1258,
+        "raw_payload_bytes": 8806,
+        "shape": "xxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 19,
+        "conflated_messages": 188,
+        "conflated_payload_bytes": 1065,
+        "id": "channel_018",
+        "raw_messages": 1079,
+        "raw_payload_bytes": 6161,
+        "shape": "xxxxxxxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 14,
+        "conflated_messages": 23,
+        "conflated_payload_bytes": 135,
+        "id": "channel_019",
+        "raw_messages": 1233,
+        "raw_payload_bytes": 7312,
+        "shape": "xxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 14,
+        "conflated_messages": 23,
+        "conflated_payload_bytes": 136,
+        "id": "channel_020",
+        "raw_messages": 1233,
+        "raw_payload_bytes": 7388,
+        "shape": "xxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 19,
+        "conflated_messages": 219,
+        "conflated_payload_bytes": 1493,
+        "id": "channel_021",
+        "raw_messages": 1014,
+        "raw_payload_bytes": 6922,
+        "shape": "xxxxxxxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 19,
+        "conflated_messages": 207,
+        "conflated_payload_bytes": 1432,
+        "id": "channel_022",
+        "raw_messages": 1014,
+        "raw_payload_bytes": 7008,
+        "shape": "xxxxxxxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 14,
+        "conflated_messages": 42,
+        "conflated_payload_bytes": 290,
+        "id": "channel_023",
+        "raw_messages": 1079,
+        "raw_payload_bytes": 7498,
+        "shape": "xxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 14,
+        "conflated_messages": 42,
+        "conflated_payload_bytes": 285,
+        "id": "channel_024",
+        "raw_messages": 1079,
+        "raw_payload_bytes": 7106,
+        "shape": "xxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 14,
+        "conflated_messages": 27,
+        "conflated_payload_bytes": 211,
+        "id": "channel_025",
+        "raw_messages": 1014,
+        "raw_payload_bytes": 7968,
+        "shape": "xxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 14,
+        "conflated_messages": 27,
+        "conflated_payload_bytes": 214,
+        "id": "channel_026",
+        "raw_messages": 1014,
+        "raw_payload_bytes": 7977,
+        "shape": "xxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 19,
+        "conflated_messages": 184,
+        "conflated_payload_bytes": 1080,
+        "id": "channel_027",
+        "raw_messages": 720,
+        "raw_payload_bytes": 4244,
+        "shape": "xxxxxxxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 19,
+        "conflated_messages": 151,
+        "conflated_payload_bytes": 846,
+        "id": "channel_028",
+        "raw_messages": 720,
+        "raw_payload_bytes": 3861,
+        "shape": "xxxxxxxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 20,
+        "conflated_messages": 171,
+        "conflated_payload_bytes": 712,
+        "id": "channel_029",
+        "raw_messages": 639,
+        "raw_payload_bytes": 2631,
+        "shape": "xxxxxxxxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 20,
+        "conflated_messages": 151,
+        "conflated_payload_bytes": 603,
+        "id": "channel_030",
+        "raw_messages": 639,
+        "raw_payload_bytes": 2552,
+        "shape": "xxxxxxxxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 19,
+        "conflated_messages": 187,
+        "conflated_payload_bytes": 895,
+        "id": "channel_031",
+        "raw_messages": 569,
+        "raw_payload_bytes": 2701,
+        "shape": "xxxxxxxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 19,
+        "conflated_messages": 165,
+        "conflated_payload_bytes": 1124,
+        "id": "channel_032",
+        "raw_messages": 579,
+        "raw_payload_bytes": 3925,
+        "shape": "xxxxxxxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 14,
+        "conflated_messages": 22,
+        "conflated_payload_bytes": 151,
+        "id": "channel_033",
+        "raw_messages": 720,
+        "raw_payload_bytes": 4960,
+        "shape": "xxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 14,
+        "conflated_messages": 22,
+        "conflated_payload_bytes": 148,
+        "id": "channel_034",
+        "raw_messages": 720,
+        "raw_payload_bytes": 4766,
+        "shape": "xxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 19,
+        "conflated_messages": 154,
+        "conflated_payload_bytes": 1030,
+        "id": "channel_035",
+        "raw_messages": 579,
+        "raw_payload_bytes": 3861,
+        "shape": "xxxxxxxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 19,
+        "conflated_messages": 151,
+        "conflated_payload_bytes": 679,
+        "id": "channel_036",
+        "raw_messages": 569,
+        "raw_payload_bytes": 2520,
+        "shape": "xxxxxxxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 15,
+        "conflated_messages": 39,
+        "conflated_payload_bytes": 273,
+        "id": "channel_037",
+        "raw_messages": 639,
+        "raw_payload_bytes": 4465,
+        "shape": "xxxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 15,
+        "conflated_messages": 38,
+        "conflated_payload_bytes": 265,
+        "id": "channel_038",
+        "raw_messages": 639,
+        "raw_payload_bytes": 4469,
+        "shape": "xxxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 19,
+        "conflated_messages": 156,
+        "conflated_payload_bytes": 748,
+        "id": "channel_039",
+        "raw_messages": 511,
+        "raw_payload_bytes": 2462,
+        "shape": "xxxxxxxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 19,
+        "conflated_messages": 126,
+        "conflated_payload_bytes": 597,
+        "id": "channel_040",
+        "raw_messages": 511,
+        "raw_payload_bytes": 2427,
+        "shape": "xxxxxxxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 22,
+        "conflated_messages": 147,
+        "conflated_payload_bytes": 922,
+        "id": "channel_041",
+        "raw_messages": 458,
+        "raw_payload_bytes": 2816,
+        "shape": "xxxxxxxxxxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 18,
+        "conflated_messages": 158,
+        "conflated_payload_bytes": 1005,
+        "id": "channel_042",
+        "raw_messages": 446,
+        "raw_payload_bytes": 2859,
+        "shape": "xxxxxxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 14,
+        "conflated_messages": 23,
+        "conflated_payload_bytes": 161,
+        "id": "channel_043",
+        "raw_messages": 579,
+        "raw_payload_bytes": 4053,
+        "shape": "xxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 14,
+        "conflated_messages": 22,
+        "conflated_payload_bytes": 151,
+        "id": "channel_044",
+        "raw_messages": 579,
+        "raw_payload_bytes": 4005,
+        "shape": "xxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 19,
+        "conflated_messages": 158,
+        "conflated_payload_bytes": 764,
+        "id": "channel_045",
+        "raw_messages": 433,
+        "raw_payload_bytes": 2101,
+        "shape": "xxxxxxxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 19,
+        "conflated_messages": 155,
+        "conflated_payload_bytes": 756,
+        "id": "channel_046",
+        "raw_messages": 433,
+        "raw_payload_bytes": 2112,
+        "shape": "xxxxxxxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 14,
+        "conflated_messages": 18,
+        "conflated_payload_bytes": 95,
+        "id": "channel_047",
+        "raw_messages": 569,
+        "raw_payload_bytes": 2906,
+        "shape": "xxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 14,
+        "conflated_messages": 18,
+        "conflated_payload_bytes": 108,
+        "id": "channel_048",
+        "raw_messages": 569,
+        "raw_payload_bytes": 3413,
+        "shape": "xxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 18,
+        "conflated_messages": 144,
+        "conflated_payload_bytes": 586,
+        "id": "channel_049",
+        "raw_messages": 434,
+        "raw_payload_bytes": 1748,
+        "shape": "xxxxxxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 22,
+        "conflated_messages": 118,
+        "conflated_payload_bytes": 738,
+        "id": "channel_050",
+        "raw_messages": 458,
+        "raw_payload_bytes": 2905,
+        "shape": "xxxxxxxxxxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 18,
+        "conflated_messages": 139,
+        "conflated_payload_bytes": 581,
+        "id": "channel_051",
+        "raw_messages": 434,
+        "raw_payload_bytes": 1805,
+        "shape": "xxxxxxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 18,
+        "conflated_messages": 126,
+        "conflated_payload_bytes": 771,
+        "id": "channel_052",
+        "raw_messages": 446,
+        "raw_payload_bytes": 2746,
+        "shape": "xxxxxxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 14,
+        "conflated_messages": 49,
+        "conflated_payload_bytes": 290,
+        "id": "channel_053",
+        "raw_messages": 511,
+        "raw_payload_bytes": 3017,
+        "shape": "xxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 14,
+        "conflated_messages": 49,
+        "conflated_payload_bytes": 287,
+        "id": "channel_054",
+        "raw_messages": 511,
+        "raw_payload_bytes": 2972,
+        "shape": "xxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 20,
+        "conflated_messages": 129,
+        "conflated_payload_bytes": 726,
+        "id": "channel_055",
+        "raw_messages": 374,
+        "raw_payload_bytes": 2083,
+        "shape": "xxxxxxxxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 18,
+        "conflated_messages": 117,
+        "conflated_payload_bytes": 713,
+        "id": "channel_056",
+        "raw_messages": 377,
+        "raw_payload_bytes": 2344,
+        "shape": "xxxxxxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 17,
+        "conflated_messages": 23,
+        "conflated_payload_bytes": 111,
+        "id": "channel_057",
+        "raw_messages": 458,
+        "raw_payload_bytes": 2229,
+        "shape": "xxxxxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 17,
+        "conflated_messages": 23,
+        "conflated_payload_bytes": 115,
+        "id": "channel_058",
+        "raw_messages": 458,
+        "raw_payload_bytes": 2290,
+        "shape": "xxxxxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 13,
+        "conflated_messages": 38,
+        "conflated_payload_bytes": 266,
+        "id": "channel_059",
+        "raw_messages": 434,
+        "raw_payload_bytes": 3038,
+        "shape": "xxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 13,
+        "conflated_messages": 38,
+        "conflated_payload_bytes": 261,
+        "id": "channel_060",
+        "raw_messages": 434,
+        "raw_payload_bytes": 2982,
+        "shape": "xxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 20,
+        "conflated_messages": 98,
+        "conflated_payload_bytes": 548,
+        "id": "channel_061",
+        "raw_messages": 374,
+        "raw_payload_bytes": 2070,
+        "shape": "xxxxxxxxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 14,
+        "conflated_messages": 38,
+        "conflated_payload_bytes": 266,
+        "id": "channel_062",
+        "raw_messages": 433,
+        "raw_payload_bytes": 3031,
+        "shape": "xxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 14,
+        "conflated_messages": 38,
+        "conflated_payload_bytes": 266,
+        "id": "channel_063",
+        "raw_messages": 433,
+        "raw_payload_bytes": 3031,
+        "shape": "xxxxxxxxxxxxxx"
+      },
+      {
+        "channel_length_bytes": 18,
+        "conflated_messages": 92,
+        "conflated_payload_bytes": 564,
+        "id": "channel_064",
+        "raw_messages": 377,
+        "raw_payload_bytes": 2295,
+        "shape": "xxxxxxxxxxxxxxxxxx"
+      }
+    ]
+  },
+  "configured_output_policy_count": 0,
+  "conflated_to_raw_message_ratio": 0.3075631602201068,
+  "ports": {
+    "conflated": {
+      "filtered_sentinel": 0,
+      "messages": 38287,
+      "messages_per_second": 638.1133140618555,
+      "payload_bytes": 1631254,
+      "payload_size_buckets": {
+        "0_64_bytes": 38117,
+        "257_1024_bytes": 12,
+        "65_256_bytes": 0,
+        "over_1024_bytes": 158
+      },
+      "port": 6380,
+      "role": "conflated",
+      "untracked_channel_events": 0
+    },
+    "raw": {
+      "filtered_sentinel": 29,
+      "messages": 124485,
+      "messages_per_second": 2074.7390994590874,
+      "payload_bytes": 2390228,
+      "payload_size_buckets": {
+        "0_64_bytes": 124197,
+        "257_1024_bytes": 48,
+        "65_256_bytes": 0,
+        "over_1024_bytes": 240
+      },
+      "port": 6379,
+      "role": "raw",
+      "untracked_channel_events": 0
+    }
+  },
+  "privacy": {
+    "channel_shapes": "all characters masked as x; only byte length retained",
+    "exact_capture_time_recorded": false,
+    "host_recorded": false,
+    "payload_contents_recorded": false,
+    "raw_channel_names_recorded": false
+  },
+  "schema_version": 1,
+  "source": "paired-redis-pubsub-feed",
+  "subscription_scope": "global"
+}

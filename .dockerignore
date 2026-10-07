@@ -3,5 +3,6 @@
 target
 logs
 config.json
+config.bundle.json
 status.json
 redis-conflated-pubsub.lock

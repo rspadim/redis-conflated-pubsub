@@ -2,7 +2,7 @@
 
 A Rust relay that forwards Redis Pub/Sub messages to independently configured Redis outputs.
 
-Current release: **v0.1.4**. [Download a platform binary](https://github.com/rspadim/redis-conflated-pubsub/releases) or see the [developer build instructions](src/README.md).
+Latest published release: **v0.1.4**; next planned release: **v0.2.0**. [Download a platform binary](https://github.com/rspadim/redis-conflated-pubsub/releases) or see the [developer build instructions](src/README.md).
 
 ## Quick start
 
@@ -35,6 +35,9 @@ This example maps `test-feed:alpha` to `db0:sub:test-feed:alpha:source` and `db1
     },
     "exclude_output_echoes": true,
     "exclude_sentinel_pubsub": true,
+    "filters": [],
+    "filter_cache_max_entries": 16384,
+    "filter_default": "accept",
     "subscriptions": [
       {
         "type": "psubscribe",
@@ -57,6 +60,10 @@ This example maps `test-feed:alpha` to `db0:sub:test-feed:alpha:source` and `db1
       },
       "channel_prefix": "db0:",
       "channel_suffix": "",
+      "filters": [],
+      "filter_cache_max_entries": 16384,
+      "channel_policy_cache_max_entries": 16384,
+      "filter_default": "accept",
       "conflation": {
         "interval_ms": 0,
         "max_commands_per_exec": 100,
@@ -78,6 +85,10 @@ This example maps `test-feed:alpha` to `db0:sub:test-feed:alpha:source` and `db1
       },
       "channel_prefix": "db1:",
       "channel_suffix": "",
+      "filters": [],
+      "filter_cache_max_entries": 16384,
+      "channel_policy_cache_max_entries": 16384,
+      "filter_default": "accept",
       "conflation": {
         "interval_ms": 250,
         "max_commands_per_exec": 2,
@@ -146,6 +157,52 @@ Per-output defaults stay in `conflation.interval_ms` and `deduplication.ttl_ms`.
 Named `profiles` are partial overrides: set `conflation.interval_ms`, `deduplication.ttl_ms`, or `deduplication.group` as needed; unset values inherit the output defaults. A profile cannot set both `deduplication.ttl_ms` and `deduplication.group`.
 
 Each ordered `channel_policies` entry has exactly one selector: `glob`, `prefix`, `suffix`, or `"default": true` (put the default last). It selects either a profile or inline overrides using literal dotted keys. Policies match the final mapped output channel, after subscription/output prefixes and suffixes; only the first matching policy is selected for each channel. `--check-config` enforces that the default rule is last. Without a group, deduplication TTLs expire per channel; group members share a deadline. `restart_on_change: true` reanchors after a changed value or a new member is successfully or uncertainly published; `false` keeps the expiry fixed. Suppressed duplicates and intermediate conflated values do not renew it. Each output uses one scheduler cadence per distinct positive interval; equal intervals share a cadence.
+
+For local policy-load testing, [`config.channel-policies-load.example.json`](config.channel-policies-load.example.json) has 16 ordered tenant rules and a final default. The ignored release benchmarks also stress 64 generated policies/filters, hot channels, and churn beyond the configured cache capacity:
+
+```sh
+cargo test --release --locked channel_policy_cache_load_benchmark -- --ignored --nocapture
+cargo test --release --locked filter_cache_load_benchmark -- --ignored --nocapture
+```
+
+## Channel filters
+
+`input.filters` evaluates the channel reported by Redis after a configured `SUBSCRIBE`/`PSUBSCRIBE` matches, but before the subscription's `output_prefix`/`output_suffix` is added. Each output may also have its own `filters`; those evaluate the subscription-mapped channel after the input prefix/suffix, but before that output's `channel_prefix`/`channel_suffix`.
+
+Rules are ordered; every rule is evaluated and the last matching rule's `action` (`accept` or `deny`) decides. Non-matching rules do nothing. If no rule matches, `filter_default` decides and defaults to `accept`. A rule has exactly one `glob`, `regex`, `raw`, `single`, or `string` selector. `raw`, `single`, and `string` are aliases for exact equality (`channel == selector`): wildcard characters such as `*` are treated literally. Globs support `*`, `?`, character classes and backslash escapes. Regex uses Rust regex syntax and searches for a match anywhere; use `^` and `$` for a whole-channel match. For example, the final literal rule overrides the earlier regex for that one exact channel:
+
+```json
+{
+  "filters": [
+    {"glob": "events:*", "action": "deny"},
+    {"regex": "^events:public:[0-9]+$", "action": "accept"},
+    {"raw": "events:public:42", "action": "deny"}
+  ],
+  "filter_default": "accept"
+}
+```
+
+Selectors are compiled once into internal enum variants and the original selector strings are discarded after setup. Cache capacities are set independently: `input.filter_cache_max_entries`, `outputs.<name>.filter_cache_max_entries`, and `outputs.<name>.channel_policy_cache_max_entries`. Each defaults to 16,384, accepts 0 to disable that cache, and is capped at 100,000. The limit applies to each named cache; total memory scales with the number of configured filters and outputs. On eviction, only the least-recently-used channel leaves the cache. An accepted reload recreates workers and their caches.
+
+## Single-container Docker bundle
+
+The optional `Dockerfile.bundle` image contains the relay plus both Redis and Valkey server binaries. At runtime, `KV_ENGINE` selects which implementation to start (`redis` by default, or `valkey`); the selected engine runs two instances, raw on container port `6379` and conflated on `6380`. The relay config is mounted at `/etc/redis-conflated/config.json`; `config.bundle.example.json` is a starting point. This bundle runs three processes in one container; the regular `Dockerfile` remains the relay-only image for separated deployments.
+
+```sh
+cp config.bundle.example.json config.bundle.json
+docker build -f Dockerfile.bundle -t redis-conflated-pubsub:bundle .
+docker run -d --name redis-conflated-bundle --restart unless-stopped \
+  -e KV_ENGINE=redis \
+  -e REDIS_PASSWORD='replace-with-a-secret' \
+  -p 6379:6379 -p 6380:6380 \
+  -v "$PWD/config.bundle.json:/etc/redis-conflated/config.json:ro" \
+  -v redis-raw-data:/data/raw \
+  -v redis-conflated-data:/data/conflated \
+  -v redis-relay-state:/state \
+  redis-conflated-pubsub:bundle
+```
+
+Set `KV_ENGINE=valkey` to use Valkey instead. `REDIS_PASSWORD` is required; alternatively mount a secret and set `REDIS_PASSWORD_FILE`. Published ports listen on all host interfaces by default; for host-local access use `-p 127.0.0.1:6379:6379 -p 127.0.0.1:6380:6380` or restrict access with the host firewall. Use separate data volumes when changing engine implementations unless you have verified data-file compatibility.
 
 Positive intervals retain the latest message per mapped channel and flush in `MULTI`/`EXEC` transactions. `max_bytes_per_exec` is a per-request target; `max_commands_per_exec` limits commands per transaction. `oversized_message_policy` is `send` (default), `truncate`, or `drop`.
 
@@ -222,7 +279,7 @@ redis-cli PSUBSCRIBE 'db1:*'
 redis-cli PUBLISH 'test-feed:alpha' 'hello'
 ```
 
-The optional `status.http` serves per-output metrics at `GET /`; check it with `curl http://127.0.0.1:9090/`. `status.path` writes an atomic JSON snapshot instead. See [Zabbix monitoring](monitoring/README.md) for the collector and templates.
+The optional `status.http` serves per-output metrics at `GET /`; check it with `curl http://127.0.0.1:9090/`. `GET /filters` exposes the full channel names and current filter/policy cache entries; it is disabled by default. Enable it explicitly with `status.http.filters_endpoint_enabled: true` only on a trusted/private interface because channel names can be sensitive. `status.path` writes an atomic JSON snapshot instead. See [Zabbix monitoring](monitoring/README.md) for the collector and templates.
 
 ## Observed reduction
 

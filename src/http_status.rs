@@ -15,7 +15,11 @@ const MAX_REQUEST_BYTES: usize = 8 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub async fn serve(listener: TcpListener, metrics: Arc<Metrics>) -> Result<()> {
+pub async fn serve(
+    listener: TcpListener,
+    metrics: Arc<Metrics>,
+    filters_endpoint_enabled: bool,
+) -> Result<()> {
     let permits = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
 
     loop {
@@ -28,19 +32,31 @@ pub async fn serve(listener: TcpListener, metrics: Arc<Metrics>) -> Result<()> {
             .await
             .context("failed to accept HTTP status connection")?;
         let connection_metrics = Arc::clone(&metrics);
+        let connection_filters_enabled = filters_endpoint_enabled;
 
         tokio::spawn(async move {
             let _permit = permit;
-            if let Err(error) = handle_connection(stream, connection_metrics).await {
+            if let Err(error) =
+                handle_connection(stream, connection_metrics, connection_filters_enabled).await
+            {
                 warn!(peer = %peer, error = %error, "http_status_connection_failed");
             }
         });
     }
 }
 
-async fn handle_connection(mut stream: TcpStream, metrics: Arc<Metrics>) -> Result<()> {
+async fn handle_connection(
+    mut stream: TcpStream,
+    metrics: Arc<Metrics>,
+    filters_endpoint_enabled: bool,
+) -> Result<()> {
     let response = match timeout(REQUEST_TIMEOUT, read_request(&mut stream)).await {
-        Ok(Ok(request)) => route_request(&request.method, &request.target, &metrics),
+        Ok(Ok(request)) => route_request(
+            &request.method,
+            &request.target,
+            &metrics,
+            filters_endpoint_enabled,
+        ),
         Ok(Err(RequestReadError::TooLarge)) => HttpResponse::text(
             431,
             "Request Header Fields Too Large",
@@ -173,7 +189,12 @@ impl HttpResponse {
     }
 }
 
-fn route_request(method: &str, target: &str, metrics: &Metrics) -> HttpResponse {
+fn route_request(
+    method: &str,
+    target: &str,
+    metrics: &Metrics,
+    filters_endpoint_enabled: bool,
+) -> HttpResponse {
     let path = target.split_once('?').map_or(target, |(path, _)| path);
     match (method, path) {
         ("GET", "/") => match serde_json::to_vec(&metrics.snapshot()) {
@@ -184,6 +205,28 @@ fn route_request(method: &str, target: &str, metrics: &Metrics) -> HttpResponse 
                 "The status snapshot could not be serialized.\n",
             ),
         },
+        ("GET", "/filters") if filters_endpoint_enabled => {
+            match serde_json::to_vec(&metrics.channel_caches_snapshot()) {
+                Ok(body) => HttpResponse::json(200, "OK", body),
+                Err(_) => HttpResponse::text(
+                    500,
+                    "Internal Server Error",
+                    "The channel cache snapshot could not be serialized.\n",
+                ),
+            }
+        }
+        ("GET", "/filters") => {
+            HttpResponse::text(404, "Not Found", "The requested endpoint was not found.\n")
+        }
+        (_, "/filters") if filters_endpoint_enabled => {
+            let mut response = HttpResponse::text(
+                405,
+                "Method Not Allowed",
+                "Only GET requests are supported.\n",
+            );
+            response.allow_get = true;
+            response
+        }
         (_, "/") => {
             let mut response = HttpResponse::text(
                 405,
@@ -229,33 +272,5 @@ async fn write_response(stream: &mut TcpStream, response: &HttpResponse) -> io::
 }
 
 #[cfg(test)]
-mod tests {
-    use super::route_request;
-    use crate::status::Metrics;
-
-    #[test]
-    fn root_routes_to_json_status_snapshot() {
-        let metrics = Metrics::new();
-        metrics.set_state("running");
-
-        let response = route_request("GET", "/", &metrics);
-        let snapshot: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
-
-        assert_eq!(response.status, 200);
-        assert_eq!(response.content_type, "application/json");
-        assert_eq!(snapshot["state"], "running");
-        assert_eq!(snapshot["schema_version"], 5);
-    }
-
-    #[test]
-    fn serves_only_the_root_status_path_and_get_method() {
-        let metrics = Metrics::new();
-
-        assert_eq!(route_request("GET", "/missing", &metrics).status, 404);
-        assert_eq!(route_request("GET", "/status", &metrics).status, 404);
-        assert_eq!(route_request("GET", "/health", &metrics).status, 404);
-        let method_not_allowed = route_request("POST", "/", &metrics);
-        assert_eq!(method_not_allowed.status, 405);
-        assert!(method_not_allowed.allow_get);
-    }
-}
+#[path = "../tests/unit/http_status.rs"]
+mod tests;

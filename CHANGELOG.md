@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0 — unreleased
+
+- Added ordered input/output channel filters with glob, regex, and literal (`raw`/`single`/`string`) selectors; the last matching rule wins and `filter_default` defaults to `accept`.
+- Added separate bounded LRU caches for input filters, each output's filters, and each output's channel-policy resolutions. Their capacities are independently configurable; default 16,384, zero disables. The opt-in HTTP `GET /filters` endpoint exposes full cache entries and channel names; disabled by default.
+- Added an optional single-container Redis/Valkey bundle selected with `KV_ENGINE`, plus an example configuration and persistent data paths.
+- Completed internal service/config module extraction and moved unit tests to `tests/unit/` without expanding public runtime APIs.
+
 ## 0.1.4 — 2026-10-06
 
 - Added Unix `SIGHUP` configuration reload. The new file is parsed and validated before switching; invalid configuration leaves the current runtime active. Accepted reloads drain pending output queues and restart input/output workers in-process, briefly interrupting Pub/Sub input and resetting status counters. Logging and instance-lock changes still require a full process restart.

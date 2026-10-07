@@ -1,0 +1,47 @@
+services:
+  redis-filter:
+    image: redis:7.4-alpine
+    networks:
+      filters: {}
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+
+  service-filter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["--config", "/config/docker-filter-config.json"]
+    working_dir: /state
+    volumes:
+      - ./tests/docker-filter-config.json:/config/docker-filter-config.json:ro
+      - filter-state:/state
+    networks:
+      filters: {}
+    depends_on:
+      redis-filter:
+        condition: service_healthy
+
+  filter-integration-test:
+    image: python:3.13-alpine
+    command: ["python", "/tests/docker_filter_integration.py"]
+    environment:
+      REDIS_HOST: redis-filter
+    volumes:
+      - ./tests:/tests:ro
+    networks:
+      filters: {}
+    depends_on:
+      service-filter:
+        condition: service_started
+      redis-filter:
+        condition: service_healthy
+
+volumes:
+  filter-state: {}
+
+networks:
+  filters:
+    driver: bridge

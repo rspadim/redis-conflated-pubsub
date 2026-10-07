@@ -1,3 +1,4 @@
+import glob
 import json
 import os
 import select
@@ -76,6 +77,20 @@ def wait_for_sighup_reload(publisher_sock, publisher_reader, timeout=15):
     raise AssertionError(f"Service did not finish SIGHUP reload; last status: {latest}")
 
 
+def wait_for_rejected_reload(timeout=5):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for log_path in glob.glob("/state/logs/redis-conflated-pubsub.*"):
+            try:
+                with open(log_path, encoding="utf-8") as log_file:
+                    if "configuration_reload_rejected" in log_file.read():
+                        return
+            except FileNotFoundError:
+                continue
+        time.sleep(0.05)
+    raise AssertionError("Service did not log rejection of the invalid SIGHUP config")
+
+
 def exercise_sighup_reload(publisher_sock, publisher_reader, subscribers):
     service_pid = os.environ.get("SERVICE_PID")
     if not service_pid:
@@ -109,6 +124,34 @@ def exercise_sighup_reload(publisher_sock, publisher_reader, subscribers):
             publisher_reader,
             subscribers,
             [(probe, PAYLOAD_A)],
+            ttl_items=[],
+            assert_ttl_quiet=True,
+        )
+
+        invalid_probe = "reload-invalid-probe"
+        publish_policy_event(
+            publisher_sock,
+            publisher_reader,
+            subscribers,
+            invalid_probe,
+            PAYLOAD_B,
+            ttl_expected=True,
+        )
+        time.sleep(0.85)
+        with open(config_path, "w", encoding="utf-8") as config_file:
+            config_file.write("{ invalid json")
+        os.kill(int(service_pid), signal.SIGHUP)
+        wait_for_rejected_reload()
+        status = get_status()
+        assert status.get("state") == "running", status
+        os.kill(int(service_pid), 0)
+        # The valid 1200 ms TTL remains active. If the rejected reload had
+        # replaced it with the original 600 ms config, this duplicate publishes.
+        publish_policy_batch(
+            publisher_sock,
+            publisher_reader,
+            subscribers,
+            [(invalid_probe, PAYLOAD_B)],
             ttl_items=[],
             assert_ttl_quiet=True,
         )
@@ -818,7 +861,8 @@ def main():
 
         print(
             "TTL/profile/group E2E passed: profiles, ordered selectors and default, "
-            "individual expiry, floor-rounded and fixed/reset group expiry, SIGHUP reload, and "
+            "individual expiry, floor-rounded and fixed/reset group expiry, valid SIGHUP reload, "
+            "and rejected invalid-file reload without replacing the active config; "
             "independent 100/300 ms intervals behaved on mapped channels; TTL 0 "
             "still conflated at 50 ms and direct TTL 0 forwarded every input."
         )

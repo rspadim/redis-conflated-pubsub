@@ -16,15 +16,15 @@ The CI workflow runs on pushes to `main`, pull requests, and manual dispatch. It
 
 - Validate monitoring with Python 3.13 unit tests, JSON parsing, and Zabbix XML parsing.
 
-The TTL Compose E2E verifies output-local deduplication groups with shared expiry anchored to rounded start timestamps, both fixed (`restart_on_change: false`) and reset-on-change (`true`) modes, and that only published changes/new members reset a deadline. It exercises profile-based and inline channel rules, one default fallback policy and ordered first-match selection, independent 100/300 ms scheduler intervals, and a Unix `SIGHUP` reload that resumes publishing. The TTL Compose command above is run from the repository root; Docker usage is in [`docker/README.md`](../docker/README.md).
+The TTL Compose E2E verifies output-local deduplication groups with shared expiry anchored to rounded start timestamps, both fixed (`restart_on_change: false`) and reset-on-change (`true`) modes, and that only published changes/new members reset a deadline. It exercises profile-based and inline channel rules, one default fallback policy and ordered first-match selection, independent 100/300 ms scheduler intervals, a valid Unix `SIGHUP` config swap, and an invalid-file reload that leaves the active config running. The TTL Compose command above is run from the repository root; Docker usage is in [`docker/README.md`](../docker/README.md).
 
 ## Tagged releases
 
 Pushing a tag matching `v*` starts the release workflow. Use a version-aligned tag, for example:
 
 ```sh
-  git tag v0.1.4
-  git push origin v0.1.4
+  git tag v0.2.0
+  git push origin v0.2.0
 ```
 
 The workflow builds four targets and publishes the archives and SHA-256 sidecar files as GitHub Release assets:
