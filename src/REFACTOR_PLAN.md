@@ -45,6 +45,8 @@ Post-change verification: `cargo test --locked` passed 94 tests (7 manual benchm
 
 Follow-up E2E rerun on Valkey 9.1.2: the direct workload again published all 10,314 measured messages per output and ended with empty queues; serial p50 was 0.705 ms, concurrent p50 9.55 s (p95 10.24 s), publish phase 8.86 s, drain 9.57 s, and throughput 543 messages/s. This p50 is below the previously recorded pre-pacing 12.96–13.49 s range, but these are not controlled repeated samples. The mixed workload was similar to the prior post-change run: 8.68 s publish plus 4.79 s drain; each output delivered 3,334 direct, 699–700 conflated and 32 TTL-cohort events, with 668 deduplications and 48 entries per cache. Direct/conflated p50 was 6.31–6.38 s, reflecting burst queueing rather than the 200 ms timer.
 
+The same follow-up E2Es on Redis 7.4.11 also passed. Direct traffic delivered all 10,314 messages per output with empty queues; serial p50 was 0.918 ms, concurrent p50 9.43 s (p95 9.84 s), publish 8.87 s, drain 9.95 s, and throughput 531 messages/s. In the mixed run, publish/drain/total were 8.63/4.54/13.17 s; each output delivered 3,334 direct, 691–692 conflated and 32 TTL events, with 660 deduplications, p50 6.08–6.12 s and 48 entries per cache. Compared with Valkey's same-run results (9.55 s direct p50, 543 messages/s; 13.47 s mixed total), the measurements are close and do not establish a consistent engine winner.
+
 ## Ordered phases
 
 ### Phase 1 — Low-risk extraction (implemented)
