@@ -4,6 +4,7 @@
 
 - Added ordered input/output channel filters with glob, regex, and literal (`raw`/`single`/`string`) selectors; the last matching rule wins and `filter_default` defaults to `accept`.
 - Added separate bounded LRU caches for input filters, each output's filters, and each output's channel-policy resolutions. Their capacities are independently configurable; default 16,384, zero disables. The opt-in HTTP `GET /filters` endpoint exposes full cache entries and channel names; disabled by default.
+- Grouped pending conflated channel values by output interval, so each timer flushes only its own key/value bucket; direct traffic retains its ordered passthrough queue and is published one item per worker turn so timers and input get regular service.
 - Added an optional single-container Redis/Valkey bundle selected with `KV_ENGINE`, plus an example configuration and persistent data paths.
 - Completed internal service/config module extraction and moved unit tests to `tests/unit/` without expanding public runtime APIs.
 

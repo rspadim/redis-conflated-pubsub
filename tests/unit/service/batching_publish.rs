@@ -24,7 +24,7 @@ async fn conflation_publishes_only_the_final_changed_value_in_a_window() {
             &mut cache,
         );
     }
-    assert_eq!(pending["events"].raw_payload(), b"C");
+    assert_eq!(pending[&100]["events"].raw_payload(), b"C");
 
     let mut publisher = RecordingPublisher::default();
     flush_conflated_for_test(
@@ -71,7 +71,8 @@ fn nonpositive_interval_keeps_every_incoming_message_in_order() {
     }
 
     assert_eq!(passthrough.len(), 2);
-    let batch = pending_batch(0, 256, usize::MAX, &pending, &passthrough);
+    let no_conflated_pending = HashMap::new();
+    let batch = pending_batch(0, 256, usize::MAX, &no_conflated_pending, &passthrough);
     assert_eq!(batch[0].payload, b"first");
     clear_published_batch(
         0,
@@ -82,8 +83,61 @@ fn nonpositive_interval_keeps_every_incoming_message_in_order() {
         &output_metrics,
     );
     assert_eq!(
-        pending_batch(0, 256, usize::MAX, &pending, &passthrough)[0].payload,
+        pending_batch(0, 256, usize::MAX, &no_conflated_pending, &passthrough,)[0].payload,
         b"second"
+    );
+}
+
+#[tokio::test]
+async fn passthrough_publishes_one_item_per_worker_turn_in_order() {
+    let metrics = Metrics::new();
+    let output_metrics = metrics.register_output("paced-passthrough-output");
+    let mut pending = PendingByInterval::new();
+    let mut passthrough = VecDeque::new();
+    let mut cache = DeduplicationCache::new(0);
+    for payload in [b"first".to_vec(), b"second".to_vec()] {
+        metrics.record_output_input(&output_metrics, payload.len());
+        enqueue_for_test_with_cache(
+            0,
+            InboundMessage {
+                output_channel: "events".to_owned(),
+                payload,
+            },
+            &mut pending,
+            &mut passthrough,
+            &metrics,
+            &output_metrics,
+            &mut cache,
+        );
+    }
+    let mut publisher = RecordingPublisher::default();
+    let mut failure_log = OutputFailureLog::default();
+    let mut context = publish_context_for_test(
+        "paced-passthrough-output",
+        &mut failure_log,
+        &mut cache,
+        &metrics,
+        &output_metrics,
+    );
+
+    assert!(
+        publish_passthrough_one(&mut publisher, &mut pending, &mut passthrough, &mut context,)
+            .await
+    );
+    assert_eq!(publisher.successful_batches.len(), 1);
+    assert_eq!(publisher.successful_batches[0][0].payload, b"first");
+    assert_eq!(passthrough.front().unwrap().payload, b"second");
+
+    assert!(
+        publish_passthrough_one(&mut publisher, &mut pending, &mut passthrough, &mut context,)
+            .await
+    );
+    assert_eq!(publisher.successful_batches.len(), 2);
+    assert_eq!(publisher.successful_batches[1][0].payload, b"second");
+    assert!(passthrough.is_empty());
+    assert!(
+        !publish_passthrough_one(&mut publisher, &mut pending, &mut passthrough, &mut context,)
+            .await
     );
 }
 

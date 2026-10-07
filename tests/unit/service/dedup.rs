@@ -214,8 +214,8 @@ fn channel_deduplication_disable_does_not_disable_conflation() {
         );
     }
     assert!(passthrough.is_empty());
-    assert_eq!(pending.len(), 1);
-    assert_eq!(pending["events:live"].payload, b"latest");
+    assert_eq!(pending_message_count(&pending), 1);
+    assert_eq!(pending[&100]["events:live"].payload, b"latest");
     assert!(cache.entries.is_empty());
     assert_eq!(metrics.conflated_messages_total.load(Ordering::Relaxed), 1);
 }
@@ -252,8 +252,8 @@ async fn nonpositive_group_ttl_disables_deduplication_but_keeps_conflation() {
         );
     }
 
-    assert_eq!(pending.len(), 1);
-    assert_eq!(pending["events:live"].payload, b"latest");
+    assert_eq!(pending_message_count(&pending), 1);
+    assert_eq!(pending[&100]["events:live"].payload, b"latest");
     assert_eq!(metrics.conflated_messages_total.load(Ordering::Relaxed), 1);
 
     let mut publisher = RecordingPublisher::default();
@@ -357,7 +357,7 @@ async fn conflated_value_returning_to_cached_value_is_suppressed_at_flush() {
         &output_metrics,
         &mut cache,
     );
-    assert_eq!(pending["events"].raw_payload(), b"changed");
+    assert_eq!(pending[&100]["events"].raw_payload(), b"changed");
 
     let returned = b"published".to_vec();
     metrics.record_output_input(&output_metrics, returned.len());
@@ -374,7 +374,7 @@ async fn conflated_value_returning_to_cached_value_is_suppressed_at_flush() {
         &mut cache,
     );
 
-    assert_eq!(pending["events"].raw_payload(), b"published");
+    assert_eq!(pending[&100]["events"].raw_payload(), b"published");
     assert!(passthrough.is_empty());
     assert_eq!(
         metrics.deduplicated_messages_total.load(Ordering::Relaxed),
@@ -508,7 +508,7 @@ async fn nonpositive_ttl_keeps_normal_conflation_enabled() {
                 &mut cache,
             );
         }
-        assert_eq!(pending["events"].payload, b"latest");
+        assert_eq!(pending[&100]["events"].payload, b"latest");
 
         let mut publisher = RecordingPublisher::default();
         flush_conflated_for_test(

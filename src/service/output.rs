@@ -20,7 +20,8 @@ use super::policy::{
 use super::publish::{OutputFailureLog, RedisBatchPublisher};
 use super::{
     DeduplicationCache, InboundMessage, OutputMessageContext, OutputMessagePolicy,
-    OutputPublishContext, OutputRuntimeSetup, PendingMessage, deduplication_prune_interval,
+    OutputPublishContext, OutputRuntimeSetup, PendingByInterval, PendingMessage,
+    deduplication_prune_interval, pending_message_count,
 };
 
 mod flush;
@@ -29,8 +30,10 @@ mod flush;
 pub(super) use flush::clear_published_batch;
 #[cfg(test)]
 pub(super) use flush::publish_conflated_pending;
+#[cfg(test)]
+pub(super) use flush::publish_passthrough_pending;
 pub(super) use flush::{
-    enqueue_message, publish_conflated_interval_pending, publish_passthrough_pending,
+    enqueue_message, publish_conflated_interval_pending, publish_passthrough_one,
 };
 
 pub(super) async fn publish_output(
@@ -77,56 +80,30 @@ pub(super) async fn publish_output(
             ),
         time::Instant::now(),
     );
-    let mut pending = HashMap::<String, PendingMessage>::new();
+    let mut pending = PendingByInterval::new();
     let mut passthrough = VecDeque::<PendingMessage>::new();
     let mut failure_log = OutputFailureLog::default();
     let mut policy_log = OversizedPolicyLog::default();
     let mut connection: Option<MultiplexedConnection> = None;
     let mut input_closed = false;
-    let mut flush_due = false;
     let mut due_intervals = Vec::<i64>::new();
 
     metrics.set_output_state(&output_metrics, "running");
     loop {
-        let has_pending = !pending.is_empty() || !passthrough.is_empty();
-        if flush_due {
-            flush_due = false;
-            if !passthrough.is_empty() {
-                metrics.set_output_state(&output_metrics, "publishing");
-                if connection.is_none() {
-                    metrics.set_output_state(&output_metrics, "connecting");
-                }
-                let mut publisher = RedisBatchPublisher {
-                    config: &config,
-                    client: &client,
-                    connection: &mut connection,
-                };
-                let mut publish_context = OutputPublishContext {
-                    name: &name,
-                    failure_log: &mut failure_log,
-                    deduplication_cache: &mut deduplication_cache,
-                    metrics: &metrics,
-                    output_metrics: &output_metrics,
-                };
-                publish_passthrough_pending(
-                    &mut publisher,
-                    &mut pending,
-                    &mut passthrough,
-                    &mut publish_context,
-                )
-                .await;
-                metrics.set_output_state(&output_metrics, "running");
-                continue;
+        for interval_ms in advance_due_schedules(&mut flush_schedules, time::Instant::now()) {
+            if pending
+                .get(&interval_ms)
+                .is_some_and(|messages| !messages.is_empty())
+                && !due_intervals.contains(&interval_ms)
+            {
+                due_intervals.push(interval_ms);
             }
         }
 
         if !due_intervals.is_empty() {
             let intervals = std::mem::take(&mut due_intervals);
             for interval_ms in intervals {
-                if !pending
-                    .values()
-                    .any(|message| message.conflation_interval_ms == interval_ms)
-                {
+                if pending.get(&interval_ms).is_none_or(HashMap::is_empty) {
                     continue;
                 }
                 metrics.set_output_state(&output_metrics, "publishing");
@@ -149,7 +126,7 @@ pub(super) async fn publish_output(
                     &mut publisher,
                     &mut pending,
                     &mut passthrough,
-                    Some(interval_ms),
+                    interval_ms,
                     max_commands_per_exec,
                     max_bytes_per_exec,
                     &mut publish_context,
@@ -160,12 +137,69 @@ pub(super) async fn publish_output(
             continue;
         }
 
+        // Publish at most one direct item per iteration, then re-check timers
+        // and receive input instead of draining passthrough ahead of all timers.
+        if !passthrough.is_empty() {
+            metrics.set_output_state(&output_metrics, "publishing");
+            if connection.is_none() {
+                metrics.set_output_state(&output_metrics, "connecting");
+            }
+            let mut publisher = RedisBatchPublisher {
+                config: &config,
+                client: &client,
+                connection: &mut connection,
+            };
+            let mut publish_context = OutputPublishContext {
+                name: &name,
+                failure_log: &mut failure_log,
+                deduplication_cache: &mut deduplication_cache,
+                metrics: &metrics,
+                output_metrics: &output_metrics,
+            };
+            publish_passthrough_one(
+                &mut publisher,
+                &mut pending,
+                &mut passthrough,
+                &mut publish_context,
+            )
+            .await;
+            metrics.set_output_state(&output_metrics, "running");
+        }
+
+        let has_pending = pending_message_count(&pending) > 0 || !passthrough.is_empty();
         if input_closed && !has_pending {
             break;
         }
 
         let next_flush_tick = next_schedule_tick(&flush_schedules);
         tokio::select! {
+            biased;
+            _ = async {
+                if let Some(next_tick) = next_flush_tick {
+                    time::sleep_until(next_tick).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            }, if !flush_schedules.is_empty() => {
+                for interval_ms in advance_due_schedules(&mut flush_schedules, time::Instant::now()) {
+                    if pending
+                        .get(&interval_ms)
+                        .is_some_and(|messages| !messages.is_empty())
+                        && !due_intervals.contains(&interval_ms)
+                    {
+                        due_intervals.push(interval_ms);
+                    }
+                }
+            }
+            _ = async {
+                if let Some(interval) = deduplication_prune_interval.as_mut() {
+                    interval.tick().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            }, if deduplication_prune_interval.is_some() => {
+                deduplication_cache.prune_expired(time::Instant::now());
+            }
             message = receiver.recv(), if !input_closed => {
                 match message {
                     Some(message) => {
@@ -192,46 +226,18 @@ pub(super) async fn publish_output(
                             &mut deduplication_cache,
                             time::Instant::now(),
                         );
-                        if channel_policy.interval_ms <= 0 {
-                            flush_due = true;
-                        }
                     }
                     None => {
                         input_closed = true;
-                        flush_due = true;
-                        for message in pending.values() {
-                            let interval_ms = message.conflation_interval_ms;
-                            if interval_ms > 0 && !due_intervals.contains(&interval_ms) {
+                        for (&interval_ms, messages) in &pending {
+                            if !messages.is_empty() && !due_intervals.contains(&interval_ms) {
                                 due_intervals.push(interval_ms);
                             }
                         }
                     }
                 }
             }
-            _ = async {
-                if let Some(next_tick) = next_flush_tick {
-                    time::sleep_until(next_tick).await;
-                } else {
-                    std::future::pending::<()>().await;
-                }
-            }, if !flush_schedules.is_empty() => {
-                for interval_ms in advance_due_schedules(&mut flush_schedules, time::Instant::now()) {
-                    if pending
-                        .values()
-                        .any(|message| message.conflation_interval_ms == interval_ms)
-                    {
-                        due_intervals.push(interval_ms);
-                    }
-                }
-            }
-            _ = async {
-                if let Some(interval) = deduplication_prune_interval.as_mut() {
-                    interval.tick().await;
-                } else {
-                    std::future::pending::<()>().await;
-                }
-            }, if deduplication_prune_interval.is_some() => {
-                deduplication_cache.prune_expired(time::Instant::now());
+            _ = tokio::task::yield_now(), if !passthrough.is_empty() => {
             }
         }
     }

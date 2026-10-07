@@ -1,6 +1,6 @@
 #[cfg(test)]
-use std::collections::{HashMap, VecDeque};
-use std::{path::Path, sync::Arc, time::Duration};
+use std::collections::VecDeque;
+use std::{collections::HashMap, path::Path, sync::Arc, time::Duration};
 
 #[cfg(unix)]
 use anyhow::bail;
@@ -44,7 +44,7 @@ use input::{output_echo_filters, read_input};
 #[cfg(test)]
 use output::{
     clear_published_batch, enqueue_message, publish_conflated_interval_pending,
-    publish_conflated_pending, publish_passthrough_pending,
+    publish_conflated_pending, publish_passthrough_one, publish_passthrough_pending,
 };
 use output::{publish_output, write_status};
 #[cfg(test)]
@@ -141,6 +141,12 @@ impl PendingMessage {
     fn raw_payload(&self) -> &[u8] {
         self.raw_payload.as_deref().unwrap_or(&self.payload)
     }
+}
+
+type PendingByInterval = HashMap<i64, HashMap<String, PendingMessage>>;
+
+fn pending_message_count(pending: &PendingByInterval) -> usize {
+    pending.values().map(HashMap::len).sum()
 }
 
 struct OutputSender {

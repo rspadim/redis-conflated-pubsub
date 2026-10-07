@@ -102,9 +102,9 @@ fn each_output_conflates_by_mapped_channel_and_preserves_binary_payloads() {
         );
     }
 
-    assert_eq!(pending.len(), 2);
-    assert_eq!(pending["replica:sensor:a"].payload, b"latest");
-    assert_eq!(pending["replica:sensor:b"].payload, b"other");
+    assert_eq!(pending_message_count(&pending), 2);
+    assert_eq!(pending[&25]["replica:sensor:a"].payload, b"latest");
+    assert_eq!(pending[&25]["replica:sensor:b"].payload, b"other");
     assert_eq!(metrics.conflated_messages_total.load(Ordering::Relaxed), 1);
     assert_eq!(
         metrics

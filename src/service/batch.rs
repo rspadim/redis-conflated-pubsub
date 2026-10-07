@@ -1,7 +1,6 @@
-use std::{
-    collections::{HashMap, VecDeque},
-    time::Duration,
-};
+#[cfg(test)]
+use std::collections::VecDeque;
+use std::{collections::HashMap, time::Duration};
 
 use tokio::time;
 use tracing::warn;
@@ -10,6 +9,7 @@ use crate::config::OversizedMessagePolicy;
 
 use super::{InboundMessage, OutputMessageContext, OutputMessagePolicy, PendingMessage};
 
+#[cfg(test)]
 pub(super) fn pending_batch(
     interval_ms: i64,
     max_commands_per_exec: usize,

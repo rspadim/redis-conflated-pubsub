@@ -5,15 +5,16 @@ use tracing::debug;
 
 use crate::status::{Metrics, OutputMetrics};
 
-use super::super::batch::{pending_batch, pending_batch_length, prepare_output_message};
+use super::super::batch::{pending_batch_length, prepare_output_message};
 use super::super::publish::{BatchPublisher, PublishFailure, publish_once};
 use super::super::{
-    DeduplicationCache, InboundMessage, OutputMessageContext, OutputPublishContext, PendingMessage,
+    DeduplicationCache, InboundMessage, OutputMessageContext, OutputPublishContext,
+    PendingByInterval, PendingMessage, pending_message_count,
 };
 
 pub(in crate::service) fn enqueue_message(
     message: InboundMessage,
-    pending: &mut HashMap<String, PendingMessage>,
+    pending: &mut PendingByInterval,
     passthrough: &mut VecDeque<PendingMessage>,
     context: &mut OutputMessageContext<'_>,
     deduplication_cache: &mut DeduplicationCache,
@@ -29,14 +30,16 @@ pub(in crate::service) fn enqueue_message(
             pending_message.raw_payload().len(),
             pending_message.payload.len(),
         );
-        context
-            .metrics
-            .set_output_pending_keys(context.output_metrics, pending.len() + passthrough.len());
+        context.metrics.set_output_pending_keys(
+            context.output_metrics,
+            pending_message_count(pending) + passthrough.len(),
+        );
         return;
     }
     if interval_ms > 0 {
+        let interval_pending = pending.entry(interval_ms).or_default();
         if let Some(replaced) =
-            pending.insert(pending_message.output_channel.clone(), pending_message)
+            interval_pending.insert(pending_message.output_channel.clone(), pending_message)
         {
             context
                 .metrics
@@ -45,35 +48,47 @@ pub(in crate::service) fn enqueue_message(
     } else {
         passthrough.push_back(pending_message);
     }
-    context
-        .metrics
-        .set_output_pending_keys(context.output_metrics, pending.len() + passthrough.len());
+    context.metrics.set_output_pending_keys(
+        context.output_metrics,
+        pending_message_count(pending) + passthrough.len(),
+    );
 }
 
 pub(in crate::service) fn clear_published_batch(
     interval_ms: i64,
-    pending: &mut HashMap<String, PendingMessage>,
+    pending: &mut PendingByInterval,
     passthrough: &mut VecDeque<PendingMessage>,
     published: &[PendingMessage],
     metrics: &Metrics,
     output_metrics: &OutputMetrics,
 ) {
     if interval_ms > 0 {
-        for message in published {
-            if pending.get(&message.output_channel) == Some(message) {
-                pending.remove(&message.output_channel);
+        let remove_interval = if let Some(interval_pending) = pending.get_mut(&interval_ms) {
+            for message in published {
+                if interval_pending.get(&message.output_channel) == Some(message) {
+                    interval_pending.remove(&message.output_channel);
+                }
             }
+            interval_pending.is_empty()
+        } else {
+            false
+        };
+        if remove_interval {
+            pending.remove(&interval_ms);
         }
     } else {
         passthrough.pop_front();
     }
-    metrics.set_output_pending_keys(output_metrics, pending.len() + passthrough.len());
+    metrics.set_output_pending_keys(
+        output_metrics,
+        pending_message_count(pending) + passthrough.len(),
+    );
 }
 
 pub(super) fn settle_failed_batch(
     interval_ms: i64,
     batch: &[PendingMessage],
-    pending: &mut HashMap<String, PendingMessage>,
+    pending: &mut PendingByInterval,
     passthrough: &mut VecDeque<PendingMessage>,
     failure: &PublishFailure,
     metrics: &Metrics,
@@ -89,33 +104,69 @@ pub(super) fn settle_failed_batch(
         }
     }
     if interval_ms > 0 {
-        for message in batch {
-            if pending.get(&message.output_channel) == Some(message) {
-                pending.remove(&message.output_channel);
+        let remove_interval = if let Some(interval_pending) = pending.get_mut(&interval_ms) {
+            for message in batch {
+                if interval_pending.get(&message.output_channel) == Some(message) {
+                    interval_pending.remove(&message.output_channel);
+                }
             }
+            interval_pending.is_empty()
+        } else {
+            false
+        };
+        if remove_interval {
+            pending.remove(&interval_ms);
         }
     } else {
         for _ in batch {
             passthrough.pop_front();
         }
     }
-    metrics.set_output_pending_keys(output_metrics, pending.len() + passthrough.len());
+    metrics.set_output_pending_keys(
+        output_metrics,
+        pending_message_count(pending) + passthrough.len(),
+    );
 }
 
 #[cfg(test)]
 pub(in crate::service) async fn publish_conflated_pending<P: BatchPublisher>(
     publisher: &mut P,
-    pending: &mut HashMap<String, PendingMessage>,
+    pending: &mut PendingByInterval,
     max_commands_per_exec: usize,
     max_bytes_per_exec: usize,
     context: &mut OutputPublishContext<'_>,
 ) {
     let mut passthrough = VecDeque::new();
-    publish_conflated_interval_pending(
+    let mut intervals = pending.keys().copied().collect::<Vec<_>>();
+    intervals.sort_unstable();
+    for interval_ms in intervals {
+        publish_conflated_interval_pending(
+            publisher,
+            pending,
+            &mut passthrough,
+            interval_ms,
+            max_commands_per_exec,
+            max_bytes_per_exec,
+            context,
+        )
+        .await;
+    }
+}
+
+pub(in crate::service) async fn publish_conflated_interval_pending<P: BatchPublisher>(
+    publisher: &mut P,
+    pending: &mut PendingByInterval,
+    passthrough: &mut VecDeque<PendingMessage>,
+    interval_ms: i64,
+    max_commands_per_exec: usize,
+    max_bytes_per_exec: usize,
+    context: &mut OutputPublishContext<'_>,
+) {
+    publish_interval_bucket(
         publisher,
         pending,
-        &mut passthrough,
-        None,
+        passthrough,
+        interval_ms,
         max_commands_per_exec,
         max_bytes_per_exec,
         context,
@@ -123,38 +174,41 @@ pub(in crate::service) async fn publish_conflated_pending<P: BatchPublisher>(
     .await;
 }
 
-pub(in crate::service) async fn publish_conflated_interval_pending<P: BatchPublisher>(
+async fn publish_interval_bucket<P: BatchPublisher>(
     publisher: &mut P,
-    pending: &mut HashMap<String, PendingMessage>,
+    pending: &mut PendingByInterval,
     passthrough: &mut VecDeque<PendingMessage>,
-    interval_ms: Option<i64>,
+    interval_ms: i64,
     max_commands_per_exec: usize,
     max_bytes_per_exec: usize,
     context: &mut OutputPublishContext<'_>,
 ) {
-    let mut candidate_channels = pending
-        .iter()
-        .filter(|(_, message)| {
-            interval_ms.is_none_or(|interval_ms| message.conflation_interval_ms == interval_ms)
-        })
-        .map(|(channel, _)| channel.clone())
-        .collect::<Vec<_>>();
+    let Some(interval_pending) = pending.get(&interval_ms) else {
+        return;
+    };
+    let mut candidate_channels = interval_pending.keys().cloned().collect::<Vec<_>>();
     candidate_channels.sort();
     let mut offset = 0usize;
     while offset < candidate_channels.len() {
-        let candidate_batch_length = pending_batch_length(
-            max_commands_per_exec,
-            max_bytes_per_exec,
-            pending,
-            &candidate_channels[offset..],
-        );
+        let candidate_batch_length = {
+            let interval_pending = pending
+                .get(&interval_ms)
+                .expect("pending interval bucket must remain present");
+            pending_batch_length(
+                max_commands_per_exec,
+                max_bytes_per_exec,
+                interval_pending,
+                &candidate_channels[offset..],
+            )
+        };
         let candidate_batch = &candidate_channels[offset..offset + candidate_batch_length];
         let now = time::Instant::now();
         let mut eligible_channels = Vec::with_capacity(candidate_batch_length);
         let mut deduplicated_channels = Vec::new();
         for channel in candidate_batch {
             let message = pending
-                .get(channel)
+                .get(&interval_ms)
+                .and_then(|interval_pending| interval_pending.get(channel))
                 .expect("pending channel snapshot must remain present");
             if context.deduplication_cache.should_suppress(message, now) {
                 deduplicated_channels.push(channel.clone());
@@ -163,20 +217,27 @@ pub(in crate::service) async fn publish_conflated_interval_pending<P: BatchPubli
             }
         }
         let removed_deduplicated = !deduplicated_channels.is_empty();
-        for channel in deduplicated_channels {
-            let message = pending
-                .remove(&channel)
-                .expect("deduplicated pending channel must remain present");
-            context.metrics.record_output_deduplicated(
-                context.output_metrics,
-                message.raw_payload().len(),
-                message.payload.len(),
-            );
-        }
         if removed_deduplicated {
-            context
-                .metrics
-                .set_output_pending_keys(context.output_metrics, pending.len() + passthrough.len());
+            if let Some(interval_pending) = pending.get_mut(&interval_ms) {
+                for channel in deduplicated_channels {
+                    let message = interval_pending
+                        .remove(&channel)
+                        .expect("deduplicated pending channel must remain present");
+                    context.metrics.record_output_deduplicated(
+                        context.output_metrics,
+                        message.raw_payload().len(),
+                        message.payload.len(),
+                    );
+                }
+            }
+            let remove_interval = pending.get(&interval_ms).is_some_and(HashMap::is_empty);
+            if remove_interval {
+                pending.remove(&interval_ms);
+            }
+            context.metrics.set_output_pending_keys(
+                context.output_metrics,
+                pending_message_count(pending) + passthrough.len(),
+            );
         }
         if eligible_channels.is_empty() {
             offset += candidate_batch_length;
@@ -188,7 +249,8 @@ pub(in crate::service) async fn publish_conflated_interval_pending<P: BatchPubli
             .iter()
             .map(|channel| {
                 pending
-                    .get(channel)
+                    .get(&interval_ms)
+                    .and_then(|interval_pending| interval_pending.get(channel))
                     .expect("pending channel snapshot must remain present")
                     .clone()
             })
@@ -199,7 +261,7 @@ pub(in crate::service) async fn publish_conflated_interval_pending<P: BatchPubli
             Ok(subscribers) => subscribers,
             Err(failure) => {
                 settle_failed_batch(
-                    1,
+                    interval_ms,
                     &batch,
                     pending,
                     passthrough,
@@ -215,7 +277,7 @@ pub(in crate::service) async fn publish_conflated_interval_pending<P: BatchPubli
         let message_count = batch.len();
         let payload_bytes = batch.iter().map(|message| message.payload.len()).sum();
         clear_published_batch(
-            1,
+            interval_ms,
             pending,
             passthrough,
             &batch,
@@ -227,6 +289,7 @@ pub(in crate::service) async fn publish_conflated_interval_pending<P: BatchPubli
             .record_output_flush(context.output_metrics, message_count, payload_bytes);
         debug!(
             output = context.name,
+            interval_ms,
             messages = message_count,
             subscribers,
             atomic = true,
@@ -237,51 +300,61 @@ pub(in crate::service) async fn publish_conflated_interval_pending<P: BatchPubli
     }
 }
 
+#[cfg(test)]
 pub(in crate::service) async fn publish_passthrough_pending<P: BatchPublisher>(
     publisher: &mut P,
-    pending: &mut HashMap<String, PendingMessage>,
+    pending: &mut PendingByInterval,
     passthrough: &mut VecDeque<PendingMessage>,
     context: &mut OutputPublishContext<'_>,
 ) {
-    while !passthrough.is_empty() {
-        let batch = pending_batch(0, 1, 0, pending, passthrough);
-        match publish_once(publisher, &batch, false, context).await {
-            Ok(subscribers) => {
-                let payload_bytes = batch.iter().map(|message| message.payload.len()).sum();
-                clear_published_batch(
-                    0,
-                    pending,
-                    passthrough,
-                    &batch,
-                    context.metrics,
-                    context.output_metrics,
-                );
-                context.metrics.record_output_flush(
-                    context.output_metrics,
-                    batch.len(),
-                    payload_bytes,
-                );
-                debug!(
-                    output = context.name,
-                    messages = batch.len(),
-                    subscribers,
-                    atomic = false,
-                    "output_batch_published"
-                );
-            }
-            Err(failure) => {
-                settle_failed_batch(
-                    0,
-                    &batch,
-                    pending,
-                    passthrough,
-                    &failure,
-                    context.metrics,
-                    context.output_metrics,
-                );
-                drop(batch);
-            }
-        }
+    while publish_passthrough_one(publisher, pending, passthrough, context).await {
         tokio::task::yield_now().await;
     }
+}
+
+pub(in crate::service) async fn publish_passthrough_one<P: BatchPublisher>(
+    publisher: &mut P,
+    pending: &mut PendingByInterval,
+    passthrough: &mut VecDeque<PendingMessage>,
+    context: &mut OutputPublishContext<'_>,
+) -> bool {
+    let Some(message) = passthrough.front().cloned() else {
+        return false;
+    };
+    let batch = [message];
+    match publish_once(publisher, &batch, false, context).await {
+        Ok(subscribers) => {
+            let payload_bytes = batch.iter().map(|message| message.payload.len()).sum();
+            clear_published_batch(
+                0,
+                pending,
+                passthrough,
+                &batch,
+                context.metrics,
+                context.output_metrics,
+            );
+            context
+                .metrics
+                .record_output_flush(context.output_metrics, batch.len(), payload_bytes);
+            debug!(
+                output = context.name,
+                messages = batch.len(),
+                subscribers,
+                atomic = false,
+                "output_batch_published"
+            );
+        }
+        Err(failure) => {
+            settle_failed_batch(
+                0,
+                &batch,
+                pending,
+                passthrough,
+                &failure,
+                context.metrics,
+                context.output_metrics,
+            );
+        }
+    }
+    true
 }

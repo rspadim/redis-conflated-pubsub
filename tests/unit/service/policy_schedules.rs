@@ -66,7 +66,7 @@ fn channel_policy_resolution_uses_first_match_and_output_fallbacks() {
     let direct_policy = resolve_channel_policy(&config, "mapped:direct:now");
     let metrics = Metrics::new();
     let output_metrics = metrics.register_output("direct-policy-output");
-    let mut pending = HashMap::new();
+    let mut pending = PendingByInterval::new();
     let mut passthrough = VecDeque::new();
     let mut cache = DeduplicationCache::new(config.deduplication.ttl_ms);
     enqueue_for_test_with_policy_at(
@@ -342,7 +342,10 @@ async fn distinct_interval_groups_keep_cadence_and_flush_only_the_due_group() {
     ] {
         let mut message = pending_message(channel, channel.as_bytes().to_vec());
         message.conflation_interval_ms = interval_ms;
-        pending.insert(channel.to_owned(), message);
+        pending
+            .entry(interval_ms)
+            .or_insert_with(HashMap::new)
+            .insert(channel.to_owned(), message);
     }
     let mut cache = DeduplicationCache::new(0);
     let mut publisher = RecordingPublisher::default();
@@ -363,14 +366,17 @@ async fn distinct_interval_groups_keep_cadence_and_flush_only_the_due_group() {
             &mut publisher,
             &mut pending,
             &mut passthrough,
-            Some(due_interval_ms),
+            due_interval_ms,
             256,
             usize::MAX,
             &mut context,
         )
         .await;
-        assert!(!pending.contains_key(&format!("events:{due_interval_ms}")));
-        assert_eq!(pending.len(), (300 - due_interval_ms) as usize / 50);
+        assert!(!pending.contains_key(&due_interval_ms));
+        assert_eq!(
+            pending_message_count(&pending),
+            (300 - due_interval_ms) as usize / 50
+        );
     }
 
     assert!(pending.is_empty());

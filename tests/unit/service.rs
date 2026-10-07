@@ -146,7 +146,7 @@ impl BatchPublisher for RecordingPublisher {
 fn enqueue_for_test(
     interval_ms: i64,
     message: InboundMessage,
-    pending: &mut HashMap<String, PendingMessage>,
+    pending: &mut PendingByInterval,
     passthrough: &mut VecDeque<PendingMessage>,
     metrics: &Metrics,
     output_metrics: &OutputMetrics,
@@ -166,7 +166,7 @@ fn enqueue_for_test(
 fn enqueue_for_test_with_cache(
     interval_ms: i64,
     message: InboundMessage,
-    pending: &mut HashMap<String, PendingMessage>,
+    pending: &mut PendingByInterval,
     passthrough: &mut VecDeque<PendingMessage>,
     metrics: &Metrics,
     output_metrics: &OutputMetrics,
@@ -188,7 +188,7 @@ fn enqueue_for_test_with_cache(
 fn enqueue_for_test_with_cache_at(
     interval_ms: i64,
     message: InboundMessage,
-    pending: &mut HashMap<String, PendingMessage>,
+    pending: &mut PendingByInterval,
     passthrough: &mut VecDeque<PendingMessage>,
     metrics: &Metrics,
     output_metrics: &OutputMetrics,
@@ -216,7 +216,7 @@ fn enqueue_for_test_with_cache_at(
 #[allow(clippy::too_many_arguments)]
 fn enqueue_for_test_with_policy_at(
     message: InboundMessage,
-    pending: &mut HashMap<String, PendingMessage>,
+    pending: &mut PendingByInterval,
     passthrough: &mut VecDeque<PendingMessage>,
     metrics: &Metrics,
     output_metrics: &OutputMetrics,
@@ -261,7 +261,7 @@ fn publish_context_for_test<'a>(
 async fn flush_passthrough_for_test(
     name: &str,
     publisher: &mut RecordingPublisher,
-    pending: &mut HashMap<String, PendingMessage>,
+    pending: &mut PendingByInterval,
     passthrough: &mut VecDeque<PendingMessage>,
     cache: &mut DeduplicationCache,
     metrics: &Metrics,
@@ -276,7 +276,7 @@ async fn flush_passthrough_for_test(
 async fn flush_conflated_for_test(
     name: &str,
     publisher: &mut RecordingPublisher,
-    pending: &mut HashMap<String, PendingMessage>,
+    pending: &mut PendingByInterval,
     cache: &mut DeduplicationCache,
     metrics: &Metrics,
     output_metrics: &OutputMetrics,
