@@ -43,6 +43,8 @@ Each output worker stores conflated messages as `interval_ms -> output_channel -
 
 Post-change verification: `cargo test --locked` passed 94 tests (7 manual benchmarks ignored) and Clippy passed. The TTL/profile/group E2E passed on Redis 7.4.11, including independent 100/300 ms intervals. The mixed-policy E2E passed on Valkey 9.1.2: per output, 3,334 direct, 726 conflated and 32 TTL-cohort events were delivered; 5,214/5,213 replacements and 694/695 suppressions were recorded. The 10,000-event burst took 9.05 s to publish and 4.31 s to drain. The direct hotpath E2E published all events with empty pending queues; Valkey measured 1.00 ms serial p50, 10.99 s concurrent-burst p50 and 462 end-to-end messages/s. These are small-sample Docker/WSL measurements, not a statistically sound engine or before/after comparison.
 
+Follow-up E2E rerun on Valkey 9.1.2: the direct workload again published all 10,314 measured messages per output and ended with empty queues; serial p50 was 0.705 ms, concurrent p50 9.55 s (p95 10.24 s), publish phase 8.86 s, drain 9.57 s, and throughput 543 messages/s. This p50 is below the previously recorded pre-pacing 12.96–13.49 s range, but these are not controlled repeated samples. The mixed workload was similar to the prior post-change run: 8.68 s publish plus 4.79 s drain; each output delivered 3,334 direct, 699–700 conflated and 32 TTL-cohort events, with 668 deduplications and 48 entries per cache. Direct/conflated p50 was 6.31–6.38 s, reflecting burst queueing rather than the 200 ms timer.
+
 ## Ordered phases
 
 ### Phase 1 — Low-risk extraction (implemented)
