@@ -1,0 +1,58 @@
+{
+  "max_bytes_per_exec": 4194304,
+  "input": {
+    "redis": {"host": "redis-raw", "port": 6379, "database": 0},
+    "filters": [{"glob": "mix:*", "action": "accept"}],
+    "filter_cache_max_entries": 16384,
+    "filter_default": "accept",
+    "subscriptions": [
+      {"type": "psubscribe", "pattern": "mix:*", "output_prefix": "mapped:", "output_suffix": ":source"}
+    ]
+  },
+  "outputs": {
+    "out-a": {
+      "redis": {"host": "redis-output", "port": 6379, "database": 0},
+      "channel_prefix": "replica-a:",
+      "channel_suffix": ":dest",
+      "filters": [{"glob": "mapped:mix:*:source", "action": "accept"}],
+      "filter_cache_max_entries": 16384,
+      "channel_policy_cache_max_entries": 16384,
+      "filter_default": "accept",
+      "conflation": {"interval_ms": 0},
+      "deduplication": {"ttl_ms": 0},
+      "channel_policies": [
+        {"glob": "replica-a:mapped:mix:direct:*:source:dest", "conflation.interval_ms": 0, "deduplication.ttl_ms": 0},
+        {"glob": "replica-a:mapped:mix:conflate:*:source:dest", "conflation.interval_ms": 200, "deduplication.ttl_ms": 0},
+        {"glob": "replica-a:mapped:mix:ttl:*:source:dest", "conflation.interval_ms": 200, "deduplication.ttl_ms": 5000},
+        {"default": true, "conflation.interval_ms": 0, "deduplication.ttl_ms": 0}
+      ]
+    },
+    "out-b": {
+      "redis": {"host": "redis-output", "port": 6379, "database": 1},
+      "channel_prefix": "replica-b:",
+      "channel_suffix": ":dest",
+      "filters": [{"glob": "mapped:mix:*:source", "action": "accept"}],
+      "filter_cache_max_entries": 16384,
+      "channel_policy_cache_max_entries": 16384,
+      "filter_default": "accept",
+      "conflation": {"interval_ms": 0},
+      "deduplication": {"ttl_ms": 0},
+      "channel_policies": [
+        {"glob": "replica-b:mapped:mix:direct:*:source:dest", "conflation.interval_ms": 0, "deduplication.ttl_ms": 0},
+        {"glob": "replica-b:mapped:mix:conflate:*:source:dest", "conflation.interval_ms": 200, "deduplication.ttl_ms": 0},
+        {"glob": "replica-b:mapped:mix:ttl:*:source:dest", "conflation.interval_ms": 200, "deduplication.ttl_ms": 5000},
+        {"default": true, "conflation.interval_ms": 0, "deduplication.ttl_ms": 0}
+      ]
+    }
+  },
+  "instance_lock": {"path": "/state/redis-conflated-hotpath-mix.lock"},
+  "status": {
+    "http": {"bind": "0.0.0.0", "port": 9090, "filters_endpoint_enabled": true}
+  },
+  "logging": {
+    "directory": "/state/logs",
+    "level": "warn",
+    "retention_days": 2,
+    "max_total_size_mb": 10
+  }
+}

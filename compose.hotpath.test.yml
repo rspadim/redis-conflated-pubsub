@@ -23,10 +23,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    command: ["--config", "/config/docker-hotpath-config.json"]
+    command: ["--config", "/config/hotpath-config.json"]
     working_dir: /state
     volumes:
-      - ./tests/docker-hotpath-config.json:/config/docker-hotpath-config.json:ro
+      - ${HOTPATH_CONFIG_FILE:-./tests/docker-hotpath-config.json}:/config/hotpath-config.json:ro
       - hotpath-state:/state
     networks:
       hotpath: {}
@@ -38,7 +38,7 @@ services:
 
   hotpath-benchmark:
     image: python:3.13-alpine
-    command: ["python", "/tests/docker_hotpath_benchmark.py"]
+    command: ["python", "/tests/${HOTPATH_BENCHMARK_SCRIPT:-docker_hotpath_benchmark.py}"]
     environment:
       REDIS_HOST: redis-raw
       OUTPUT_REDIS_HOST: redis-output

@@ -79,6 +79,26 @@ docker compose -p hotpath-redis -f compose.hotpath.test.yml down --volumes --rem
 
 Publisher concurrency and volume can be varied with `HOTPATH_PUBLISHER_COUNT`, `HOTPATH_MESSAGES_PER_PUBLISHER`, and `HOTPATH_SERIAL_MESSAGES`. The config and workload use synthetic channel names and payload IDs; they do not replay raw production names or payloads.
 
+To measure a mixed policy set (about one-third direct, one-third 200 ms conflation, and one-third 200 ms conflation with a 5 s deduplication TTL), switch to the mixed config and driver:
+
+```sh
+HOTPATH_CONFIG_FILE=./tests/docker-hotpath-mix-config.json \
+HOTPATH_BENCHMARK_SCRIPT=docker_hotpath_policy_mix.py \
+docker compose -p hotpath-mixed -f compose.hotpath.test.yml up --build --abort-on-container-exit --exit-code-from hotpath-benchmark
+docker compose -p hotpath-mixed -f compose.hotpath.test.yml down --volumes --remove-orphans
+```
+
+For the TTL cohort, this workload repeats one identical payload per channel; with unique payloads, a positive TTL would not suppress those publishes.
+
+The mix run uses the same stack and the checked-in 3-policy config; it assumes the TTL cohort repeats payloads by channel:
+
+```sh
+HOTPATH_CONFIG_FILE=./tests/docker-hotpath-mix-config.json \
+HOTPATH_BENCHMARK_SCRIPT=docker_hotpath_policy_mix.py \
+docker compose -p hotpath-mix-valkey -f compose.hotpath.test.yml up --build --abort-on-container-exit --exit-code-from hotpath-benchmark
+docker compose -p hotpath-mix-valkey -f compose.hotpath.test.yml down --volumes --remove-orphans
+```
+
 ### Fault handling
 
 The `fault` profile in `compose.test.yml` exercises uncertain/failed publish handling through a Redis fault proxy:
