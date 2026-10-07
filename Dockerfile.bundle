@@ -17,9 +17,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     && mkdir -p /out \
     && cp target/x86_64-unknown-linux-musl/release/redis-conflated-pubsub /out/
 
-FROM alpine:3.22 AS runtime
+FROM valkey/valkey:9.1.2-alpine AS runtime
 
-RUN apk add --no-cache bash tini redis valkey \
+USER root
+
+RUN apk add --no-cache bash tini redis \
     && addgroup -S relay \
     && adduser -S -G relay relay \
     && mkdir -p /data/raw /data/conflated /state /etc/redis-conflated \

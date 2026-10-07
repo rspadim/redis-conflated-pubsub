@@ -1,0 +1,66 @@
+services:
+  redis-raw:
+    image: ${HOTPATH_KV_IMAGE:-valkey/valkey:9.1.2-alpine}
+    networks:
+      hotpath: {}
+    healthcheck:
+      test: ["CMD-SHELL", "${HOTPATH_KV_CLI:-valkey-cli} ping | grep -q PONG"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+
+  redis-output:
+    image: ${HOTPATH_KV_IMAGE:-valkey/valkey:9.1.2-alpine}
+    networks:
+      hotpath: {}
+    healthcheck:
+      test: ["CMD-SHELL", "${HOTPATH_KV_CLI:-valkey-cli} ping | grep -q PONG"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+
+  service-hotpath:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["--config", "/config/docker-hotpath-config.json"]
+    working_dir: /state
+    volumes:
+      - ./tests/docker-hotpath-config.json:/config/docker-hotpath-config.json:ro
+      - hotpath-state:/state
+    networks:
+      hotpath: {}
+    depends_on:
+      redis-raw:
+        condition: service_healthy
+      redis-output:
+        condition: service_healthy
+
+  hotpath-benchmark:
+    image: python:3.13-alpine
+    command: ["python", "/tests/docker_hotpath_benchmark.py"]
+    environment:
+      REDIS_HOST: redis-raw
+      OUTPUT_REDIS_HOST: redis-output
+      STATUS_URL: http://service-hotpath:9090/
+      PUBLISHER_COUNT: ${HOTPATH_PUBLISHER_COUNT:-4}
+      MESSAGES_PER_PUBLISHER: ${HOTPATH_MESSAGES_PER_PUBLISHER:-2500}
+      SERIAL_MESSAGES: ${HOTPATH_SERIAL_MESSAGES:-250}
+    volumes:
+      - ./tests:/tests:ro
+    networks:
+      hotpath: {}
+    depends_on:
+      service-hotpath:
+        condition: service_started
+      redis-raw:
+        condition: service_healthy
+      redis-output:
+        condition: service_healthy
+
+volumes:
+  hotpath-state: {}
+
+networks:
+  hotpath:
+    driver: bridge

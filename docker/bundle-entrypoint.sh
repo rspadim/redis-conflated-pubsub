@@ -3,10 +3,10 @@ set -Eeuo pipefail
 
 case "${KV_ENGINE,,}" in
     redis)
-        SERVER_BIN=redis-server
+        SERVER_BIN=/usr/bin/redis-server
         ;;
     valkey)
-        SERVER_BIN=valkey-server
+        SERVER_BIN=/usr/local/bin/valkey-server
         ;;
     *)
         echo "KV_ENGINE must be either 'redis' or 'valkey'." >&2

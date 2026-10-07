@@ -186,7 +186,7 @@ Selectors are compiled once into internal enum variants and the original selecto
 
 ## Single-container Docker bundle
 
-The optional `Dockerfile.bundle` image contains the relay plus both Redis and Valkey server binaries. At runtime, `KV_ENGINE` selects which implementation to start (`redis` by default, or `valkey`); the selected engine runs two instances, raw on container port `6379` and conflated on `6380`. The relay config is mounted at `/etc/redis-conflated/config.json`; `config.bundle.example.json` is a starting point. This bundle runs three processes in one container; the regular `Dockerfile` remains the relay-only image for separated deployments.
+The optional `Dockerfile.bundle` image contains the relay, Redis, and Valkey 9.1.2. At runtime, `KV_ENGINE` selects which implementation to start (`redis` by default, or `valkey`); the selected engine runs two instances, raw on container port `6379` and conflated on `6380`. The relay config is mounted at `/etc/redis-conflated/config.json`; `config.bundle.example.json` is a starting point. This bundle runs three processes in one container; the regular `Dockerfile` remains the relay-only image for separated deployments.
 
 ```sh
 cp config.bundle.example.json config.bundle.json

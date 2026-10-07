@@ -2,7 +2,8 @@
 set -euo pipefail
 
 case "${KV_ENGINE,,}" in
-    redis|valkey) CLI=redis-cli ;;
+    redis) CLI=/usr/bin/redis-cli ;;
+    valkey) CLI=/usr/local/bin/valkey-cli ;;
     *) exit 1 ;;
 esac
 

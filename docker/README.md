@@ -61,6 +61,24 @@ docker compose -f compose.ttl.test.yml up --build --abort-on-container-exit --ex
 docker compose -f compose.ttl.test.yml down --volumes --remove-orphans
 ```
 
+### End-to-end hot-path latency
+
+The hot-path benchmark warms 64 channels, times sequential requests, then runs concurrent publishers through Redis-compatible raw input to two output subscribers. It reports p50/p95/p99 from before the input `PUBLISH` to receipt on both outputs. Outputs use direct mode (`conflation.interval_ms: 0`, dedup TTL 0), and cache inspection is disabled so the measured cache mode matches normal worker-local operation. The default image is Valkey 9.1.2.
+
+```sh
+docker compose -p hotpath-valkey -f compose.hotpath.test.yml up --build --abort-on-container-exit --exit-code-from hotpath-benchmark
+docker compose -p hotpath-valkey -f compose.hotpath.test.yml down --volumes --remove-orphans
+```
+
+To run the identical test against Redis, select its image and CLI explicitly:
+
+```sh
+HOTPATH_KV_IMAGE=redis:7.4-alpine HOTPATH_KV_CLI=redis-cli docker compose -p hotpath-redis -f compose.hotpath.test.yml up --build --abort-on-container-exit --exit-code-from hotpath-benchmark
+docker compose -p hotpath-redis -f compose.hotpath.test.yml down --volumes --remove-orphans
+```
+
+Publisher concurrency and volume can be varied with `HOTPATH_PUBLISHER_COUNT`, `HOTPATH_MESSAGES_PER_PUBLISHER`, and `HOTPATH_SERIAL_MESSAGES`. The config and workload use synthetic channel names and payload IDs; they do not replay raw production names or payloads.
+
 ### Fault handling
 
 The `fault` profile in `compose.test.yml` exercises uncertain/failed publish handling through a Redis fault proxy:
