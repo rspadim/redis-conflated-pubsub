@@ -13,6 +13,7 @@ const HOT_OPERATIONS: usize = 1_000_000;
 const CHURN_CHANNELS: usize =
     DEFAULT_CHANNEL_CACHE_MAX_ENTRIES + DEFAULT_CHANNEL_CACHE_MAX_ENTRIES / 2;
 const CHURN_PASSES: usize = 3;
+const PAIRED_FIXTURE_REPLAY_MULTIPLIER: usize = 100;
 
 #[test]
 #[ignore = "manual release-mode filter-cache load benchmark; run with --ignored --nocapture"]
@@ -277,6 +278,117 @@ fn channel_policy_cache_load_benchmark() {
     }
 }
 
+#[test]
+#[ignore = "manual 100x anonymized-feed cache replay; run with --ignored --nocapture"]
+fn paired_fixture_100x_filter_and_policy_cache_load() {
+    let (channels, event_order, raw_messages_per_capture) = paired_raw_fixture_workload();
+    let input_filter =
+        ChannelFilterSet::compile(&tenant_filter_rules("", Some(63)), FilterAction::Accept)
+            .unwrap();
+    let mut input_filter = input_filter;
+    let mut output_filters = [
+        ChannelFilterSet::compile(
+            &tenant_filter_rules("mapped:", Some(62)),
+            FilterAction::Accept,
+        )
+        .unwrap(),
+        ChannelFilterSet::compile(
+            &tenant_filter_rules("mapped:", Some(61)),
+            FilterAction::Accept,
+        )
+        .unwrap(),
+    ];
+    let output_configs = [
+        policy_load_config_for_prefix("out-a:"),
+        policy_load_config_for_prefix("out-b:"),
+    ];
+    let policy_caches = [
+        CompiledChannelPolicies::new_with_cache(
+            &output_configs[0],
+            DEFAULT_CHANNEL_CACHE_MAX_ENTRIES,
+            None,
+        ),
+        CompiledChannelPolicies::new_with_cache(
+            &output_configs[1],
+            DEFAULT_CHANNEL_CACHE_MAX_ENTRIES,
+            None,
+        ),
+    ];
+    let mapped_channels = channels
+        .iter()
+        .map(|channel| map_output_channel("", "mapped:", channel, ":source", ""))
+        .collect::<Vec<_>>();
+    let output_channels = [
+        channels
+            .iter()
+            .map(|channel| map_output_channel("out-a:", "mapped:", channel, ":source", ":dest"))
+            .collect::<Vec<_>>(),
+        channels
+            .iter()
+            .map(|channel| map_output_channel("out-b:", "mapped:", channel, ":source", ":dest"))
+            .collect::<Vec<_>>(),
+    ];
+
+    let operations = raw_messages_per_capture * PAIRED_FIXTURE_REPLAY_MULTIPLIER;
+    let mut accepted_input = 0u64;
+    let mut output_filter_evaluations = [0u64; 2];
+    let mut policy_resolutions = [0u64; 2];
+    let started = Instant::now();
+    for _ in 0..PAIRED_FIXTURE_REPLAY_MULTIPLIER {
+        for &channel_index in &event_order {
+            let source_channel = &channels[channel_index];
+            if !input_filter.allows(black_box(source_channel)) {
+                continue;
+            }
+            accepted_input += 1;
+            for output_index in 0..2 {
+                output_filter_evaluations[output_index] += 1;
+                if !output_filters[output_index].allows(black_box(&mapped_channels[channel_index]))
+                {
+                    continue;
+                }
+                policy_resolutions[output_index] += 1;
+                black_box(policy_caches[output_index].resolve(
+                    &output_configs[output_index],
+                    &output_channels[output_index][channel_index],
+                ));
+            }
+        }
+    }
+    let elapsed = started.elapsed();
+    let input_cache = input_filter.cache_snapshot();
+    println!(
+        "paired-100x fixture_raw_messages_per_capture={raw_messages_per_capture} replay_factor={PAIRED_FIXTURE_REPLAY_MULTIPLIER} synthetic_channels={} elapsed_s={:.3} raw_messages_per_second={:.0} accepted_input={} input_cache_hits={} input_cache_misses={} input_cache_evictions={} input_cache_entries={}/{}",
+        channels.len(),
+        elapsed.as_secs_f64(),
+        operations as f64 / elapsed.as_secs_f64(),
+        accepted_input,
+        input_cache["hits"].as_u64().unwrap(),
+        input_cache["misses"].as_u64().unwrap(),
+        input_cache["evictions"].as_u64().unwrap(),
+        input_cache["entry_count"].as_u64().unwrap(),
+        input_cache["capacity"].as_u64().unwrap(),
+    );
+    for output_index in 0..2 {
+        let filter_cache = output_filters[output_index].cache_snapshot();
+        let policy_cache = policy_caches[output_index].cache_snapshot().unwrap();
+        println!(
+            "paired-100x output={} filter_evaluations={} policy_resolutions={} filter_hits={} filter_misses={} filter_evictions={} filter_entries={} policy_hits={} policy_misses={} policy_evictions={} policy_entries={}",
+            output_index,
+            output_filter_evaluations[output_index],
+            policy_resolutions[output_index],
+            filter_cache["hits"].as_u64().unwrap(),
+            filter_cache["misses"].as_u64().unwrap(),
+            filter_cache["evictions"].as_u64().unwrap(),
+            filter_cache["entry_count"].as_u64().unwrap(),
+            policy_cache["hits"].as_u64().unwrap(),
+            policy_cache["misses"].as_u64().unwrap(),
+            policy_cache["evictions"].as_u64().unwrap(),
+            policy_cache["entry_count"].as_u64().unwrap(),
+        );
+    }
+}
+
 fn load_benchmark_rules() -> Vec<ChannelFilterRule> {
     let mut rules = Vec::with_capacity(FILTER_RULES);
     for tenant in 0..32 {
@@ -328,10 +440,14 @@ fn churn_channels() -> Vec<String> {
 }
 
 fn policy_load_config() -> OutputConfig {
+    policy_load_config_for_prefix("out:")
+}
+
+fn policy_load_config_for_prefix(output_prefix: &str) -> OutputConfig {
     let mut policies = (0..FILTER_RULES)
         .map(|tenant| {
             serde_json::json!({
-                "glob": format!("out:tenant-{tenant:04}:*"),
+                "glob": format!("{output_prefix}mapped:g{tenant:02x}:*:source:dest"),
                 "conflation.interval_ms": 50 + (tenant % 4) as i64 * 50,
                 "deduplication.ttl_ms": 1000 + (tenant % 4) as i64 * 500,
             })
@@ -351,6 +467,86 @@ fn policy_load_config() -> OutputConfig {
 
 fn policy_hot_working_set() -> Vec<String> {
     (0..HOT_WORKING_SET)
-        .map(|index| format!("out:tenant-{:04}:channel-{index:05}", index % FILTER_RULES))
+        .map(|index| {
+            format!(
+                "out:mapped:g{:02x}:channel-{index:05}:source:dest",
+                index % FILTER_RULES
+            )
+        })
         .collect()
+}
+
+fn tenant_filter_rules(
+    mapping_prefix: &str,
+    denied_tenant: Option<usize>,
+) -> Vec<ChannelFilterRule> {
+    (0..FILTER_RULES)
+        .map(|tenant| ChannelFilterRule {
+            glob: Some(format!("{mapping_prefix}g{tenant:02x}:*")),
+            action: if Some(tenant) == denied_tenant {
+                FilterAction::Deny
+            } else {
+                FilterAction::Accept
+            },
+            ..Default::default()
+        })
+        .collect()
+}
+
+fn paired_raw_fixture_workload() -> (Vec<String>, Vec<usize>, usize) {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../fixtures/redis_feed_pair_profile_60s.json"
+    ))
+    .expect("paired feed fixture should parse");
+    let channel_samples = fixture["channels"]["top_64_length_samples"]
+        .as_array()
+        .unwrap();
+    let channel_count = fixture["channels"]["distinct_counted"].as_u64().unwrap() as usize;
+    let raw_messages = fixture["ports"]["raw"]["messages"].as_u64().unwrap() as usize;
+    let mut per_channel_counts = channel_samples
+        .iter()
+        .map(|sample| sample["raw_messages"].as_u64().unwrap() as usize)
+        .collect::<Vec<_>>();
+    let untracked_tail = channel_count - per_channel_counts.len();
+    let tail_messages = raw_messages - per_channel_counts.iter().sum::<usize>();
+    let tail_base = tail_messages / untracked_tail;
+    let tail_remainder = tail_messages % untracked_tail;
+    per_channel_counts
+        .extend((0..untracked_tail).map(|index| tail_base + usize::from(index < tail_remainder)));
+
+    let channels = (0..channel_count)
+        .map(|index| {
+            let length = if index < channel_samples.len() {
+                channel_samples[index]["channel_length_bytes"]
+                    .as_u64()
+                    .unwrap() as usize
+            } else {
+                channel_samples[(index - channel_samples.len()) % channel_samples.len()]
+                    ["channel_length_bytes"]
+                    .as_u64()
+                    .unwrap() as usize
+            };
+            let prefix = format!("g{:02x}:c{:04x}", index % FILTER_RULES, index);
+            assert!(
+                prefix.len() <= length,
+                "synthetic channel prefix must fit its sample length"
+            );
+            format!("{prefix}{}", "x".repeat(length - prefix.len()))
+        })
+        .collect::<Vec<_>>();
+
+    let mut event_order = Vec::with_capacity(raw_messages);
+    for (channel_index, count) in per_channel_counts.into_iter().enumerate() {
+        event_order.extend(std::iter::repeat_n(channel_index, count));
+    }
+    assert_eq!(event_order.len(), raw_messages);
+
+    let mut state = 0xA076_1D64_78BD_642F_u64;
+    for index in (1..event_order.len()).rev() {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
+        event_order.swap(index, (state as usize) % (index + 1));
+    }
+    (channels, event_order, raw_messages)
 }
