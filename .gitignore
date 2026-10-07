@@ -4,6 +4,9 @@
 /config.bundle.json
 /status.json
 /state/
+/dist/
+/redis-conflated-pubsub-linux-x86_64
+/redis-conflated-pubsub-named-linux-x86_64
 __pycache__/
 *.py[cod]
 *.tmp
