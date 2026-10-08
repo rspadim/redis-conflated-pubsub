@@ -1,0 +1,35 @@
+{
+  "max_bytes_per_exec": 4194304,
+  "input": {
+    "redis": {"host": "redis-raw", "port": 6379, "database": 0},
+    "filters": [{"glob": "hot:*", "action": "accept"}],
+    "filter_cache_max_entries": 16384,
+    "filter_default": "accept",
+    "subscriptions": [
+      {"type": "psubscribe", "pattern": "hot:*", "output_prefix": "mapped:", "output_suffix": ":source"}
+    ]
+  },
+  "outputs": {
+    "out-a": {
+      "redis": {"host": "redis-output", "port": 6379, "database": 0},
+      "channel_prefix": "replica-a:",
+      "channel_suffix": ":dest",
+      "filters": [{"glob": "mapped:hot:*:source", "action": "accept"}],
+      "filter_cache_max_entries": 16384,
+      "channel_policy_cache_max_entries": 16384,
+      "filter_default": "accept",
+      "conflation": {"interval_ms": 0},
+      "deduplication": {"ttl_ms": 0}
+    }
+  },
+  "instance_lock": {"path": "/state/redis-conflated-hotpath-single.lock"},
+  "status": {
+    "http": {"bind": "0.0.0.0", "port": 9090, "filters_endpoint_enabled": false}
+  },
+  "logging": {
+    "directory": "/state/logs",
+    "level": "warn",
+    "retention_days": 2,
+    "max_total_size_mb": 10
+  }
+}

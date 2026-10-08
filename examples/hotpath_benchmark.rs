@@ -8,9 +8,11 @@
 //!
 //! `HOTPATH_MODE=closed-loop` (default) waits for each input PUBLISH
 //! acknowledgement, measuring round-trip behaviour. `HOTPATH_MODE=open-loop`
-//! pipelines `HOTPATH_PIPELINE` commands per batch without waiting for
+//! sends non-atomic pipelines of `HOTPATH_PIPELINE` commands over
+//! `HOTPATH_CONNECTIONS` connections per publisher without waiting for
 //! individual acknowledgements, forcing input pressure to find the service's
 //! saturation point; the achieved rate and queue growth are the signal.
+//! `HOTPATH_OUTPUTS` selects one or two outputs (default 2).
 
 use std::{
     collections::BTreeMap,
@@ -117,13 +119,18 @@ async fn wait_for_input_subscription(host: &str) -> Result<()> {
     anyhow::bail!("Bridge input pattern did not become active; NUMPAT={observed}")
 }
 
-async fn wait_for_status_totals(host: &str, port: u16, expected: u64) -> Result<Snapshot> {
+async fn wait_for_status_totals(
+    host: &str,
+    port: u16,
+    expected: u64,
+    output_names: &[&str],
+) -> Result<Snapshot> {
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut latest = None;
     while Instant::now() < deadline {
         if let Ok(snapshot) = fetch_status_async(host.to_owned(), port).await {
             if snapshot.input_messages_total == expected
-                && OUTPUT_NAMES.iter().all(|name| {
+                && output_names.iter().all(|name| {
                     snapshot.outputs.get(*name).is_some_and(|output| {
                         output.output_messages_total == expected
                             && output.pending_messages == 0
@@ -139,7 +146,7 @@ async fn wait_for_status_totals(host: &str, port: u16, expected: u64) -> Result<
     }
     match latest {
         Some(snapshot) => {
-            let summaries = OUTPUT_NAMES
+            let summaries = output_names
                 .iter()
                 .map(|name| {
                     snapshot.outputs.get(*name).map_or_else(
@@ -392,6 +399,7 @@ async fn main() -> Result<()> {
     let serial_messages: usize = env_parse("SERIAL_MESSAGES", 250);
     let pipeline: usize = env_parse("HOTPATH_PIPELINE", 64);
     let connections: usize = env_parse("HOTPATH_CONNECTIONS", 1);
+    let output_count: usize = env_parse("HOTPATH_OUTPUTS", 2);
     let open_loop =
         env::var("HOTPATH_MODE").is_ok_and(|mode| mode.eq_ignore_ascii_case("open-loop"));
     let raw_host = env::var("REDIS_HOST").unwrap_or_else(|_| "redis-raw".to_owned());
@@ -409,6 +417,11 @@ async fn main() -> Result<()> {
         messages_per_publisher > 0,
         "MESSAGES_PER_PUBLISHER must be positive"
     );
+    anyhow::ensure!(
+        (1..=2).contains(&output_count),
+        "HOTPATH_OUTPUTS must be 1 or 2"
+    );
+    let output_names = OUTPUT_NAMES[..output_count].to_vec();
 
     let total_messages = publisher_count * messages_per_publisher;
     let total_expected = total_messages + HOT_CHANNEL_COUNT + serial_messages;
@@ -424,10 +437,15 @@ async fn main() -> Result<()> {
     // concurrent phase creates its own subscriptions afterwards.
     let mut warm_pubsub_a = out_a_client.get_async_pubsub().await?;
     warm_pubsub_a.psubscribe("replica-a:*").await?;
-    let mut warm_pubsub_b = out_b_client.get_async_pubsub().await?;
-    warm_pubsub_b.psubscribe("replica-b:*").await?;
     let mut warm_stream_a = warm_pubsub_a.on_message();
-    let mut warm_stream_b = warm_pubsub_b.on_message();
+    let mut warm_pubsub_b = if output_count == 2 {
+        let mut pubsub = out_b_client.get_async_pubsub().await?;
+        pubsub.psubscribe("replica-b:*").await?;
+        Some(pubsub)
+    } else {
+        None
+    };
+    let mut warm_stream_b = warm_pubsub_b.as_mut().map(|pubsub| pubsub.on_message());
 
     for channel_index in 0..HOT_CHANNEL_COUNT {
         let payload = format!("warm:{channel_index}");
@@ -443,12 +461,14 @@ async fn main() -> Result<()> {
             payload.as_bytes(),
         )
         .await?;
-        expect_message(
-            &mut warm_stream_b,
-            &output_channel(1, channel_index),
-            payload.as_bytes(),
-        )
-        .await?;
+        if let Some(stream_b) = warm_stream_b.as_mut() {
+            expect_message(
+                stream_b,
+                &output_channel(1, channel_index),
+                payload.as_bytes(),
+            )
+            .await?;
+        }
     }
 
     let mut serial_latencies = Vec::with_capacity(serial_messages);
@@ -468,18 +488,20 @@ async fn main() -> Result<()> {
             payload.as_bytes(),
         )
         .await?;
-        expect_message(
-            &mut warm_stream_b,
-            &output_channel(1, channel_index),
-            payload.as_bytes(),
-        )
-        .await?;
+        if let Some(stream_b) = warm_stream_b.as_mut() {
+            expect_message(
+                stream_b,
+                &output_channel(1, channel_index),
+                payload.as_bytes(),
+            )
+            .await?;
+        }
         serial_latencies.push(started.elapsed().as_nanos() as u64);
     }
-    drop(warm_stream_a);
     drop(warm_stream_b);
-    drop(warm_pubsub_a);
+    drop(warm_stream_a);
     drop(warm_pubsub_b);
+    drop(warm_pubsub_a);
 
     serial_latencies.sort_unstable();
     println!(
@@ -501,36 +523,30 @@ async fn main() -> Result<()> {
             .map(|_| AtomicU64::new(0))
             .collect::<Vec<_>>(),
     );
-    let recv_a = Arc::new(
-        (0..total_messages)
-            .map(|_| AtomicU64::new(0))
-            .collect::<Vec<_>>(),
-    );
-    let recv_b = Arc::new(
-        (0..total_messages)
-            .map(|_| AtomicU64::new(0))
-            .collect::<Vec<_>>(),
-    );
+    let recv_sets: Vec<Arc<Vec<AtomicU64>>> = (0..output_count)
+        .map(|_| {
+            Arc::new(
+                (0..total_messages)
+                    .map(|_| AtomicU64::new(0))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
     let stop_polling = Arc::new(AtomicBool::new(false));
     let timeline: Arc<Mutex<Vec<TimelineSample>>> = Arc::new(Mutex::new(Vec::new()));
     let barrier = Arc::new(tokio::sync::Barrier::new(publisher_count + 1));
 
-    let subscriber_a = tokio::spawn(subscriber_task(
-        output_host.clone(),
-        0,
-        messages_per_publisher,
-        publisher_count,
-        Arc::clone(&recv_a),
-        base,
-    ));
-    let subscriber_b = tokio::spawn(subscriber_task(
-        output_host.clone(),
-        1,
-        messages_per_publisher,
-        publisher_count,
-        Arc::clone(&recv_b),
-        base,
-    ));
+    let mut subscriber_handles = Vec::with_capacity(output_count);
+    for (output_index, recv) in recv_sets.iter().enumerate() {
+        subscriber_handles.push(tokio::spawn(subscriber_task(
+            output_host.clone(),
+            output_index,
+            messages_per_publisher,
+            publisher_count,
+            Arc::clone(recv),
+            base,
+        )));
+    }
     let poller = tokio::spawn(poller_task(
         status_host.clone(),
         status_port,
@@ -572,8 +588,9 @@ async fn main() -> Result<()> {
         publisher.await??;
     }
     let publishers_done = Instant::now();
-    subscriber_a.await??;
-    subscriber_b.await??;
+    for handle in subscriber_handles {
+        handle.await??;
+    }
     let wall_finished = Instant::now();
     stop_polling.store(true, Ordering::Relaxed);
     let _ = poller.await;
@@ -587,22 +604,21 @@ async fn main() -> Result<()> {
     }
     input_rtt.sort_unstable();
 
-    let recv_sets = [&recv_a, &recv_b];
-    let mut e2e = [Vec::new(), Vec::new()];
-    let mut post_ack = [Vec::new(), Vec::new()];
-    for output_index in 0..2 {
+    let mut e2e: Vec<Vec<u64>> = vec![Vec::new(); output_count];
+    let mut post_ack: Vec<Vec<u64>> = vec![Vec::new(); output_count];
+    for (output_index, recv) in recv_sets.iter().enumerate() {
         for index in 0..total_messages {
             let start = starts[index].load(Ordering::SeqCst);
             let ack = acks[index].load(Ordering::SeqCst);
-            let recv = recv_sets[output_index][index].load(Ordering::SeqCst);
+            let received = recv[index].load(Ordering::SeqCst);
             ensure!(
-                recv > 0,
+                received > 0,
                 "message {index} missing for output {}",
-                OUTPUT_NAMES[output_index]
+                output_names[output_index]
             );
-            e2e[output_index].push(recv - start);
+            e2e[output_index].push(received - start);
             if ack > 0 {
-                post_ack[output_index].push(recv.saturating_sub(ack));
+                post_ack[output_index].push(received.saturating_sub(ack));
             }
         }
         e2e[output_index].sort_unstable();
@@ -618,7 +634,7 @@ async fn main() -> Result<()> {
         "closed-loop"
     };
     println!(
-        "hotpath-e2e mode={mode} publishers={publisher_count} messages_per_publisher={messages_per_publisher} outputs=2 cache_mode=worker-local messages={total_messages} pipeline={} connections={} publish_phase_s={:.3} output_drain_s={:.3} elapsed_s={:.3} end_to_end_messages_per_second={:.0} input_ack_rtt_p50_p95_ms={:.3}/{:.3}",
+        "hotpath-e2e mode={mode} publishers={publisher_count} messages_per_publisher={messages_per_publisher} outputs={output_count} cache_mode=worker-local messages={total_messages} pipeline={} connections={} publish_phase_s={:.3} output_drain_s={:.3} elapsed_s={:.3} end_to_end_messages_per_second={:.0} input_ack_rtt_p50_p95_ms={:.3}/{:.3}",
         if open_loop { pipeline } else { 1 },
         if open_loop { connections } else { 1 },
         publisher_phase.as_secs_f64(),
@@ -640,18 +656,28 @@ async fn main() -> Result<()> {
         f64::NAN
     };
     let max_pending = markers.iter().map(|sample| sample.4).max().unwrap_or(0);
-    println!(
-        "hotpath-timeline subscribers_done_s={:.3} input_done_s={:.3} out-a_done_s={:.3} out-b_done_s={:.3} max_pending={max_pending}",
-        wall_elapsed.as_secs_f64(),
-        reached(&|input, _, _| input >= total_expected as u64),
-        reached(&|_, out_a, _| out_a >= total_expected as u64),
-        reached(&|_, _, out_b| out_b >= total_expected as u64)
-    );
+    let out_a_done = reached(&|_, out_a, _| out_a >= total_expected as u64);
+    if output_count == 2 {
+        println!(
+            "hotpath-timeline subscribers_done_s={:.3} input_done_s={:.3} out-a_done_s={:.3} out-b_done_s={:.3} max_pending={max_pending}",
+            wall_elapsed.as_secs_f64(),
+            reached(&|input, _, _| input >= total_expected as u64),
+            out_a_done,
+            reached(&|_, _, out_b| out_b >= total_expected as u64)
+        );
+    } else {
+        println!(
+            "hotpath-timeline subscribers_done_s={:.3} input_done_s={:.3} out-a_done_s={:.3} max_pending={max_pending}",
+            wall_elapsed.as_secs_f64(),
+            reached(&|input, _, _| input >= total_expected as u64),
+            out_a_done
+        );
+    }
 
-    for output_index in 0..2 {
+    for output_index in 0..output_count {
         println!(
             "hotpath-phase {} e2e_p50_p95_p99_ms={:.3}/{:.3}/{:.3} post_ack_p50_p95_ms={:.3}/{:.3}",
-            OUTPUT_NAMES[output_index],
+            output_names[output_index],
             percentile_ms(&e2e[output_index], 0.50),
             percentile_ms(&e2e[output_index], 0.95),
             percentile_ms(&e2e[output_index], 0.99),
@@ -660,10 +686,15 @@ async fn main() -> Result<()> {
         );
     }
 
-    let final_status =
-        wait_for_status_totals(&status_host, status_port, total_expected as u64).await?;
-    for name in OUTPUT_NAMES {
-        if let Some(output) = final_status.outputs.get(name) {
+    let final_status = wait_for_status_totals(
+        &status_host,
+        status_port,
+        total_expected as u64,
+        &output_names,
+    )
+    .await?;
+    for name in &output_names {
+        if let Some(output) = final_status.outputs.get(*name) {
             output_line(name, output);
         }
     }

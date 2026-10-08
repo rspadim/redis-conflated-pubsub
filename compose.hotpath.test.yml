@@ -1,6 +1,8 @@
 services:
   redis-raw:
     image: ${HOTPATH_KV_IMAGE:-valkey/valkey:9.1.2-alpine}
+    # Pub/Sub only: no RDB snapshots or AOF writes in the benchmark stack.
+    command: ["--save", "", "--appendonly", "no"]
     networks:
       hotpath: {}
     healthcheck:
@@ -11,6 +13,7 @@ services:
 
   redis-output:
     image: ${HOTPATH_KV_IMAGE:-valkey/valkey:9.1.2-alpine}
+    command: ["--save", "", "--appendonly", "no"]
     networks:
       hotpath: {}
     healthcheck:
@@ -50,6 +53,8 @@ services:
       SERIAL_MESSAGES: ${HOTPATH_SERIAL_MESSAGES:-250}
       HOTPATH_MODE: ${HOTPATH_MODE:-closed-loop}
       HOTPATH_PIPELINE: ${HOTPATH_PIPELINE:-64}
+      HOTPATH_CONNECTIONS: ${HOTPATH_CONNECTIONS:-1}
+      HOTPATH_OUTPUTS: ${HOTPATH_OUTPUTS:-2}
     volumes:
       - ./tests:/tests:ro
     networks:

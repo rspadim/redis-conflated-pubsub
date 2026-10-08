@@ -127,20 +127,23 @@ Run with `cargo test --release --locked <name> -- --ignored --nocapture`:
 
 ### Reference measurements
 
-Local Docker/WSL runs with synthetic 64-channel names, two outputs, worker-local caches and default server configuration. Treat them as indicative, not as controlled engine comparisons. The open-loop load generator uses non-atomic pipelines (one round trip per `HOTPATH_PIPELINE` commands), an explicit 30 s response timeout and `HOTPATH_CONNECTIONS` connections per publisher.
+Local Docker/WSL runs with synthetic 64-channel names, worker-local caches and Pub/Sub-only server settings (`--save '' --appendonly no`). Treat them as indicative, not as controlled engine comparisons. The open-loop load generator uses non-atomic pipelines (one round trip per `HOTPATH_PIPELINE` commands), an explicit 30 s response timeout and `HOTPATH_CONNECTIONS` connections per publisher.
 
-Closed-loop, Redis 7.4.11, 4×2,500: serial p50 ~0.9 ms; publish phase 0.82 s; drain 0 s; e2e p50 ~1.0 ms, p95 ~1.7 ms, p99 ~3.0 ms; ACK RTT p50 0.30 ms; pending 0.
+Closed-loop, Redis 7.4.11, 4×2,500: with two outputs serial p50 ~0.9 ms, e2e p50 ~1.0 ms / p95 ~1.7 ms / p99 ~3.0 ms and ACK RTT p50 0.30 ms; with one output serial p50 0.61 ms, e2e p50 0.64 ms / p95 0.97 ms / p99 1.43 ms and ACK RTT p50 0.24 ms.
 
-Open-loop saturated runs (all drained to zero pending):
+Open-loop saturated runs (all drained to zero pending). "Outputs" is `HOTPATH_OUTPUTS`; every input message is published once per output.
 
-| Engine | Burst | Publishers × messages | Pipeline | End-to-end rate | Publish phase | Drain | Peak pending | ACK RTT p50/p95 | e2e p50/p95 | Queue wait avg (a/b) | Publish RTT avg |
-| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Redis 7.4.11 | 80k | 16 × 5,000 | 64 | 35.8k msg/s | 0.61 s | 1.62 s | 11.9k | 4.4/12.2 ms | 0.88/1.48 s | 20.7/23.9 ms | 3.7 ms |
-| Redis 7.4.11 | 160k | 32 × 5,000 | 128 | 48.9k msg/s | 1.41 s | 1.86 s | 4.3k | 9.3/35.5 ms | 1.45/1.82 s | 2.3/4.1 ms | 1.7 ms |
-| Redis 7.4.11 | 320k | 64 × 5,000 | 128 | 46.7k msg/s | 1.69 s | 5.15 s | 6.8k | 35.8/62.4 ms | 3.72/5.06 s | 6.0/10.9 ms | 1.8 ms |
-| Redis 7.4.11 | 640k | 128 × 5,000 | 128 | 48.3k msg/s | 3.37 s | 9.88 s | 36.2k | 75.0/135.4 ms | 7.20/9.73 s | 91/103 ms | 2.9 ms |
-| Valkey 9.1.2 | 320k | 64 × 5,000 | 128 | 44.4k msg/s | 1.64 s | 5.57 s | 3.4k | 35.7/59.1 ms | 3.80/5.42 s | 2.6/5.2 ms | 2.0 ms |
-| Valkey 9.1.2 | 640k | 128 × 5,000 | 128 | 40.3k msg/s | 3.96 s | 11.90 s | 93.4k | 86.0/153.7 ms | 8.78/11.86 s | 598/295 ms | 4.3 ms |
+| Engine | Outputs | Burst | Publishers × messages | Pipeline | End-to-end rate | Publish phase | Drain | Peak pending | ACK RTT p50/p95 | e2e p50/p95 | Queue wait avg | Publish RTT avg |
+| --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Redis 7.4.11 | 2 | 80k | 16 × 5,000 | 64 | 35.8k msg/s | 0.61 s | 1.62 s | 11.9k | 4.4/12.2 ms | 0.88/1.48 s | 21/24 ms | 3.7 ms |
+| Redis 7.4.11 | 2 | 160k | 32 × 5,000 | 128 | 48.9k msg/s | 1.41 s | 1.86 s | 4.3k | 9.3/35.5 ms | 1.45/1.82 s | 2.3/4.1 ms | 1.7 ms |
+| Redis 7.4.11 | 2 | 320k | 64 × 5,000 | 128 | 46.7k msg/s | 1.69 s | 5.15 s | 6.8k | 35.8/62.4 ms | 3.72/5.06 s | 6.0/10.9 ms | 1.8 ms |
+| Redis 7.4.11 | 2 | 640k | 128 × 5,000 | 128 | 48.3k msg/s | 3.37 s | 9.88 s | 36.2k | 75.0/135.4 ms | 7.20/9.73 s | 91/103 ms | 2.9 ms |
+| Valkey 9.1.2 | 2 | 320k | 64 × 5,000 | 128 | 44.4k msg/s | 1.64 s | 5.57 s | 3.4k | 35.7/59.1 ms | 3.80/5.42 s | 2.6/5.2 ms | 2.0 ms |
+| Valkey 9.1.2 | 2 | 640k | 128 × 5,000 | 128 | 40.3k msg/s | 3.96 s | 11.90 s | 93.4k | 86.0/153.7 ms | 8.78/11.86 s | 598/295 ms | 4.3 ms |
+| Redis 7.4.11 | 1 | 320k | 64 × 5,000 | 128 | 82.7k msg/s | 1.52 s | 2.35 s | 66.2k | 32.3/56.8 ms | 2.29/2.42 s | 249 ms | 2.3 ms |
+| Redis 7.4.11 | 1 | 640k | 128 × 5,000 | 128 | 79.9k msg/s | 3.14 s | 4.86 s | 95.5k | 70.4/123.0 ms | 3.99/4.87 s | 498 ms | 2.9 ms |
+| Valkey 9.1.2 | 1 | 640k | 128 × 5,000 | 128 | 80.2k msg/s | 3.25 s | 4.73 s | 55.2k | 73.1/128.4 ms | 4.37/4.76 s | 253 ms | 2.7 ms |
 
 Other reference points:
 
