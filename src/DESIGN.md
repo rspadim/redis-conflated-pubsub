@@ -133,7 +133,7 @@ Positive intervals and TTLs are capped at 365 days; group `round_ms` must not ex
 
 `HOTPATH_MODE=closed-loop` (default) waits for every input `PUBLISH` acknowledgement; `HOTPATH_MODE=open-loop` sends each publisher's messages as non-atomic pipelines of `HOTPATH_PIPELINE` commands (default 64) over `HOTPATH_CONNECTIONS` connections per publisher (default 1) without waiting for individual acknowledgements, using an explicit 30 s response timeout, to force sustained pressure. Publisher count and volume come from `HOTPATH_PUBLISHER_COUNT`, `HOTPATH_MESSAGES_PER_PUBLISHER` and `HOTPATH_SERIAL_MESSAGES`.
 
-The mixed-policy workload (direct / 200 ms conflation / 200 ms conflation + 5 s TTL) still uses the Python driver selected with `HOTPATH_BENCHMARK_CMD='python /tests/docker_hotpath_policy_mix.py'`.
+The mixed-policy workload (direct / 200 ms conflation / 200 ms conflation + 5 s TTL) uses its own Rust harness, `examples/hotpath_mix_benchmark.rs` (built into the benchmark image), selected with `HOTPATH_BENCHMARK_CMD='hotpath-mix-benchmark'`. It warms one payload per cohort/channel, runs the three cohorts in the same ~33/33/34 split as before and prints per-output delivered/by-cohort counts, direct/conflate p50/p95 receive latencies, the service's conflated/deduplicated totals and the `GET /filters` cache snapshot.
 
 ### Loopback (no Redis/Valkey)
 

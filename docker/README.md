@@ -87,11 +87,11 @@ docker compose -p hotpath-single -f compose.hotpath.test.yml down --volumes --re
 
 The config and workload use synthetic channel names and payload IDs; they do not replay raw production names or payloads.
 
-To measure a mixed policy set (about one-third direct, one-third 200 ms conflation, and one-third 200 ms conflation with a 5 s deduplication TTL), switch to the mixed config and select the Python driver through `HOTPATH_BENCHMARK_CMD`; `HOTPATH_KV_IMAGE`/`HOTPATH_KV_CLI` choose the engine as in the direct runs:
+To measure a mixed policy set (about one-third direct, one-third 200 ms conflation, and one-third 200 ms conflation with a 5 s deduplication TTL), switch to the mixed config and select the Rust mixed-policy harness (`examples/hotpath_mix_benchmark.rs`, built into the same image) through `HOTPATH_BENCHMARK_CMD`; `HOTPATH_KV_IMAGE`/`HOTPATH_KV_CLI` choose the engine as in the direct runs:
 
 ```sh
 HOTPATH_CONFIG_FILE=./tests/docker-hotpath-mix-config.json \
-HOTPATH_BENCHMARK_CMD='python /tests/docker_hotpath_policy_mix.py' \
+HOTPATH_BENCHMARK_CMD='hotpath-mix-benchmark' \
 docker compose -p hotpath-mixed -f compose.hotpath.test.yml up --build --abort-on-container-exit --exit-code-from hotpath-benchmark
 docker compose -p hotpath-mixed -f compose.hotpath.test.yml down --volumes --remove-orphans
 ```

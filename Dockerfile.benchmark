@@ -14,14 +14,16 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     rustup target add x86_64-unknown-linux-musl \
     && cargo build --release --locked --target x86_64-unknown-linux-musl \
         --example hotpath_benchmark \
+        --example hotpath_mix_benchmark \
         --example loopback_benchmark \
     && mkdir -p /out \
     && cp target/x86_64-unknown-linux-musl/release/examples/hotpath_benchmark /out/ \
+    && cp target/x86_64-unknown-linux-musl/release/examples/hotpath_mix_benchmark /out/ \
     && cp target/x86_64-unknown-linux-musl/release/examples/loopback_benchmark /out/
 
-# Python stays in the final stage so the mixed-policy benchmark
-# (python /tests/docker_hotpath_policy_mix.py) can run in the same image.
-FROM python:3.13-alpine
+# Alpine keeps a shell for the `sh -c "exec ${HOTPATH_BENCHMARK_CMD}"` entrypoint.
+FROM alpine:3.22
 
 COPY --from=builder /out/hotpath_benchmark /usr/local/bin/hotpath-benchmark
+COPY --from=builder /out/hotpath_mix_benchmark /usr/local/bin/hotpath-mix-benchmark
 COPY --from=builder /out/loopback_benchmark /usr/local/bin/loopback-benchmark
