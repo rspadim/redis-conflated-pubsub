@@ -303,11 +303,15 @@ async fn subscriber_task(
     publisher_count: usize,
     recv: Arc<Vec<AtomicU64>>,
     base: Instant,
+    ready: Arc<tokio::sync::Barrier>,
 ) -> Result<()> {
     let client = redis::Client::open(format!("redis://{output_host}:6379/{output_index}"))?;
     let mut pubsub = client.get_async_pubsub().await?;
     let pattern = ["replica-a:*", "replica-b:*"][output_index];
     pubsub.psubscribe(pattern).await?;
+    // Confirm the subscription before publishers are released, otherwise the
+    // first messages can be lost and the subscriber waits forever.
+    ready.wait().await;
     let mut stream = pubsub.on_message();
     for _ in 0..(publisher_count * messages_per_publisher) {
         let message = stream.next().await.context("subscriber stream ended")?;
@@ -536,6 +540,7 @@ async fn main() -> Result<()> {
     let stop_polling = Arc::new(AtomicBool::new(false));
     let timeline: Arc<Mutex<Vec<TimelineSample>>> = Arc::new(Mutex::new(Vec::new()));
     let barrier = Arc::new(tokio::sync::Barrier::new(publisher_count + 1));
+    let subscriber_ready = Arc::new(tokio::sync::Barrier::new(output_count + 1));
 
     let mut subscriber_handles = Vec::with_capacity(output_count);
     for (output_index, recv) in recv_sets.iter().enumerate() {
@@ -551,8 +556,12 @@ async fn main() -> Result<()> {
             publisher_count,
             Arc::clone(recv),
             base,
+            Arc::clone(&subscriber_ready),
         )));
     }
+    tokio::time::timeout(Duration::from_secs(30), subscriber_ready.wait())
+        .await
+        .context("subscribers did not confirm PSUBSCRIBE in time")?;
     let poller = tokio::spawn(poller_task(
         status_host.clone(),
         status_port,
@@ -591,11 +600,17 @@ async fn main() -> Result<()> {
     let wall_started = Instant::now();
     barrier.wait().await;
     for publisher in publishers {
-        publisher.await??;
+        let outcome = tokio::time::timeout(Duration::from_secs(300), publisher)
+            .await
+            .context("publisher task timed out")?;
+        outcome??;
     }
     let publishers_done = Instant::now();
     for handle in subscriber_handles {
-        handle.await??;
+        let outcome = tokio::time::timeout(Duration::from_secs(300), handle)
+            .await
+            .context("subscriber task timed out")?;
+        outcome??;
     }
     let wall_finished = Instant::now();
     stop_polling.store(true, Ordering::Relaxed);
