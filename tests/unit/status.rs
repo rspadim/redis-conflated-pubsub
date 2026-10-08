@@ -103,6 +103,27 @@ fn status_snapshot_exposes_metrics_by_arbitrary_output_name() {
 }
 
 #[test]
+fn batched_queue_wait_and_pending_keys_update_the_snapshot_once() {
+    let metrics = Metrics::new();
+    let output = metrics.register_output("batch-output");
+    metrics.record_output_queue_wait_batch(&output, 3, 60, 30);
+    metrics.record_output_queue_wait_batch(&output, 0, 0, 0);
+    metrics.publish_output_pending_keys(&output, 2);
+    metrics.publish_output_pending_keys(&output, 2);
+
+    let snapshot = serde_json::to_value(metrics.snapshot()).unwrap();
+
+    assert_eq!(snapshot["outputs"]["batch-output"]["queue_wait_samples"], 3);
+    assert_eq!(
+        snapshot["outputs"]["batch-output"]["queue_wait_total_ns"],
+        60
+    );
+    assert_eq!(snapshot["outputs"]["batch-output"]["queue_wait_max_ns"], 30);
+    assert_eq!(snapshot["outputs"]["batch-output"]["pending_keys"], 2);
+    assert_eq!(snapshot["pending_keys"], 2);
+}
+
+#[test]
 fn reductions_are_unavailable_before_the_first_output_input() {
     let metrics = Metrics::new();
     metrics.register_output("empty-output");

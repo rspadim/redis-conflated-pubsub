@@ -74,14 +74,7 @@ fn nonpositive_interval_keeps_every_incoming_message_in_order() {
     let no_conflated_pending = HashMap::new();
     let batch = pending_batch(0, 256, usize::MAX, &no_conflated_pending, &passthrough);
     assert_eq!(batch[0].payload.as_ref(), b"first");
-    clear_published_batch(
-        0,
-        &mut pending,
-        &mut passthrough,
-        &batch,
-        &metrics,
-        &output_metrics,
-    );
+    clear_published_batch(0, &mut pending, &mut passthrough, &batch);
     assert_eq!(
         pending_batch(0, 256, usize::MAX, &no_conflated_pending, &passthrough,)[0]
             .payload

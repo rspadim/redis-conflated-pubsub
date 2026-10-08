@@ -232,7 +232,7 @@ fn enqueue_for_test_with_policy_at(
         output_metrics,
         policy_log: &mut policy_log,
     };
-    enqueue_message(
+    let pending_keys = enqueue_message(
         message,
         pending,
         passthrough,
@@ -240,6 +240,9 @@ fn enqueue_for_test_with_policy_at(
         deduplication_cache,
         now,
     );
+    // The worker publishes the gauge once per intake pass; test helpers do the
+    // same right after the single enqueue so existing assertions keep holding.
+    metrics.publish_output_pending_keys(output_metrics, pending_keys);
 }
 
 fn publish_context_for_test<'a>(

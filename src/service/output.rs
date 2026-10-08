@@ -69,7 +69,7 @@ impl OutputEnqueueContext<'_> {
             .resolve(self.config, &message.output_channel)
     }
 
-    fn enqueue(&mut self, message: InboundMessage, policy: ResolvedChannelPolicy) {
+    fn enqueue(&mut self, message: InboundMessage, policy: ResolvedChannelPolicy) -> usize {
         let mut message_context = OutputMessageContext {
             name: self.name,
             policy: OutputMessagePolicy {
@@ -90,7 +90,7 @@ impl OutputEnqueueContext<'_> {
             &mut message_context,
             self.deduplication_cache,
             time::Instant::now(),
-        );
+        )
     }
 }
 
@@ -188,6 +188,10 @@ pub(super) async fn publish_output(
         {
             let mut drained_messages = 0usize;
             let mut drained_payload_bytes = 0usize;
+            let mut pending_keys_after_intake = None;
+            let mut queue_wait_samples = 0u64;
+            let mut queue_wait_total_ns = 0u64;
+            let mut queue_wait_max_ns = 0u64;
             let mut enqueue_context = OutputEnqueueContext {
                 name: &name,
                 config: &config,
@@ -235,11 +239,27 @@ pub(super) async fn publish_output(
                 }
                 let queue_wait =
                     time::Instant::now().saturating_duration_since(queued_message.enqueued_at);
-                metrics.record_output_queue_wait(&output_metrics, queue_wait);
+                let queue_wait_ns = queue_wait.as_nanos().min(u64::MAX as u128) as u64;
+                queue_wait_samples += 1;
+                queue_wait_total_ns = queue_wait_total_ns.saturating_add(queue_wait_ns);
+                queue_wait_max_ns = queue_wait_max_ns.max(queue_wait_ns);
                 drained_payload_bytes =
                     drained_payload_bytes.saturating_add(queued_message.message.payload.len());
                 drained_messages += 1;
-                enqueue_context.enqueue(queued_message.message, policy);
+                pending_keys_after_intake =
+                    Some(enqueue_context.enqueue(queued_message.message, policy));
+            }
+            // One coalesced metrics update per intake pass instead of per message.
+            if queue_wait_samples > 0 {
+                metrics.record_output_queue_wait_batch(
+                    &output_metrics,
+                    queue_wait_samples,
+                    queue_wait_total_ns,
+                    queue_wait_max_ns,
+                );
+            }
+            if let Some(pending_keys) = pending_keys_after_intake {
+                metrics.publish_output_pending_keys(&output_metrics, pending_keys);
             }
         }
 
@@ -255,6 +275,7 @@ pub(super) async fn publish_output(
 
         if !due_intervals.is_empty() && !(connection.is_none() && !in_flight_direct.is_empty()) {
             let intervals = std::mem::take(&mut due_intervals);
+            let mut settled_pending_keys = None;
             for interval_ms in intervals {
                 if pending.get(&interval_ms).is_none_or(HashMap::is_empty) {
                     continue;
@@ -275,7 +296,7 @@ pub(super) async fn publish_output(
                     metrics: &metrics,
                     output_metrics: &output_metrics,
                 };
-                let has_remaining = publish_conflated_interval_pending(
+                let (has_remaining, pending_keys) = publish_conflated_interval_pending(
                     &mut publisher,
                     &mut pending,
                     &mut passthrough,
@@ -285,12 +306,17 @@ pub(super) async fn publish_output(
                     &mut publish_context,
                 )
                 .await;
+                settled_pending_keys = Some(pending_keys);
                 metrics.set_output_state(&output_metrics, "running");
                 if has_remaining {
                     // One chunk per turn: keep the interval due so the next turn
                     // drains it after completions, timers, and the receiver got a turn.
                     due_intervals.push(interval_ms);
                 }
+            }
+            // One coalesced gauge update per settle pass instead of per chunk.
+            if let Some(pending_keys) = settled_pending_keys {
+                metrics.publish_output_pending_keys(&output_metrics, pending_keys);
             }
         }
 
@@ -335,7 +361,7 @@ pub(super) async fn publish_output(
                     };
                     let result = settle_publish_result(&batch, Err(failure), &mut publish_context);
                     if let Err(failure) = result {
-                        flush::settle_failed_batch(
+                        let pending_keys = flush::settle_failed_batch(
                             0,
                             &batch,
                             &mut pending,
@@ -344,6 +370,7 @@ pub(super) async fn publish_output(
                             &metrics,
                             &output_metrics,
                         );
+                        metrics.publish_output_pending_keys(&output_metrics, pending_keys);
                     }
                     metrics.set_output_state(&output_metrics, "running");
                     continue;
@@ -400,18 +427,12 @@ pub(super) async fn publish_output(
                     };
                     metrics.record_output_publish_rtt(&output_metrics, publish_rtt);
                     let result = settle_publish_result(&batch, result, &mut publish_context);
-                    match result {
+                    let pending_keys = match result {
                         Ok(subscribers) => {
                             let payload_bytes =
                                 batch.iter().map(|message| message.payload.len()).sum();
-                            clear_published_batch(
-                                0,
-                                &mut pending,
-                                &mut passthrough,
-                                &batch,
-                                &metrics,
-                                &output_metrics,
-                            );
+                            let pending_keys =
+                                clear_published_batch(0, &mut pending, &mut passthrough, &batch);
                             metrics.record_output_flush(
                                 &output_metrics,
                                 batch.len(),
@@ -424,6 +445,7 @@ pub(super) async fn publish_output(
                                 atomic = batch.len() > 1,
                                 "output_batch_published"
                             );
+                            pending_keys
                         }
                         Err(failure) => {
                             connection = None;
@@ -435,9 +457,10 @@ pub(super) async fn publish_output(
                                 &failure,
                                 &metrics,
                                 &output_metrics,
-                            );
+                            )
                         }
-                    }
+                    };
+                    metrics.publish_output_pending_keys(&output_metrics, pending_keys);
                     if in_flight_direct.is_empty() {
                         metrics.set_output_state(&output_metrics, "running");
                     }

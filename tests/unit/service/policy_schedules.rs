@@ -440,7 +440,7 @@ async fn large_conflated_bucket_drains_one_chunk_per_turn_and_stays_due_until_em
     let mut turns = 0;
     while let Some(interval_ms) = due_intervals.pop() {
         turns += 1;
-        let has_remaining = publish_conflated_interval_pending(
+        let (has_remaining, _) = publish_conflated_interval_pending(
             &mut publisher,
             &mut pending,
             &mut passthrough,

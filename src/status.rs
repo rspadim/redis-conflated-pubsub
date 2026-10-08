@@ -306,15 +306,22 @@ impl Metrics {
     pub fn set_output_pending_keys(&self, output: &OutputMetrics, pending_keys: usize) {
         let pending_keys = pending_keys as u64;
         let previous = output.pending_keys.swap(pending_keys, Ordering::Relaxed);
-        if pending_keys >= previous {
+        if pending_keys > previous {
             self.pending_keys
                 .fetch_add(pending_keys - previous, Ordering::Relaxed);
-        } else {
+        } else if pending_keys < previous {
             self.pending_keys
                 .fetch_sub(previous - pending_keys, Ordering::Relaxed);
         }
     }
 
+    /// Publishes the pending-key gauge once per intake or settle pass.
+    pub fn publish_output_pending_keys(&self, output: &OutputMetrics, pending_keys: usize) {
+        self.set_output_pending_keys(output, pending_keys);
+    }
+
+    /// Kept for tests; production workers publish coalesced batches instead.
+    #[cfg(test)]
     pub fn record_output_queue_wait(&self, output: &OutputMetrics, duration: std::time::Duration) {
         record_duration(
             &output.queue_wait_samples,
@@ -322,6 +329,28 @@ impl Metrics {
             &output.queue_wait_max_ns,
             duration,
         );
+    }
+
+    /// Coalesces one pass of queue-wait samples into a single update.
+    pub fn record_output_queue_wait_batch(
+        &self,
+        output: &OutputMetrics,
+        samples: u64,
+        total_ns: u64,
+        max_ns: u64,
+    ) {
+        if samples == 0 {
+            return;
+        }
+        output
+            .queue_wait_samples
+            .fetch_add(samples, Ordering::Relaxed);
+        output
+            .queue_wait_total_ns
+            .fetch_add(total_ns, Ordering::Relaxed);
+        output
+            .queue_wait_max_ns
+            .fetch_max(max_ns, Ordering::Relaxed);
     }
 
     pub fn record_output_publish_rtt(&self, output: &OutputMetrics, duration: std::time::Duration) {
