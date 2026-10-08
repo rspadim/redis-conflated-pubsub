@@ -3,7 +3,7 @@ use anyhow::{Result, bail};
 use super::{
     AppConfig, ChannelFilterRule, ChannelOverrides, MAX_CHANNEL_CACHE_MAX_ENTRIES,
     MAX_DEDUPLICATION_GROUP_CACHE_BYTES, MAX_DEDUPLICATION_GROUP_MEMBERS, MAX_RUNTIME_DURATION_MS,
-    OutputConfig, RedisConfig, Subscription, same_pubsub_server,
+    OutputConfig, QueueOverflowPolicy, RedisConfig, Subscription, same_pubsub_server,
 };
 
 pub(super) fn validate(config: &AppConfig) -> Result<()> {
@@ -94,6 +94,58 @@ fn validate_redis_and_outputs(config: &AppConfig) -> Result<()> {
         validate_groups(name, output)?;
         validate_profiles(name, output)?;
         validate_channel_policies(name, output)?;
+        validate_queue_limits(name, output)?;
+    }
+    Ok(())
+}
+
+fn validate_queue_limits(name: &str, output: &OutputConfig) -> Result<()> {
+    if output.queue_max_messages == Some(0) {
+        bail!("outputs.{name}.queue_max_messages must be greater than zero");
+    }
+    if output.queue_max_bytes == Some(0) {
+        bail!("outputs.{name}.queue_max_bytes must be greater than zero");
+    }
+    if output.queue_max_age_ms == Some(0) {
+        bail!("outputs.{name}.queue_max_age_ms must be greater than zero");
+    }
+    if let Some(age_ms) = output.queue_max_age_ms
+        && age_ms > MAX_RUNTIME_DURATION_MS as u64
+    {
+        bail!("outputs.{name}.queue_max_age_ms must not exceed {MAX_RUNTIME_DURATION_MS} ms");
+    }
+    match output.queue_overflow_policy {
+        QueueOverflowPolicy::DropNewest => {
+            if output.queue_max_age_ms.is_some() {
+                bail!(
+                    "outputs.{name}.queue_max_age_ms is only supported with queue_overflow_policy drop_by_age"
+                );
+            }
+        }
+        QueueOverflowPolicy::DropOldest => {
+            if output.queue_max_age_ms.is_some() {
+                bail!(
+                    "outputs.{name}.queue_max_age_ms is only supported with queue_overflow_policy drop_by_age"
+                );
+            }
+            if output.queue_max_messages.is_none() && output.queue_max_bytes.is_none() {
+                bail!(
+                    "outputs.{name} queue_overflow_policy drop_oldest requires queue_max_messages or queue_max_bytes"
+                );
+            }
+        }
+        QueueOverflowPolicy::DropByAge => {
+            if output.queue_max_age_ms.is_none() {
+                bail!(
+                    "outputs.{name}.queue_max_age_ms is required when queue_overflow_policy is drop_by_age"
+                );
+            }
+            if output.queue_max_messages.is_some() || output.queue_max_bytes.is_some() {
+                bail!(
+                    "outputs.{name}.queue_max_messages and queue_max_bytes are not supported with queue_overflow_policy drop_by_age"
+                );
+            }
+        }
     }
     Ok(())
 }

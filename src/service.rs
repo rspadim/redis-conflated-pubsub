@@ -5,14 +5,13 @@ use std::{collections::HashMap, path::Path, sync::Arc, time::Duration};
 #[cfg(unix)]
 use anyhow::bail;
 use anyhow::{Context, Result, anyhow};
-use tokio::{
-    sync::mpsc,
-    time::{self, MissedTickBehavior},
-};
+use tokio::time::{self, MissedTickBehavior};
 use tracing::{error, info, warn};
 
 use crate::{
-    config::{AppConfig, HttpStatusConfig, OutputConfig, OversizedMessagePolicy},
+    config::{
+        AppConfig, HttpStatusConfig, OutputConfig, OversizedMessagePolicy, QueueOverflowPolicy,
+    },
     http_status, logging,
     status::{self, Metrics, OutputMetrics},
 };
@@ -25,6 +24,7 @@ mod input;
 mod output;
 mod policy;
 mod publish;
+mod queue;
 
 use batch::OversizedPolicyLog;
 #[cfg(test)]
@@ -45,7 +45,7 @@ use input::{output_echo_filters, read_input};
 use output::{
     clear_published_batch, direct_batch_boundary_required, enqueue_message,
     publish_conflated_interval_pending, publish_conflated_pending, publish_passthrough_batch,
-    publish_passthrough_pending,
+    publish_passthrough_pending, shed_expired_message,
 };
 use output::{publish_output, write_status};
 #[cfg(test)]
@@ -55,6 +55,7 @@ use policy::{advance_due_schedules, flush_schedules, resolve_channel_policy};
 use publish::OutputFailureLog;
 #[cfg(test)]
 use publish::{BatchPublisher, PublishFailure, publish_once};
+use queue::{OutputQueueReceiver, OutputQueueSender, QueueLimits, QueueShedLog, output_queue};
 
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 
@@ -161,6 +162,11 @@ fn pending_message_count(pending: &PendingByInterval) -> usize {
     pending.values().map(HashMap::len).sum()
 }
 
+/// Queue byte cost of a pending message: mapped channel plus payload.
+fn pending_message_queue_bytes(message: &PendingMessage) -> usize {
+    message.output_channel.len() + message.payload.len()
+}
+
 struct OutputSender {
     name: String,
     channel_prefix: String,
@@ -170,8 +176,18 @@ struct OutputSender {
     /// per-message concatenation in `fan_out`.
     combined_channel_mapping: Option<(String, String)>,
     channel_filter: ChannelFilterSet,
-    sender: mpsc::UnboundedSender<QueuedInboundMessage>,
+    sender: OutputQueueSender,
+    queue_limits: QueueLimits,
+    queue_policy: QueueOverflowPolicy,
+    queue_shed_log: QueueShedLog,
     output_metrics: Arc<OutputMetrics>,
+}
+
+impl Drop for OutputSender {
+    fn drop(&mut self) {
+        // Flush fan-out shed counts that are still inside the rate-limit window.
+        self.queue_shed_log.flush_suppressed(&self.name);
+    }
 }
 
 struct OutputRuntimeSetup {
@@ -311,7 +327,12 @@ pub async fn run(
                 channel_filter,
                 channel_policy_cache_max_entries,
             )| {
-                let (sender, receiver) = mpsc::unbounded_channel();
+                let queue_limits = QueueLimits::new(
+                    output_config.queue_max_messages,
+                    output_config.queue_max_bytes,
+                );
+                let queue_policy = output_config.queue_overflow_policy;
+                let (sender, receiver) = output_queue(queue_policy);
                 let worker_metrics = Arc::clone(&metrics);
                 let worker_output_metrics = Arc::clone(&output_metrics);
                 let sender_name = name.clone();
@@ -369,6 +390,9 @@ pub async fn run(
                         combined_channel_mapping,
                         channel_filter,
                         sender,
+                        queue_limits,
+                        queue_policy,
+                        queue_shed_log: QueueShedLog::default(),
                         output_metrics: Arc::clone(&output_metrics),
                     },
                     task,

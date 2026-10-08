@@ -280,3 +280,134 @@ fn channel_filters_reject_ambiguous_empty_and_invalid_regex_rules() {
             .contains("outputs.out.filters[0].regex is invalid")
     );
 }
+
+#[test]
+fn queue_limits_default_to_unbounded_and_validate_policy_combinations() {
+    let mut config = filter_test_config();
+    let output = &config.outputs["out"];
+    assert_eq!(output.queue_max_messages, None);
+    assert_eq!(output.queue_max_bytes, None);
+    assert_eq!(
+        output.queue_overflow_policy,
+        QueueOverflowPolicy::DropNewest
+    );
+    assert_eq!(output.queue_max_age_ms, None);
+    config.validate().unwrap();
+
+    config.outputs.get_mut("out").unwrap().queue_max_messages = Some(0);
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("outputs.out.queue_max_messages must be greater than zero")
+    );
+    config.outputs.get_mut("out").unwrap().queue_max_messages = None;
+    config.outputs.get_mut("out").unwrap().queue_max_bytes = Some(0);
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("outputs.out.queue_max_bytes must be greater than zero")
+    );
+    config.outputs.get_mut("out").unwrap().queue_max_bytes = None;
+    config.outputs.get_mut("out").unwrap().queue_max_age_ms = Some(0);
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("outputs.out.queue_max_age_ms must be greater than zero")
+    );
+    config.outputs.get_mut("out").unwrap().queue_max_age_ms = None;
+
+    // drop_by_age requires queue_max_age_ms and rejects count/byte limits.
+    config.outputs.get_mut("out").unwrap().queue_overflow_policy = QueueOverflowPolicy::DropByAge;
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("outputs.out.queue_max_age_ms is required")
+    );
+    config.outputs.get_mut("out").unwrap().queue_max_age_ms = Some(1000);
+    config.validate().unwrap();
+    config.outputs.get_mut("out").unwrap().queue_max_messages = Some(1);
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("not supported with queue_overflow_policy drop_by_age")
+    );
+    config.outputs.get_mut("out").unwrap().queue_max_messages = None;
+    config.outputs.get_mut("out").unwrap().queue_max_age_ms =
+        Some(MAX_RUNTIME_DURATION_MS as u64 + 1);
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("outputs.out.queue_max_age_ms must not exceed")
+    );
+    config.outputs.get_mut("out").unwrap().queue_max_age_ms = Some(1000);
+
+    // drop_oldest requires at least one limit and rejects queue_max_age_ms.
+    config.outputs.get_mut("out").unwrap().queue_overflow_policy = QueueOverflowPolicy::DropOldest;
+    config.outputs.get_mut("out").unwrap().queue_max_age_ms = Some(1000);
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("only supported with queue_overflow_policy drop_by_age")
+    );
+    config.outputs.get_mut("out").unwrap().queue_max_age_ms = None;
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("drop_oldest requires queue_max_messages or queue_max_bytes")
+    );
+    config.outputs.get_mut("out").unwrap().queue_max_messages = Some(1);
+    config.validate().unwrap();
+
+    // drop_newest rejects queue_max_age_ms.
+    config.outputs.get_mut("out").unwrap().queue_overflow_policy = QueueOverflowPolicy::DropNewest;
+    config.outputs.get_mut("out").unwrap().queue_max_age_ms = Some(1000);
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("only supported with queue_overflow_policy drop_by_age")
+    );
+}
+
+#[test]
+fn queue_limit_schema_defaults_are_public() {
+    let schema = AppConfig::json_schema();
+    let properties = &schema["$defs"]["OutputConfig"]["properties"];
+    assert_eq!(
+        properties["queue_overflow_policy"]["default"],
+        "drop_newest"
+    );
+    assert_eq!(properties["queue_max_messages"]["minimum"], 1);
+    assert_eq!(
+        properties["queue_max_messages"]["default"],
+        serde_json::Value::Null
+    );
+    assert_eq!(properties["queue_max_bytes"]["minimum"], 1);
+    assert_eq!(properties["queue_max_age_ms"]["minimum"], 1);
+    assert_eq!(
+        properties["queue_max_age_ms"]["maximum"],
+        MAX_RUNTIME_DURATION_MS as u64
+    );
+
+    assert!(serde_json::from_str::<QueueOverflowPolicy>("\"drop_newest\"").is_ok());
+    assert!(serde_json::from_str::<QueueOverflowPolicy>("\"drop_oldest\"").is_ok());
+    assert!(serde_json::from_str::<QueueOverflowPolicy>("\"drop_by_age\"").is_ok());
+    assert!(serde_json::from_str::<QueueOverflowPolicy>("\"drop_random\"").is_err());
+}

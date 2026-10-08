@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
 
+use tokio::sync::mpsc;
+
 use crate::config::{
     ChannelFilterRule, ChannelPolicy, DeduplicationGroup, FilterAction, Subscription,
 };
@@ -320,5 +322,7 @@ mod filter_load;
 mod input_filtering;
 #[path = "service/policy_schedules.rs"]
 mod policy_schedules;
+#[path = "service/queue_limits.rs"]
+mod queue_limits;
 #[path = "service/reload_runtime.rs"]
 mod reload_runtime;

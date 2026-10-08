@@ -152,6 +152,21 @@ pub struct OutputConfig {
     pub channel_prefix: String,
     #[serde(default)]
     pub channel_suffix: String,
+    /// Maximum queued messages for this output; null means unlimited.
+    #[serde(default)]
+    #[schemars(range(min = 1))]
+    pub queue_max_messages: Option<usize>,
+    /// Maximum queued bytes per output, counting mapped channel plus payload; null means unlimited.
+    #[serde(default)]
+    #[schemars(range(min = 1))]
+    pub queue_max_bytes: Option<usize>,
+    /// Intake queue overflow policy: drop_newest drops the incoming message at fan-out, drop_oldest evicts the oldest queued message, drop_by_age drops at intake when older than queue_max_age_ms.
+    #[serde(default)]
+    pub queue_overflow_policy: QueueOverflowPolicy,
+    /// Maximum intake queue age in milliseconds; required by drop_by_age and rejected by the other policies.
+    #[serde(default)]
+    #[schemars(range(min = 1))]
+    pub queue_max_age_ms: Option<u64>,
     pub conflation: ConflationConfig,
     #[serde(default)]
     pub deduplication: DeduplicationConfig,
@@ -429,6 +444,20 @@ pub struct ConflationConfig {
     pub max_in_flight_bytes: Option<usize>,
     #[serde(default)]
     pub oversized_message_policy: Option<OversizedMessagePolicy>,
+}
+
+// The variant names mirror the public `queue_overflow_policy` JSON strings.
+#[allow(clippy::enum_variant_names)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueOverflowPolicy {
+    /// Drop the incoming message when the output queue is at capacity (default).
+    #[default]
+    DropNewest,
+    /// Evict the oldest queued message to make room for the incoming one.
+    DropOldest,
+    /// Drop queued messages at intake once they are older than queue_max_age_ms.
+    DropByAge,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, JsonSchema, PartialEq, Eq)]

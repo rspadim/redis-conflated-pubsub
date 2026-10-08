@@ -230,7 +230,7 @@ async fn nonpositive_group_ttl_disables_deduplication_but_keeps_conflation() {
     let mut passthrough = VecDeque::new();
 
     for payload in [b"first".to_vec(), b"latest".to_vec()] {
-        metrics.record_output_input(&output_metrics, payload.len());
+        metrics.record_output_input(&output_metrics, payload.len(), payload.len());
         enqueue_for_test_with_policy_at(
             InboundMessage {
                 output_channel: "events:live".to_owned(),
@@ -347,7 +347,7 @@ async fn conflated_value_returning_to_cached_value_is_suppressed_at_flush() {
     cache.remember(std::slice::from_ref(&last_published), time::Instant::now());
 
     let changed = b"changed".to_vec();
-    metrics.record_output_input(&output_metrics, changed.len());
+    metrics.record_output_input(&output_metrics, changed.len(), changed.len());
     enqueue_for_test_with_cache(
         100,
         InboundMessage {
@@ -363,7 +363,7 @@ async fn conflated_value_returning_to_cached_value_is_suppressed_at_flush() {
     assert_eq!(pending[&100]["events"].raw_payload(), b"changed");
 
     let returned = b"published".to_vec();
-    metrics.record_output_input(&output_metrics, returned.len());
+    metrics.record_output_input(&output_metrics, returned.len(), returned.len());
     enqueue_for_test_with_cache(
         100,
         InboundMessage {
@@ -440,7 +440,7 @@ async fn conflated_deduplication_skips_removed_channels_across_exec_chunks() {
         ("events:b", b"cached".to_vec()),
         ("events:c", b"last".to_vec()),
     ] {
-        metrics.record_output_input(&output_metrics, payload.len());
+        metrics.record_output_input(&output_metrics, payload.len(), payload.len());
         enqueue_for_test_with_cache(
             100,
             InboundMessage {
@@ -497,7 +497,7 @@ async fn nonpositive_ttl_keeps_normal_conflation_enabled() {
         let mut cache = DeduplicationCache::new(ttl_ms);
 
         for payload in [b"first".to_vec(), b"latest".to_vec()] {
-            metrics.record_output_input(&output_metrics, payload.len());
+            metrics.record_output_input(&output_metrics, payload.len(), payload.len());
             enqueue_for_test_with_cache(
                 100,
                 InboundMessage {
@@ -547,7 +547,7 @@ async fn direct_mode_publishes_changed_values_and_suppresses_repeats() {
     let mut publisher = RecordingPublisher::default();
 
     for payload in [b"A".to_vec(), b"B".to_vec(), b"B".to_vec()] {
-        metrics.record_output_input(&output_metrics, payload.len());
+        metrics.record_output_input(&output_metrics, payload.len(), payload.len());
         enqueue_for_test_with_cache(
             0,
             InboundMessage {
@@ -601,7 +601,7 @@ async fn truncate_deduplication_compares_the_raw_input_payload() {
     };
 
     for payload in [vec![0, 1, 2], vec![0, 1, 3]] {
-        metrics.record_output_input(&output_metrics, payload.len());
+        metrics.record_output_input(&output_metrics, payload.len(), payload.len());
         enqueue_for_test_with_policy_at(
             InboundMessage {
                 output_channel: channel.to_owned(),
@@ -637,7 +637,7 @@ async fn truncate_deduplication_compares_the_raw_input_payload() {
     );
 
     let repeated = vec![0, 1, 3];
-    metrics.record_output_input(&output_metrics, repeated.len());
+    metrics.record_output_input(&output_metrics, repeated.len(), repeated.len());
     enqueue_for_test_with_policy_at(
         InboundMessage {
             output_channel: channel.to_owned(),
@@ -675,7 +675,7 @@ fn direct_queue_deduplicates_inside_ttl_and_accepts_same_value_after_expiry() {
         (published.payload.clone(), now + Duration::from_millis(1)),
         (published.payload.clone(), now + Duration::from_millis(2)),
     ] {
-        metrics.record_output_input(&output_metrics, payload.len());
+        metrics.record_output_input(&output_metrics, payload.len(), payload.len());
         enqueue_for_test_with_cache_at(
             0,
             InboundMessage {
@@ -692,7 +692,11 @@ fn direct_queue_deduplicates_inside_ttl_and_accepts_same_value_after_expiry() {
     }
     assert!(passthrough.is_empty());
 
-    metrics.record_output_input(&output_metrics, published.payload.len());
+    metrics.record_output_input(
+        &output_metrics,
+        published.payload.len(),
+        published.payload.len(),
+    );
     enqueue_for_test_with_cache_at(
         0,
         InboundMessage {

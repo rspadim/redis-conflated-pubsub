@@ -33,6 +33,8 @@ pub struct Metrics {
     pub excluded_messages_total: AtomicU64,
     pub dropped_messages_total: AtomicU64,
     pub dropped_payload_bytes_total: AtomicU64,
+    pub shed_messages_total: AtomicU64,
+    pub shed_payload_bytes_total: AtomicU64,
     pub truncated_messages_total: AtomicU64,
     pub truncated_payload_bytes_total: AtomicU64,
     pub publish_errors_total: AtomicU64,
@@ -80,6 +82,8 @@ pub struct OutputMetrics {
     deduplicated_payload_bytes_total: AtomicU64,
     dropped_messages_total: AtomicU64,
     dropped_payload_bytes_total: AtomicU64,
+    shed_messages_total: AtomicU64,
+    shed_payload_bytes_total: AtomicU64,
     truncated_messages_total: AtomicU64,
     truncated_payload_bytes_total: AtomicU64,
     publish_errors_total: AtomicU64,
@@ -90,6 +94,10 @@ pub struct OutputMetrics {
     pending_keys: AtomicU64,
     pending_messages: AtomicU64,
     pending_payload_bytes: AtomicU64,
+    pending_queue_bytes: AtomicU64,
+    /// Unix-epoch milliseconds when `pending_messages` last went from zero to
+    /// one; zero when no admission has been observed yet.
+    oldest_pending_at_ms: AtomicU64,
     queue_wait_samples: AtomicU64,
     queue_wait_total_ns: AtomicU64,
     queue_wait_max_ns: AtomicU64,
@@ -115,6 +123,8 @@ impl OutputMetrics {
             deduplicated_payload_bytes_total: AtomicU64::new(0),
             dropped_messages_total: AtomicU64::new(0),
             dropped_payload_bytes_total: AtomicU64::new(0),
+            shed_messages_total: AtomicU64::new(0),
+            shed_payload_bytes_total: AtomicU64::new(0),
             truncated_messages_total: AtomicU64::new(0),
             truncated_payload_bytes_total: AtomicU64::new(0),
             publish_errors_total: AtomicU64::new(0),
@@ -125,6 +135,8 @@ impl OutputMetrics {
             pending_keys: AtomicU64::new(0),
             pending_messages: AtomicU64::new(0),
             pending_payload_bytes: AtomicU64::new(0),
+            pending_queue_bytes: AtomicU64::new(0),
+            oldest_pending_at_ms: AtomicU64::new(0),
             queue_wait_samples: AtomicU64::new(0),
             queue_wait_total_ns: AtomicU64::new(0),
             queue_wait_max_ns: AtomicU64::new(0),
@@ -142,6 +154,17 @@ impl OutputMetrics {
         let input_payload_bytes_total = self.input_payload_bytes_total.load(Ordering::Relaxed);
         let output_messages_total = self.output_messages_total.load(Ordering::Relaxed);
         let output_payload_bytes_total = self.output_payload_bytes_total.load(Ordering::Relaxed);
+        let pending_messages = self.pending_messages.load(Ordering::Relaxed);
+        let oldest_pending_age_ms = if pending_messages == 0 {
+            0
+        } else {
+            let oldest_pending_at_ms = self.oldest_pending_at_ms.load(Ordering::Relaxed);
+            if oldest_pending_at_ms == 0 {
+                0
+            } else {
+                epoch_millis_now().saturating_sub(oldest_pending_at_ms)
+            }
+        };
         OutputStatusSnapshot {
             state: self.state.lock().unwrap().clone(),
             input_messages_total,
@@ -159,6 +182,8 @@ impl OutputMetrics {
                 .load(Ordering::Relaxed),
             dropped_messages_total: self.dropped_messages_total.load(Ordering::Relaxed),
             dropped_payload_bytes_total: self.dropped_payload_bytes_total.load(Ordering::Relaxed),
+            shed_messages_total: self.shed_messages_total.load(Ordering::Relaxed),
+            shed_payload_bytes_total: self.shed_payload_bytes_total.load(Ordering::Relaxed),
             truncated_messages_total: self.truncated_messages_total.load(Ordering::Relaxed),
             truncated_payload_bytes_total: self
                 .truncated_payload_bytes_total
@@ -177,8 +202,10 @@ impl OutputMetrics {
             uncertain_messages_total: self.uncertain_messages_total.load(Ordering::Relaxed),
             reconnects_total: self.reconnects_total.load(Ordering::Relaxed),
             pending_keys: self.pending_keys.load(Ordering::Relaxed),
-            pending_messages: self.pending_messages.load(Ordering::Relaxed),
+            pending_messages,
             pending_payload_bytes: self.pending_payload_bytes.load(Ordering::Relaxed),
+            pending_queue_bytes: self.pending_queue_bytes.load(Ordering::Relaxed),
+            oldest_pending_age_ms,
             queue_wait_samples: self.queue_wait_samples.load(Ordering::Relaxed),
             queue_wait_total_ns: self.queue_wait_total_ns.load(Ordering::Relaxed),
             queue_wait_max_ns: self.queue_wait_max_ns.load(Ordering::Relaxed),
@@ -188,6 +215,16 @@ impl OutputMetrics {
             last_flush_at: self.last_flush_at.lock().unwrap().clone(),
             last_error: self.last_error.lock().unwrap().clone(),
         }
+    }
+
+    /// Pending messages gauge used by the drop_newest admission check.
+    pub fn pending_messages(&self) -> u64 {
+        self.pending_messages.load(Ordering::Relaxed)
+    }
+
+    /// Pending channel+payload bytes gauge used by the drop_newest byte check.
+    pub fn pending_queue_bytes(&self) -> u64 {
+        self.pending_queue_bytes.load(Ordering::Relaxed)
     }
 }
 
@@ -211,6 +248,8 @@ impl Metrics {
             excluded_messages_total: AtomicU64::new(0),
             dropped_messages_total: AtomicU64::new(0),
             dropped_payload_bytes_total: AtomicU64::new(0),
+            shed_messages_total: AtomicU64::new(0),
+            shed_payload_bytes_total: AtomicU64::new(0),
             truncated_messages_total: AtomicU64::new(0),
             truncated_payload_bytes_total: AtomicU64::new(0),
             publish_errors_total: AtomicU64::new(0),
@@ -362,32 +401,44 @@ impl Metrics {
         );
     }
 
-    pub fn record_output_input(&self, output: &OutputMetrics, payload_bytes: usize) {
+    pub fn record_output_input(
+        &self,
+        output: &OutputMetrics,
+        payload_bytes: usize,
+        queue_bytes: usize,
+    ) {
         let payload_bytes = payload_bytes as u64;
+        let queue_bytes = queue_bytes as u64;
         output.input_messages_total.fetch_add(1, Ordering::Relaxed);
         output
             .input_payload_bytes_total
             .fetch_add(payload_bytes, Ordering::Relaxed);
-        output.pending_messages.fetch_add(1, Ordering::Relaxed);
-        output
-            .pending_payload_bytes
-            .fetch_add(payload_bytes, Ordering::Relaxed);
+        add_output_pending(output, payload_bytes, queue_bytes);
     }
 
-    pub fn rollback_output_input(&self, output: &OutputMetrics, payload_bytes: usize) {
+    pub fn rollback_output_input(
+        &self,
+        output: &OutputMetrics,
+        payload_bytes: usize,
+        queue_bytes: usize,
+    ) {
         let payload_bytes = payload_bytes as u64;
+        let queue_bytes = queue_bytes as u64;
         output.input_messages_total.fetch_sub(1, Ordering::Relaxed);
         output
             .input_payload_bytes_total
             .fetch_sub(payload_bytes, Ordering::Relaxed);
-        output.pending_messages.fetch_sub(1, Ordering::Relaxed);
-        output
-            .pending_payload_bytes
-            .fetch_sub(payload_bytes, Ordering::Relaxed);
+        remove_output_pending(output, 1, payload_bytes, queue_bytes);
     }
 
-    pub fn record_output_conflated(&self, output: &OutputMetrics, payload_bytes: usize) {
+    pub fn record_output_conflated(
+        &self,
+        output: &OutputMetrics,
+        payload_bytes: usize,
+        pending_queue_bytes: usize,
+    ) {
         let payload_bytes = payload_bytes as u64;
+        let pending_queue_bytes = pending_queue_bytes as u64;
         self.conflated_messages_total
             .fetch_add(1, Ordering::Relaxed);
         self.conflated_payload_bytes_total
@@ -398,10 +449,7 @@ impl Metrics {
         output
             .conflated_payload_bytes_total
             .fetch_add(payload_bytes, Ordering::Relaxed);
-        output.pending_messages.fetch_sub(1, Ordering::Relaxed);
-        output
-            .pending_payload_bytes
-            .fetch_sub(payload_bytes, Ordering::Relaxed);
+        remove_output_pending(output, 1, payload_bytes, pending_queue_bytes);
     }
 
     pub fn record_output_deduplicated(
@@ -409,9 +457,11 @@ impl Metrics {
         output: &OutputMetrics,
         payload_bytes: usize,
         pending_payload_bytes: usize,
+        pending_queue_bytes: usize,
     ) {
         let payload_bytes = payload_bytes as u64;
         let pending_payload_bytes = pending_payload_bytes as u64;
+        let pending_queue_bytes = pending_queue_bytes as u64;
         self.deduplicated_messages_total
             .fetch_add(1, Ordering::Relaxed);
         self.deduplicated_payload_bytes_total
@@ -422,10 +472,7 @@ impl Metrics {
         output
             .deduplicated_payload_bytes_total
             .fetch_add(payload_bytes, Ordering::Relaxed);
-        output.pending_messages.fetch_sub(1, Ordering::Relaxed);
-        output
-            .pending_payload_bytes
-            .fetch_sub(pending_payload_bytes, Ordering::Relaxed);
+        remove_output_pending(output, 1, pending_payload_bytes, pending_queue_bytes);
     }
 
     pub fn record_output_dropped(
@@ -433,8 +480,10 @@ impl Metrics {
         output: &OutputMetrics,
         message_count: usize,
         payload_bytes: usize,
+        queue_bytes: usize,
     ) {
         let payload_bytes = payload_bytes as u64;
+        let queue_bytes = queue_bytes as u64;
         self.dropped_messages_total
             .fetch_add(message_count as u64, Ordering::Relaxed);
         self.dropped_payload_bytes_total
@@ -445,12 +494,7 @@ impl Metrics {
         output
             .dropped_payload_bytes_total
             .fetch_add(payload_bytes, Ordering::Relaxed);
-        output
-            .pending_messages
-            .fetch_sub(message_count as u64, Ordering::Relaxed);
-        output
-            .pending_payload_bytes
-            .fetch_sub(payload_bytes, Ordering::Relaxed);
+        remove_output_pending(output, message_count as u64, payload_bytes, queue_bytes);
     }
 
     pub fn record_output_abandoned(
@@ -458,13 +502,55 @@ impl Metrics {
         output: &OutputMetrics,
         message_count: usize,
         payload_bytes: usize,
+        queue_bytes: usize,
     ) {
+        remove_output_pending(
+            output,
+            message_count as u64,
+            payload_bytes as u64,
+            queue_bytes as u64,
+        );
+    }
+
+    /// Counts a message discarded by a queue policy. The pending gauges are not
+    /// touched because drop_newest rejects before admission; use
+    /// `record_output_shed_pending` when the message was already admitted.
+    pub fn record_output_shed(
+        &self,
+        output: &OutputMetrics,
+        message_count: usize,
+        payload_bytes: usize,
+    ) {
+        let payload_bytes = payload_bytes as u64;
+        self.shed_messages_total
+            .fetch_add(message_count as u64, Ordering::Relaxed);
+        self.shed_payload_bytes_total
+            .fetch_add(payload_bytes, Ordering::Relaxed);
         output
-            .pending_messages
-            .fetch_sub(message_count as u64, Ordering::Relaxed);
+            .shed_messages_total
+            .fetch_add(message_count as u64, Ordering::Relaxed);
         output
-            .pending_payload_bytes
-            .fetch_sub(payload_bytes as u64, Ordering::Relaxed);
+            .shed_payload_bytes_total
+            .fetch_add(payload_bytes, Ordering::Relaxed);
+    }
+
+    /// Counts a message discarded by a queue policy after it was admitted
+    /// (drop_oldest eviction or drop_by_age intake), releasing its pending
+    /// gauges.
+    pub fn record_output_shed_pending(
+        &self,
+        output: &OutputMetrics,
+        message_count: usize,
+        payload_bytes: usize,
+        queue_bytes: usize,
+    ) {
+        self.record_output_shed(output, message_count, payload_bytes);
+        remove_output_pending(
+            output,
+            message_count as u64,
+            payload_bytes as u64,
+            queue_bytes as u64,
+        );
     }
 
     pub fn record_output_truncated(&self, output: &OutputMetrics, payload_bytes: usize) {
@@ -482,8 +568,12 @@ impl Metrics {
         output
             .truncated_payload_bytes_total
             .fetch_add(payload_bytes, Ordering::Relaxed);
+        // Truncation removes payload bytes only; the channel bytes are unchanged.
         output
             .pending_payload_bytes
+            .fetch_sub(payload_bytes, Ordering::Relaxed);
+        output
+            .pending_queue_bytes
             .fetch_sub(payload_bytes, Ordering::Relaxed);
     }
 
@@ -492,6 +582,7 @@ impl Metrics {
         output: &OutputMetrics,
         message_count: usize,
         payload_bytes: usize,
+        queue_bytes: usize,
     ) {
         let payload_bytes = payload_bytes as u64;
         self.record_flush(message_count);
@@ -504,12 +595,12 @@ impl Metrics {
         output
             .output_payload_bytes_total
             .fetch_add(payload_bytes, Ordering::Relaxed);
-        output
-            .pending_messages
-            .fetch_sub(message_count as u64, Ordering::Relaxed);
-        output
-            .pending_payload_bytes
-            .fetch_sub(payload_bytes, Ordering::Relaxed);
+        remove_output_pending(
+            output,
+            message_count as u64,
+            payload_bytes,
+            queue_bytes as u64,
+        );
         *output.last_flush_at.lock().unwrap() = Some(timestamp());
     }
 
@@ -584,6 +675,8 @@ impl Metrics {
             excluded_messages_total: self.excluded_messages_total.load(Ordering::Relaxed),
             dropped_messages_total: self.dropped_messages_total.load(Ordering::Relaxed),
             dropped_payload_bytes_total: self.dropped_payload_bytes_total.load(Ordering::Relaxed),
+            shed_messages_total: self.shed_messages_total.load(Ordering::Relaxed),
+            shed_payload_bytes_total: self.shed_payload_bytes_total.load(Ordering::Relaxed),
             truncated_messages_total: self.truncated_messages_total.load(Ordering::Relaxed),
             truncated_payload_bytes_total: self
                 .truncated_payload_bytes_total
@@ -631,6 +724,10 @@ pub struct StatusSnapshot {
     pub excluded_messages_total: u64,
     pub dropped_messages_total: u64,
     pub dropped_payload_bytes_total: u64,
+    /// Messages discarded by a queue overflow policy.
+    pub shed_messages_total: u64,
+    /// Payload bytes of messages discarded by a queue overflow policy.
+    pub shed_payload_bytes_total: u64,
     pub truncated_messages_total: u64,
     pub truncated_payload_bytes_total: u64,
     pub publish_errors_total: u64,
@@ -663,6 +760,10 @@ pub struct OutputStatusSnapshot {
     pub deduplicated_payload_bytes_total: u64,
     pub dropped_messages_total: u64,
     pub dropped_payload_bytes_total: u64,
+    /// Messages discarded by this output's queue overflow policy.
+    pub shed_messages_total: u64,
+    /// Payload bytes of messages discarded by this output's queue overflow policy.
+    pub shed_payload_bytes_total: u64,
     pub truncated_messages_total: u64,
     pub truncated_payload_bytes_total: u64,
     pub message_reduction_percent: Option<f64>,
@@ -679,6 +780,11 @@ pub struct OutputStatusSnapshot {
     /// Messages currently queued for output; given-up failed chunks are excluded.
     pub pending_messages: u64,
     pub pending_payload_bytes: u64,
+    /// Pending queue bytes counting mapped channel plus payload.
+    pub pending_queue_bytes: u64,
+    /// Age of the oldest still-pending admission, approximated from the last
+    /// time the pending gauge rose from zero; zero when nothing is pending.
+    pub oldest_pending_age_ms: u64,
     pub queue_wait_samples: u64,
     pub queue_wait_total_ns: u64,
     pub queue_wait_max_ns: u64,
@@ -699,6 +805,45 @@ fn record_duration(
     samples.fetch_add(1, Ordering::Relaxed);
     total_ns.fetch_add(duration_ns, Ordering::Relaxed);
     max_ns.fetch_max(duration_ns, Ordering::Relaxed);
+}
+
+/// Adds one admitted message to the pending gauges. The oldest-pending marker
+/// is stamped only on the zero-to-one transition; it is an upper bound under
+/// conflation and eviction, and the snapshot reports zero whenever nothing is
+/// pending.
+fn add_output_pending(output: &OutputMetrics, payload_bytes: u64, queue_bytes: u64) {
+    if output.pending_messages.fetch_add(1, Ordering::Relaxed) == 0 {
+        output
+            .oldest_pending_at_ms
+            .store(epoch_millis_now(), Ordering::Relaxed);
+    }
+    output
+        .pending_payload_bytes
+        .fetch_add(payload_bytes, Ordering::Relaxed);
+    output
+        .pending_queue_bytes
+        .fetch_add(queue_bytes, Ordering::Relaxed);
+}
+
+fn remove_output_pending(
+    output: &OutputMetrics,
+    message_count: u64,
+    payload_bytes: u64,
+    queue_bytes: u64,
+) {
+    output
+        .pending_messages
+        .fetch_sub(message_count, Ordering::Relaxed);
+    output
+        .pending_payload_bytes
+        .fetch_sub(payload_bytes, Ordering::Relaxed);
+    output
+        .pending_queue_bytes
+        .fetch_sub(queue_bytes, Ordering::Relaxed);
+}
+
+fn epoch_millis_now() -> u64 {
+    Utc::now().timestamp_millis().max(0) as u64
 }
 
 fn reduction_percent(input: u64, output: u64) -> Option<f64> {

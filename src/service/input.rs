@@ -6,7 +6,10 @@ use tokio::time;
 use tracing::{info, warn};
 
 use crate::{
-    config::{InputConfig, OutputConfig, RedisConfig, Subscription, same_pubsub_server},
+    config::{
+        InputConfig, OutputConfig, QueueOverflowPolicy, RedisConfig, Subscription,
+        same_pubsub_server,
+    },
     status::Metrics,
 };
 
@@ -213,21 +216,54 @@ pub(super) fn fan_out(
         let output_channel =
             output.mapped_channel(subscription_prefix, source_channel, subscription_suffix);
         let payload_bytes = payload.len();
-        metrics.record_output_input(&output.output_metrics, payload_bytes);
-        if output
-            .sender
-            .send(QueuedInboundMessage {
+        let queue_bytes = output_channel.len() + payload_bytes;
+        // drop_newest checks the logical pending gauges before admission, so the
+        // message is discarded without touching the queue or pending counters.
+        if output.queue_policy == QueueOverflowPolicy::DropNewest
+            && output.queue_limits.rejects_admission(
+                output.output_metrics.pending_messages(),
+                output.output_metrics.pending_queue_bytes(),
+                queue_bytes as u64,
+            )
+        {
+            metrics.record_output_shed(&output.output_metrics, 1, payload_bytes);
+            output.queue_shed_log.report(&output.name, 1, payload_bytes);
+            continue;
+        }
+        metrics.record_output_input(&output.output_metrics, payload_bytes, queue_bytes);
+        match output.sender.send(
+            QueuedInboundMessage {
                 message: InboundMessage {
                     output_channel,
                     payload: Arc::clone(&payload),
                 },
                 enqueued_at,
-            })
-            .is_err()
-        {
-            metrics.rollback_output_input(&output.output_metrics, payload_bytes);
-            metrics.record_error(format!("output worker {} is unavailable", output.name));
-            warn!(output = %output.name, "output_worker_unavailable");
+            },
+            output.queue_limits,
+        ) {
+            Ok(evicted) => {
+                // Only drop_oldest returns evicted messages; release their
+                // pending gauges and count them as shed.
+                for evicted in evicted {
+                    let evicted_payload_bytes = evicted.message.payload.len();
+                    let evicted_queue_bytes =
+                        evicted.message.output_channel.len() + evicted_payload_bytes;
+                    metrics.record_output_shed_pending(
+                        &output.output_metrics,
+                        1,
+                        evicted_payload_bytes,
+                        evicted_queue_bytes,
+                    );
+                    output
+                        .queue_shed_log
+                        .report(&output.name, 1, evicted_payload_bytes);
+                }
+            }
+            Err(()) => {
+                metrics.rollback_output_input(&output.output_metrics, payload_bytes, queue_bytes);
+                metrics.record_error(format!("output worker {} is unavailable", output.name));
+                warn!(output = %output.name, "output_worker_unavailable");
+            }
         }
     }
 }

@@ -11,7 +11,7 @@ use super::super::batch::{pending_batch_length, prepare_output_message};
 use super::super::publish::{BatchPublisher, PublishFailure, publish_once};
 use super::super::{
     DeduplicationCache, InboundMessage, OutputMessageContext, OutputPublishContext,
-    PendingByInterval, PendingMessage, pending_message_count,
+    PendingByInterval, PendingMessage, pending_message_count, pending_message_queue_bytes,
 };
 
 /// Number of pending output keys: conflated buckets plus the passthrough queue.
@@ -39,6 +39,7 @@ pub(in crate::service) fn enqueue_message(
             context.output_metrics,
             pending_message.raw_payload().len(),
             pending_message.payload.len(),
+            pending_message_queue_bytes(&pending_message),
         );
         return pending_key_count(pending, passthrough);
     }
@@ -47,9 +48,11 @@ pub(in crate::service) fn enqueue_message(
         if let Some(replaced) =
             interval_pending.insert(pending_message.output_channel.clone(), pending_message)
         {
-            context
-                .metrics
-                .record_output_conflated(context.output_metrics, replaced.payload.len());
+            context.metrics.record_output_conflated(
+                context.output_metrics,
+                replaced.payload.len(),
+                pending_message_queue_bytes(&replaced),
+            );
         }
     } else {
         passthrough.push_back(pending_message);
@@ -95,12 +98,13 @@ pub(super) fn settle_failed_batch(
     output_metrics: &OutputMetrics,
 ) -> usize {
     let payload_bytes = batch.iter().map(|message| message.payload.len()).sum();
+    let queue_bytes = batch.iter().map(pending_message_queue_bytes).sum();
     match failure {
         PublishFailure::NotSent(_) => {
-            metrics.record_output_dropped(output_metrics, batch.len(), payload_bytes)
+            metrics.record_output_dropped(output_metrics, batch.len(), payload_bytes, queue_bytes)
         }
         PublishFailure::Uncertain(_) => {
-            metrics.record_output_abandoned(output_metrics, batch.len(), payload_bytes)
+            metrics.record_output_abandoned(output_metrics, batch.len(), payload_bytes, queue_bytes)
         }
     }
     if interval_ms > 0 {
@@ -237,6 +241,7 @@ async fn publish_interval_bucket<P: BatchPublisher>(
                     context.output_metrics,
                     message.raw_payload().len(),
                     message.payload.len(),
+                    pending_message_queue_bytes(&message),
                 );
             }
         }
@@ -262,11 +267,13 @@ async fn publish_interval_bucket<P: BatchPublisher>(
             Ok(subscribers) => {
                 let message_count = batch.len();
                 let payload_bytes = batch.iter().map(|message| message.payload.len()).sum();
+                let queue_bytes = batch.iter().map(pending_message_queue_bytes).sum();
                 pending_keys = clear_published_batch(interval_ms, pending, passthrough, &batch);
                 context.metrics.record_output_flush(
                     context.output_metrics,
                     message_count,
                     payload_bytes,
+                    queue_bytes,
                 );
                 debug!(
                     output = context.name,
@@ -327,10 +334,14 @@ pub(in crate::service) async fn publish_passthrough_one<P: BatchPublisher>(
     match publish_once(publisher, &batch, false, context).await {
         Ok(subscribers) => {
             let payload_bytes = batch.iter().map(|message| message.payload.len()).sum();
+            let queue_bytes = batch.iter().map(pending_message_queue_bytes).sum();
             clear_published_batch(0, pending, passthrough, &batch);
-            context
-                .metrics
-                .record_output_flush(context.output_metrics, batch.len(), payload_bytes);
+            context.metrics.record_output_flush(
+                context.output_metrics,
+                batch.len(),
+                payload_bytes,
+                queue_bytes,
+            );
             debug!(
                 output = context.name,
                 messages = batch.len(),
@@ -379,10 +390,14 @@ pub(in crate::service) async fn publish_passthrough_batch<P: BatchPublisher>(
     match publish_once(publisher, &batch, atomic, context).await {
         Ok(subscribers) => {
             let payload_bytes = batch.iter().map(|message| message.payload.len()).sum();
+            let queue_bytes = batch.iter().map(pending_message_queue_bytes).sum();
             clear_published_batch(0, pending, passthrough, &batch);
-            context
-                .metrics
-                .record_output_flush(context.output_metrics, batch.len(), payload_bytes);
+            context.metrics.record_output_flush(
+                context.output_metrics,
+                batch.len(),
+                payload_bytes,
+                queue_bytes,
+            );
             debug!(
                 output = context.name,
                 messages = batch.len(),

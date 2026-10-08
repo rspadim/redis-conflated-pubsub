@@ -60,6 +60,10 @@ pub(super) fn json_schema() -> serde_json::Value {
         serde_json::json!("\\S");
     schema["$defs"]["OutputConfig"]["properties"]["profiles"]["propertyNames"]["pattern"] =
         serde_json::json!("\\S");
+    schema["$defs"]["OutputConfig"]["properties"]["queue_overflow_policy"]["default"] =
+        serde_json::json!("drop_newest");
+    schema["$defs"]["OutputConfig"]["properties"]["queue_max_age_ms"]["maximum"] =
+        serde_json::json!(MAX_RUNTIME_DURATION_MS as u64);
     schema["$defs"]["OutputConfig"]["properties"]["channel_policies"]["description"] = serde_json::json!(
         "Ordered explicit-match rules followed by exactly one default catch-all rule. The first explicit match wins; the default must be last and catches the rest without merging. JSON Schema checks that one default exists; runtime validation (`--check-config`) enforces its final position."
     );
