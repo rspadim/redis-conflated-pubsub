@@ -86,7 +86,7 @@ HOTPATH_KV_IMAGE=redis:7.4-alpine HOTPATH_KV_CLI=redis-cli docker compose -p hot
 docker compose -p hotpath-redis -f compose.hotpath.test.yml down --volumes --remove-orphans
 ```
 
-Publisher concurrency and volume can be varied with `HOTPATH_PUBLISHER_COUNT`, `HOTPATH_MESSAGES_PER_PUBLISHER`, and `HOTPATH_SERIAL_MESSAGES`. `HOTPATH_MODE=closed-loop` (default) waits for each input `PUBLISH` acknowledgement; `HOTPATH_MODE=open-loop` sends messages as non-atomic pipelines of `HOTPATH_PIPELINE` commands (default 64) over `HOTPATH_CONNECTIONS` connections per publisher (default 1), without waiting for individual acknowledgements, and uses an explicit 30 s response timeout. `HOTPATH_OUTPUTS` selects one or two outputs (default 2); the checked-in single-output config isolates one queue:
+Publisher concurrency and volume can be varied with `HOTPATH_PUBLISHER_COUNT`, `HOTPATH_MESSAGES_PER_PUBLISHER`, and `HOTPATH_SERIAL_MESSAGES`. `HOTPATH_MIN_NUMPAT` (default 1) sets the `PUBSUB NUMPAT` level the harness waits for before publishing, which is useful on shared servers where other clients already hold patterns. `HOTPATH_MODE=closed-loop` (default) waits for each input `PUBLISH` acknowledgement; `HOTPATH_MODE=open-loop` sends messages as non-atomic pipelines of `HOTPATH_PIPELINE` commands (default 64) over `HOTPATH_CONNECTIONS` connections per publisher (default 1), without waiting for individual acknowledgements, and uses an explicit 30 s response timeout. `HOTPATH_OUTPUTS` selects one or two outputs (default 2); the checked-in single-output config isolates one queue:
 
 ```sh
 HOTPATH_CONFIG_FILE=./tests/docker-hotpath-single-config.json HOTPATH_OUTPUTS=1 \

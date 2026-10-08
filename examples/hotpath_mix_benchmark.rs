@@ -111,6 +111,7 @@ where
 }
 
 async fn wait_for_input_subscription(host: &str) -> Result<()> {
+    let minimum: i64 = env_parse("HOTPATH_MIN_NUMPAT", 1);
     let client = redis::Client::open(format!("redis://{host}:6379/0"))?;
     let mut connection = client.get_multiplexed_async_connection().await?;
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -120,12 +121,14 @@ async fn wait_for_input_subscription(host: &str) -> Result<()> {
             .arg("NUMPAT")
             .query_async(&mut connection)
             .await?;
-        if observed == 1 {
+        if observed >= minimum {
             return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    anyhow::bail!("Bridge input pattern did not become active; NUMPAT={observed}")
+    anyhow::bail!(
+        "Bridge input pattern did not become active; NUMPAT={observed} (minimum {minimum})"
+    )
 }
 
 async fn publish(

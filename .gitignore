@@ -16,3 +16,4 @@ monitoring/config.json
 .env.*
 *.pem
 *.key
+tests/.tmp-*
