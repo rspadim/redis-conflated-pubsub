@@ -94,6 +94,14 @@ fn client_name_validation_rejects_whitespace_and_oversized_templates() {
     config.validate().unwrap();
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn system_hostname_falls_back_to_the_os_hostname_on_linux() {
+    let hostname = system_hostname().expect("Linux must expose an OS hostname");
+    assert!(!hostname.is_empty());
+    assert!(!hostname.chars().any(char::is_whitespace));
+}
+
 #[test]
 fn client_name_schema_exposes_default_and_length_limit() {
     let schema = AppConfig::json_schema();

@@ -215,6 +215,18 @@ fn deduplication_extras_default_to_disabled_and_unlimited() {
     let schema = AppConfig::json_schema();
     let properties = &schema["$defs"]["DeduplicationConfig"]["properties"];
     assert_eq!(properties["in_flight_suppression"]["default"], false);
+    assert!(
+        properties["ttl_ms"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("diff TTL")
+    );
+    assert!(
+        schema["$defs"]["DeduplicationGroup"]["properties"]["ttl_ms"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("diff TTL")
+    );
     assert_eq!(
         properties["max_entries"]["default"],
         serde_json::Value::Null

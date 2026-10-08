@@ -66,7 +66,7 @@ Interval timers keep their configured cadence; a worker that is busy publishing 
 
 ### Deduplication
 
-Per-channel deduplication compares the exact mapped output channel and the raw incoming payload bytes (including bytes a truncate policy removed). The cache remembers only the latest successfully or uncertainly published value, so `A→B→A` publishes all three while consecutive repeats are suppressed until the TTL expires. `ttl_ms` values `<= 0` disable deduplication and now default to `0`.
+Per-channel deduplication compares the exact mapped output channel and the raw incoming payload bytes (including bytes a truncate policy removed). It is a diff TTL: only consecutive identical payloads are suppressed, and only until the window expires; a changed payload always publishes and replaces the remembered value, so `A→B→A` publishes all three, and after the window the current value is re-sent even if unchanged. `ttl_ms` values `<= 0` disable deduplication and now default to `0`.
 
 Named `deduplication_groups` share one expiry across member channels: `round_ms` floors the Unix-epoch start, `restart_on_change` reanchors the deadline when a changed/new member publishes, and `max_members`/`max_cache_bytes` bound the cache. Suppressed duplicates and intermediate conflated values never renew the deadline.
 

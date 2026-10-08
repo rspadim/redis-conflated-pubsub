@@ -33,8 +33,9 @@ pub struct AppConfig {
     /// Template for the connection names reported in `CLIENT LIST` (`CLIENT SETNAME`
     /// and `CLIENT SETINFO`). Placeholders: `{version}` (program version), `{role}`
     /// (`i` or `o-<name>`), `{user}` (`USERDOMAIN\USERNAME` or `USER`/`LOGNAME`)
-    /// and `{host}` (`COMPUTERNAME`/`HOSTNAME`). Missing values fall back to `unknown`;
-    /// a template without `{role}` gets `-<role>` appended. An empty string disables naming.
+    /// and `{host}` (`COMPUTERNAME`/`HOSTNAME`, falling back to the OS hostname).
+    /// Missing values fall back to `unknown`; a template without `{role}` gets
+    /// `-<role>` appended. An empty string disables naming.
     #[serde(default)]
     #[schemars(length(max = 128))]
     pub client_name: Option<String>,
@@ -123,9 +124,26 @@ fn default_client_user() -> String {
     }
 }
 
-/// The first non-empty of `COMPUTERNAME`, `HOSTNAME`, falling back to `unknown`.
+/// The first non-empty of `COMPUTERNAME`, `HOSTNAME`; when neither is set
+/// (systemd does not export `HOSTNAME` to services) it falls back to the OS
+/// hostname and finally to `unknown`.
 fn default_client_host() -> String {
-    first_env(&["COMPUTERNAME", "HOSTNAME"]).unwrap_or_else(|| "unknown".to_owned())
+    first_env(&["COMPUTERNAME", "HOSTNAME"])
+        .or_else(system_hostname)
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+
+/// Reads the OS hostname from the files Linux exposes, returning `None` when
+/// they are missing or empty.
+fn system_hostname() -> Option<String> {
+    ["/proc/sys/kernel/hostname", "/etc/hostname"]
+        .iter()
+        .find_map(|path| {
+            std::fs::read_to_string(path)
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty() && !value.chars().any(char::is_whitespace))
+        })
 }
 
 pub fn same_pubsub_server(left: &RedisConfig, right: &RedisConfig) -> bool {
@@ -275,7 +293,13 @@ pub struct OutputConfig {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DeduplicationGroup {
-    /// Deduplication TTL in milliseconds; values <= 0 disable deduplication for group members.
+    /// Deduplication is a diff TTL in milliseconds shared by the group's channels: only
+    /// consecutive identical payloads are suppressed, and only until the shared window
+    /// expires; changed payloads always publish. Values <= 0 disable deduplication for
+    /// group members.
+    #[schemars(
+        description = "Deduplication is a diff TTL in milliseconds shared by the group's channels: only consecutive identical payloads are suppressed, and only until the shared window expires; changed payloads always publish. Values <= 0 disable deduplication for group members."
+    )]
     pub ttl_ms: i64,
     /// Round the shared start time down to floor(unix_epoch_ms / round_ms) * round_ms. Zero disables clock rounding; positive values must not exceed a positive TTL.
     #[schemars(
@@ -321,7 +345,7 @@ pub struct ChannelProfile {
     )]
     #[schemars(rename = "conflation.interval_ms")]
     pub conflation_interval_ms: Option<i64>,
-    /// Optional per-channel TTL override; nonpositive values disable deduplication.
+    /// Optional per-channel diff TTL override; nonpositive values disable deduplication.
     #[serde(
         rename = "deduplication.ttl_ms",
         skip_serializing_if = "Option::is_none"
@@ -432,11 +456,15 @@ impl ChannelPolicy {
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct DeduplicationConfig {
-    /// Suppress identical mapped output channels and raw incoming payload bytes for this many milliseconds; nonpositive values disable deduplication.
+    /// Diff TTL for duplicate suppression in milliseconds: only consecutive identical payloads
+    /// (same mapped output channel and raw incoming bytes) are suppressed, and only until the
+    /// window expires. A changed payload always publishes (subject to conflation) and replaces
+    /// the remembered value, so `A→B→A` publishes all three; after the window ends the current
+    /// value is sent again even if unchanged. Nonpositive values disable deduplication.
     #[serde(default = "default_deduplication_ttl_ms")]
     #[schemars(
         default = "default_deduplication_ttl_ms",
-        description = "Deduplication TTL in milliseconds; 0 by default and values <= 0 disable deduplication."
+        description = "Deduplication is a diff TTL: only consecutive identical payloads for the same mapped channel are suppressed, and only until this window expires. A changed payload always publishes (subject to conflation) and replaces the remembered value, so A→B→A publishes all three; after the window ends, the current value is sent again even if unchanged. 0 by default and values <= 0 disable deduplication."
     )]
     pub ttl_ms: i64,
     /// Treat a direct-mode batch as published as soon as it is dispatched instead of waiting for in-flight batches on the same channel or group to settle.

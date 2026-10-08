@@ -1,6 +1,6 @@
 [package]
 name = "redis-conflated-pubsub"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.88"
 description = "A Redis Pub/Sub fan-out bridge with per-output conflation"
