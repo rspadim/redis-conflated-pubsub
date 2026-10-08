@@ -12,6 +12,12 @@ pub(super) fn validate(config: &AppConfig) -> Result<()> {
     if config.logging.retention_days == 0 || config.logging.max_total_size_mb == 0 {
         bail!("logging retention and size limits must be greater than zero");
     }
+    if config.logging.prefix.is_empty() {
+        bail!("logging.prefix must not be empty");
+    }
+    if config.logging.prefix.contains(['/', '\\']) {
+        bail!("logging.prefix must not contain path separators");
+    }
     validate_echo_loop_guard(config)?;
     Ok(())
 }

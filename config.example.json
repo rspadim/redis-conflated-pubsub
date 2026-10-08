@@ -141,6 +141,8 @@
   "logging": {
     "directory": "logs",
     "level": "info",
+    "prefix": "redis-conflated-pubsub",
+    "enabled": true,
     "retention_days": 14,
     "max_total_size_mb": 1024
   }

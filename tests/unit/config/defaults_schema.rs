@@ -85,6 +85,47 @@ fn example_config_uses_one_input_and_named_outputs() {
             .unwrap()
             .filters_endpoint_enabled
     );
+    assert_eq!(config.logging.prefix, "redis-conflated-pubsub");
+    assert!(config.logging.enabled);
+}
+
+#[test]
+fn logging_prefix_defaults_and_must_not_be_empty_or_contain_path_separators() {
+    let mut config: AppConfig = serde_json::from_str(
+            r#"{
+                "input":{"redis":{"host":"input.example.net"},"subscriptions":[{"type":"subscribe","channel":"events"}]},
+                "outputs":{"custom-output":{"redis":{"host":"output.example.net"},"conflation":{"interval_ms":0}}},
+                "instance_lock":{"path":"lock"}
+            }"#,
+        )
+        .unwrap();
+    assert_eq!(config.logging.prefix, "redis-conflated-pubsub");
+    assert!(config.logging.enabled);
+    config.validate().unwrap();
+
+    config.logging.prefix = String::new();
+    let error = config.validate().unwrap_err();
+    assert!(error.to_string().contains("logging.prefix"));
+
+    config.logging.prefix = "nested/logs".to_owned();
+    let error = config.validate().unwrap_err();
+    assert!(error.to_string().contains("logging.prefix"));
+
+    config.logging.prefix = "nested\\logs".to_owned();
+    let error = config.validate().unwrap_err();
+    assert!(error.to_string().contains("logging.prefix"));
+
+    config.logging.prefix = "service-a".to_owned();
+    config.validate().unwrap();
+
+    let schema = AppConfig::json_schema();
+    let logging_properties = &schema["$defs"]["LoggingConfig"]["properties"];
+    assert_eq!(
+        logging_properties["prefix"]["default"],
+        "redis-conflated-pubsub"
+    );
+    assert_eq!(logging_properties["prefix"]["minLength"], 1);
+    assert_eq!(logging_properties["enabled"]["default"], true);
 }
 #[test]
 fn output_conflation_interval_accepts_signed_values() {

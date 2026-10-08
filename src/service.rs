@@ -442,6 +442,8 @@ fn reload_process_settings_unchanged(current: &AppConfig, next: &AppConfig) -> b
     current.instance_lock.path == next.instance_lock.path
         && current.logging.directory == next.logging.directory
         && current.logging.level == next.logging.level
+        && current.logging.prefix == next.logging.prefix
+        && current.logging.enabled == next.logging.enabled
         && current.logging.retention_days == next.logging.retention_days
         && current.logging.max_total_size_mb == next.logging.max_total_size_mb
 }

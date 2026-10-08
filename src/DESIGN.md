@@ -99,6 +99,7 @@ The status snapshot (`schema_version` 5) exposes global and per-output counters 
 | Deduplication group limits | `16384` members / `64 MiB` |
 | Filter/policy cache capacity (each) | `16384`, max `100000`, `0` disables |
 | `exclude_output_echoes`, `exclude_sentinel_pubsub` | `true` |
+| `logging.prefix` / `logging.enabled` | `redis-conflated-pubsub` / `true` |
 | Status update interval | `1000 ms` |
 
 Positive intervals and TTLs are capped at 365 days; group `round_ms` must not exceed a positive group TTL.

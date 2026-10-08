@@ -511,6 +511,21 @@ pub struct HttpStatusConfig {
 pub struct LoggingConfig {
     pub directory: PathBuf,
     pub level: String,
+    /// Base file name for this service's daily logs: `{prefix}.{YYYY-MM-DD}[.{n}]`.
+    #[serde(default = "default_log_prefix")]
+    #[schemars(
+        default = "default_log_prefix",
+        length(min = 1),
+        description = "Base file name for this service's daily logs: `{prefix}.{YYYY-MM-DD}[.{n}]`. Must not be empty or contain `/` or `\\`; runtime validation (`--check-config`) enforces this."
+    )]
+    pub prefix: String,
+    /// Enables file logging. When false, no log directory or files are created and no tracing subscriber is installed.
+    #[serde(default = "default_log_enabled")]
+    #[schemars(
+        default = "default_log_enabled",
+        description = "Enables file logging. When false, no log directory or files are created and no tracing subscriber is installed, so tracing events are discarded."
+    )]
+    pub enabled: bool,
     #[schemars(range(min = 1))]
     pub retention_days: u64,
     #[schemars(range(min = 1))]
@@ -522,6 +537,8 @@ impl Default for LoggingConfig {
         Self {
             directory: PathBuf::from("logs"),
             level: "info".to_owned(),
+            prefix: default_log_prefix(),
+            enabled: default_log_enabled(),
             retention_days: 14,
             max_total_size_mb: 1024,
         }
@@ -590,6 +607,14 @@ fn default_http_bind() -> String {
 
 fn default_http_port() -> u16 {
     9090
+}
+
+fn default_log_prefix() -> String {
+    "redis-conflated-pubsub".to_owned()
+}
+
+fn default_log_enabled() -> bool {
+    true
 }
 
 #[cfg(test)]

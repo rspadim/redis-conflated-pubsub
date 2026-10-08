@@ -12,6 +12,7 @@
 - Completed internal service/config module extraction and moved unit tests to `tests/unit/` without expanding public runtime APIs.
 - Reworked the documentation to describe the current release: `src/DESIGN.md` covers architecture, defaults and reference measurements, and the README/Docker guides no longer narrate previous development steps.
 - Added a loopback load test (`examples/loopback_benchmark.rs` plus `compose.loopback.test.yml`) with a minimal RESP2 broker in Rust, so the service can be measured without Redis or Valkey.
+- Added `logging.prefix` (base log-file name; lets several services share one directory without touching each other's files) and `logging.enabled` (default `true`; `false` disables file logging).
 
 ## 0.1.4 — 2026-10-06
 

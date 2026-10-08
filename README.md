@@ -143,12 +143,16 @@ This example maps `test-feed:alpha` to `db0:sub:test-feed:alpha:source` and `db1
   },
   "logging": {
     "directory": "logs",
+    "prefix": "redis-conflated-pubsub",
+    "enabled": true,
     "level": "info",
     "retention_days": 14,
     "max_total_size_mb": 1024
   }
 }
 ```
+
+`logging.prefix` names the log files (`{prefix}.{YYYY-MM-DD}[.{n}]`) and scopes retention cleanup, so several services can share one directory without touching each other's files. `logging.enabled: false` disables file logging entirely; the service still runs, and `--check-config` still validates the other fields.
 
 ## Profiles and channel policies
 

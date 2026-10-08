@@ -107,6 +107,7 @@ async fn run() -> Result<()> {
     }
 
     let _instance_lock = config.instance_lock.acquire()?;
+    // `None` when logging is disabled; tracing events then have no subscriber and are no-ops.
     let _logging_guard = logging::init(&config.logging)?;
     let mut shutdown_signals = service::ShutdownSignals::new()?;
     #[cfg(unix)]

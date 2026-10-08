@@ -13,9 +13,10 @@ use tracing_subscriber::{EnvFilter, fmt};
 
 use crate::config::LoggingConfig;
 
-const LOG_FILE_STEM: &str = "redis-conflated-pubsub.";
-
-pub fn init(config: &LoggingConfig) -> Result<WorkerGuard> {
+pub fn init(config: &LoggingConfig) -> Result<Option<WorkerGuard>> {
+    if !config.enabled {
+        return Ok(None);
+    }
     fs::create_dir_all(&config.directory).with_context(|| {
         format!(
             "failed to create log directory {}",
@@ -30,6 +31,7 @@ pub fn init(config: &LoggingConfig) -> Result<WorkerGuard> {
     let max_file_bytes = (max_total_bytes / config.retention_days.max(1)).max(1);
     let appender = SizeLimitedDailyWriter::new(
         &config.directory,
+        &config.prefix,
         max_file_bytes,
         config.retention_days,
         max_total_bytes,
@@ -55,22 +57,23 @@ pub fn init(config: &LoggingConfig) -> Result<WorkerGuard> {
         return Err(anyhow!("failed to initialize logging: {error}"));
     }
 
-    Ok(guard)
+    Ok(Some(guard))
 }
 
 pub fn cleanup(config: &LoggingConfig) -> Result<()> {
     cleanup_logs(
         &config.directory,
+        &config.prefix,
         config.retention_days,
         config.max_total_size_mb.saturating_mul(1024 * 1024),
     )
 }
 
-fn cleanup_logs(directory: &Path, retention_days: u64, max_bytes: u64) -> Result<()> {
+fn cleanup_logs(directory: &Path, prefix: &str, retention_days: u64, max_bytes: u64) -> Result<()> {
     let active_path = lock_active_log_path();
     let now = SystemTime::now();
     let max_age = std::time::Duration::from_secs(retention_days.saturating_mul(86_400));
-    let mut files = log_files(directory)?;
+    let mut files = log_files(directory, prefix)?;
 
     for (path, modified, _) in &files {
         if active_path.as_ref() != Some(path)
@@ -80,7 +83,7 @@ fn cleanup_logs(directory: &Path, retention_days: u64, max_bytes: u64) -> Result
         }
     }
 
-    files = log_files(directory)?;
+    files = log_files(directory, prefix)?;
     let mut total = files
         .iter()
         .fold(0_u64, |total, (_, _, size)| total.saturating_add(*size));
@@ -99,7 +102,7 @@ fn cleanup_logs(directory: &Path, retention_days: u64, max_bytes: u64) -> Result
     Ok(())
 }
 
-fn log_files(directory: &Path) -> Result<Vec<(PathBuf, SystemTime, u64)>> {
+fn log_files(directory: &Path, prefix: &str) -> Result<Vec<(PathBuf, SystemTime, u64)>> {
     let mut files = Vec::new();
     for entry in fs::read_dir(directory)
         .with_context(|| format!("failed to read log directory {}", directory.display()))?
@@ -109,7 +112,7 @@ fn log_files(directory: &Path) -> Result<Vec<(PathBuf, SystemTime, u64)>> {
         let Some(name) = name.to_str() else {
             continue;
         };
-        if parse_daily_log_name(name).is_none() || !entry.file_type()?.is_file() {
+        if parse_daily_log_name(name, prefix).is_none() || !entry.file_type()?.is_file() {
             continue;
         }
 
@@ -123,8 +126,8 @@ fn log_files(directory: &Path) -> Result<Vec<(PathBuf, SystemTime, u64)>> {
     Ok(files)
 }
 
-fn parse_daily_log_name(name: &str) -> Option<(&str, u64)> {
-    let suffix = name.strip_prefix(LOG_FILE_STEM)?;
+fn parse_daily_log_name<'a>(name: &'a str, prefix: &str) -> Option<(&'a str, u64)> {
+    let suffix = name.strip_prefix(prefix)?.strip_prefix('.')?;
     let (date, sequence) = match suffix.split_once('.') {
         Some((date, sequence)) => {
             let sequence = sequence.parse::<u64>().ok()?;
@@ -158,6 +161,7 @@ struct DailyLogFile {
 
 struct SizeLimitedDailyWriter {
     directory: PathBuf,
+    prefix: String,
     max_file_bytes: u64,
     retention_days: u64,
     max_total_bytes: u64,
@@ -167,14 +171,16 @@ struct SizeLimitedDailyWriter {
 impl SizeLimitedDailyWriter {
     fn new(
         directory: &Path,
+        prefix: &str,
         max_file_bytes: u64,
         retention_days: u64,
         max_total_bytes: u64,
     ) -> io::Result<Self> {
         let date = current_utc_date();
-        let current = open_current_daily_file(directory, &date, max_file_bytes.max(1))?;
+        let current = open_current_daily_file(directory, prefix, &date, max_file_bytes.max(1))?;
         Ok(Self {
             directory: directory.to_owned(),
+            prefix: prefix.to_owned(),
             max_file_bytes: max_file_bytes.max(1),
             retention_days,
             max_total_bytes,
@@ -199,8 +205,12 @@ impl Write for SizeLimitedDailyWriter {
             let mut rotated = false;
             let date = current_utc_date();
             if self.current.date != date {
-                self.current =
-                    open_current_daily_file(&self.directory, &date, self.max_file_bytes)?;
+                self.current = open_current_daily_file(
+                    &self.directory,
+                    &self.prefix,
+                    &date,
+                    self.max_file_bytes,
+                )?;
                 rotated = true;
             }
 
@@ -209,6 +219,7 @@ impl Write for SizeLimitedDailyWriter {
             {
                 self.current = create_next_daily_file(
                     &self.directory,
+                    &self.prefix,
                     &self.current.date,
                     self.current.sequence,
                 )?;
@@ -222,7 +233,12 @@ impl Write for SizeLimitedDailyWriter {
         };
 
         if rotated {
-            let _ = cleanup_logs(&self.directory, self.retention_days, self.max_total_bytes);
+            let _ = cleanup_logs(
+                &self.directory,
+                &self.prefix,
+                self.retention_days,
+                self.max_total_bytes,
+            );
         }
         Ok(buffer.len())
     }
@@ -243,15 +259,16 @@ impl Drop for SizeLimitedDailyWriter {
 
 fn open_current_daily_file(
     directory: &Path,
+    prefix: &str,
     date: &str,
     max_file_bytes: u64,
 ) -> io::Result<DailyLogFile> {
-    let mut segments = log_files(directory)
+    let mut segments = log_files(directory, prefix)
         .map_err(io::Error::other)?
         .into_iter()
         .filter_map(|(path, _, size)| {
             let name = path.file_name()?.to_str()?;
-            let (file_date, sequence) = parse_daily_log_name(name)?;
+            let (file_date, sequence) = parse_daily_log_name(name, prefix)?;
             (file_date == date).then_some((sequence, path, size))
         })
         .collect::<Vec<_>>();
@@ -277,23 +294,29 @@ fn open_current_daily_file(
             .ok_or_else(|| io::Error::other("daily log rotation sequence is exhausted"))?,
         None => 0,
     };
-    create_daily_file(directory, date, next_sequence)
+    create_daily_file(directory, prefix, date, next_sequence)
 }
 
 fn create_next_daily_file(
     directory: &Path,
+    prefix: &str,
     date: &str,
     current_sequence: u64,
 ) -> io::Result<DailyLogFile> {
     let sequence = current_sequence
         .checked_add(1)
         .ok_or_else(|| io::Error::other("daily log rotation sequence is exhausted"))?;
-    create_daily_file(directory, date, sequence)
+    create_daily_file(directory, prefix, date, sequence)
 }
 
-fn create_daily_file(directory: &Path, date: &str, mut sequence: u64) -> io::Result<DailyLogFile> {
+fn create_daily_file(
+    directory: &Path,
+    prefix: &str,
+    date: &str,
+    mut sequence: u64,
+) -> io::Result<DailyLogFile> {
     loop {
-        let path = daily_log_path(directory, date, sequence);
+        let path = daily_log_path(directory, prefix, date, sequence);
         match OpenOptions::new().append(true).create_new(true).open(&path) {
             Ok(file) => {
                 return Ok(DailyLogFile {
@@ -314,11 +337,11 @@ fn create_daily_file(directory: &Path, date: &str, mut sequence: u64) -> io::Res
     }
 }
 
-fn daily_log_path(directory: &Path, date: &str, sequence: u64) -> PathBuf {
+fn daily_log_path(directory: &Path, prefix: &str, date: &str, sequence: u64) -> PathBuf {
     let name = if sequence == 0 {
-        format!("{LOG_FILE_STEM}{date}")
+        format!("{prefix}.{date}")
     } else {
-        format!("{LOG_FILE_STEM}{date}.{sequence:06}")
+        format!("{prefix}.{date}.{sequence:06}")
     };
     directory.join(name)
 }

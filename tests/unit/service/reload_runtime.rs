@@ -29,6 +29,14 @@ fn reload_rejects_instance_lock_or_logging_changes() {
     assert!(!reload_process_settings_unchanged(&current, &next));
 
     next = current.clone();
+    next.logging.prefix = "other-service".to_owned();
+    assert!(!reload_process_settings_unchanged(&current, &next));
+
+    next = current.clone();
+    next.logging.enabled = false;
+    assert!(!reload_process_settings_unchanged(&current, &next));
+
+    next = current.clone();
     next.instance_lock.path.push(".new");
     assert!(!reload_process_settings_unchanged(&current, &next));
 }
