@@ -2,8 +2,9 @@ use std::{sync::Arc, sync::atomic::Ordering, time::Duration};
 
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
     config::{
@@ -92,6 +93,7 @@ pub(super) fn is_sentinel_pubsub_channel(channel: &str) -> bool {
 pub(super) async fn read_input(
     config: InputConfig,
     client: redis::Client,
+    input_client_name: Option<String>,
     mut senders: Vec<OutputSender>,
     echo_filters: Vec<OutputChannelFilter>,
     mut channel_filter: ChannelFilterSet,
@@ -105,7 +107,14 @@ pub(super) async fn read_input(
         _ => None,
     };
     loop {
-        match connect_input(&client, &config.redis, &config.subscriptions).await {
+        match connect_input(
+            &client,
+            &config.redis,
+            &config.subscriptions,
+            input_client_name.as_deref(),
+        )
+        .await
+        {
             Ok(mut pubsub) => {
                 retry_delay = Duration::from_millis(250);
                 info!("input_connected");
@@ -350,14 +359,18 @@ pub(super) fn map_output_channel(
     channel
 }
 
-async fn connect_input(
+pub(super) async fn connect_input(
     client: &redis::Client,
     redis_config: &RedisConfig,
     subscriptions: &[Subscription],
+    client_name: Option<&str>,
 ) -> Result<redis::aio::PubSub> {
-    let mut pubsub = time::timeout(redis_config.connect_timeout(), client.get_async_pubsub())
-        .await
-        .context("timed out connecting to input Redis")??;
+    let mut pubsub = match client_name {
+        Some(name) => connect_named_pubsub(client, redis_config, name).await?,
+        None => time::timeout(redis_config.connect_timeout(), client.get_async_pubsub())
+            .await
+            .context("timed out connecting to input Redis")??,
+    };
 
     for subscription in subscriptions {
         match subscription {
@@ -380,4 +393,87 @@ async fn connect_input(
         }
     }
     Ok(pubsub)
+}
+
+/// Opens the input Pub/Sub connection and sends `CLIENT SETNAME` before
+/// subscribing, which Redis keeps while the connection is subscribed (the same
+/// approach StackExchange.Redis clients use). redis-rs exposes no pre-subscribe
+/// hook, so this connects the plain TCP socket, authenticates, sets the name
+/// and hands the stream to [`redis::aio::PubSub::new`], which replays
+/// AUTH/SELECT/SETINFO. TLS inputs fall back to the unnamed connection.
+async fn connect_named_pubsub(
+    client: &redis::Client,
+    redis_config: &RedisConfig,
+    name: &str,
+) -> Result<redis::aio::PubSub> {
+    let info = client.get_connection_info();
+    let redis::ConnectionAddr::Tcp(host, port) = info.addr() else {
+        debug!("input_client_name_requires_plain_tcp");
+        return Ok(
+            time::timeout(redis_config.connect_timeout(), client.get_async_pubsub())
+                .await
+                .context("timed out connecting to input Redis")??,
+        );
+    };
+    let host = host.clone();
+    let port = *port;
+    let redis_info = info.redis_settings();
+    time::timeout(redis_config.connect_timeout(), async move {
+        let mut stream = tokio::net::TcpStream::connect((host.as_str(), port))
+            .await
+            .context("failed to connect to input Redis")?;
+        if let Some(variable) = &redis_config.password_env {
+            let password = std::env::var(variable)
+                .with_context(|| format!("environment variable {variable} is not set"))?;
+            let mut args: Vec<&[u8]> = vec![&b"AUTH"[..]];
+            if let Some(username) = redis_config.username.as_deref() {
+                args.push(username.as_bytes());
+            }
+            args.push(password.as_bytes());
+            write_redis_command(&mut stream, &args).await?;
+            let reply = read_redis_reply(&mut stream).await?;
+            anyhow::ensure!(reply.starts_with('+'), "input Redis AUTH failed: {reply}");
+        }
+        write_redis_command(
+            &mut stream,
+            &[&b"CLIENT"[..], &b"SETNAME"[..], name.as_bytes()],
+        )
+        .await?;
+        let reply = read_redis_reply(&mut stream).await?;
+        if !reply.starts_with('+') {
+            // Naming is best-effort: an ACL may forbid CLIENT SETNAME.
+            warn!(client_name = name, reply, "input_client_setname_failed");
+        }
+        redis::aio::PubSub::new(redis_info, stream)
+            .await
+            .context("failed to initialize input Pub/Sub connection")
+    })
+    .await
+    .context("timed out connecting to input Redis")?
+}
+
+async fn write_redis_command(stream: &mut tokio::net::TcpStream, args: &[&[u8]]) -> Result<()> {
+    let mut request = format!("*{}\r\n", args.len()).into_bytes();
+    for arg in args {
+        request.extend_from_slice(format!("${}\r\n", arg.len()).as_bytes());
+        request.extend_from_slice(arg);
+        request.extend_from_slice(b"\r\n");
+    }
+    stream.write_all(&request).await?;
+    stream.flush().await?;
+    Ok(())
+}
+
+async fn read_redis_reply(stream: &mut tokio::net::TcpStream) -> Result<String> {
+    let mut line = Vec::with_capacity(64);
+    let mut byte = [0u8; 1];
+    loop {
+        stream.read_exact(&mut byte).await?;
+        line.push(byte[0]);
+        if line.ends_with(b"\r\n") {
+            break;
+        }
+        anyhow::ensure!(line.len() <= 1024, "input Redis handshake reply too long");
+    }
+    Ok(String::from_utf8_lossy(&line).trim_end().to_owned())
 }

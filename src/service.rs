@@ -256,8 +256,9 @@ pub async fn run(
     #[cfg(not(unix))]
     let _ = config_path;
     metrics.clear_channel_cache_inspectors();
-    let input_client = match config.client_name_for("i") {
-        Some(lib_name) => config.input.redis.client_with_lib_name(&lib_name)?,
+    let input_client_name = config.client_name_for("i");
+    let input_client = match &input_client_name {
+        Some(lib_name) => config.input.redis.client_with_lib_name(lib_name)?,
         None => config.input.redis.client()?,
     };
     let filters_endpoint_enabled = config
@@ -432,6 +433,7 @@ pub async fn run(
         read_input(
             input_config,
             input_client,
+            input_client_name,
             input_senders,
             echo_filters,
             input_filter,

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.2 — unreleased
+
+- The Pub/Sub input now sets `CLIENT SETNAME` before subscribing (plain TCP): the service opens the socket itself, authenticates with the configured username/password and only then hands the stream to redis-rs, so `CLIENT LIST` shows the `-i` name on the input server the same way it already did for outputs. TLS inputs keep the previous unnamed connection.
+
 ## 0.2.1 — 2026-10-08
 
 - `client_name` `{host}` now falls back to the OS hostname (`/proc/sys/kernel/hostname`, then `/etc/hostname`) when `COMPUTERNAME`/`HOSTNAME` are unset, so names resolve to the machine instead of `unknown` under systemd.

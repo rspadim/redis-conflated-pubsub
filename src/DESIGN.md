@@ -100,7 +100,7 @@ The status snapshot (`schema_version` 5) exposes global and per-output counters 
 
 `GET /filters` optionally exposes full channel names and cache entries and is disabled by default because it reveals raw channel names; enabling it switches the filter/policy LRUs to shared, mutex-protected storage.
 
-`CLIENT LIST` identifies the service connections. Every connection (including the Pub/Sub input) sends `CLIENT SETINFO` (`lib-name` = resolved name, `lib-ver` = program version) through the redis-rs connection info; output connections also send `CLIENT SETNAME` when they connect (and reconnect), filling `name`. Names come from the `client_name` template (`{version}`, `{role}`, `{user}`, `{host}`). Naming is a best-effort cosmetic step: a forbidden `CLIENT SETNAME` logs one warning per connection and the output keeps publishing.
+`CLIENT LIST` identifies the service connections. Outputs send `CLIENT SETNAME` on every (re)connect; the Pub/Sub input does the same by connecting the plain TCP socket, authenticating (username/password when configured) and sending `CLIENT SETNAME` before subscribing, then handing the stream to `PubSub::new` — Redis keeps the connection name while subscribed. TLS inputs fall back to the unnamed connection because redis-rs keeps its TLS connector private. Names come from the `client_name` template (`{version}`, `{role}`, `{user}`, `{host}`). Naming is a best-effort cosmetic step: a forbidden `CLIENT SETNAME` logs one warning per connection and the connection keeps working.
 
 ## Configuration defaults
 

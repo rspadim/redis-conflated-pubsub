@@ -318,6 +318,8 @@ mod dedup;
 mod direct_lane_load;
 #[path = "service/filter_load.rs"]
 mod filter_load;
+#[path = "service/input_client_name.rs"]
+mod input_client_name;
 #[path = "service/input_filtering.rs"]
 mod input_filtering;
 #[path = "service/policy_schedules.rs"]
