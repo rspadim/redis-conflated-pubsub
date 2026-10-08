@@ -2,7 +2,7 @@
 
 A Rust relay that forwards Redis Pub/Sub messages to independently configured Redis outputs.
 
-Current release: **v0.2.0**. [Download a platform binary](https://github.com/rspadim/redis-conflated-pubsub/releases) or see the [developer build instructions](src/README.md).
+Current release: **v0.2.1**. [Download a platform binary](https://github.com/rspadim/redis-conflated-pubsub/releases) or see the [developer build instructions](src/README.md).
 
 ## Quick start
 

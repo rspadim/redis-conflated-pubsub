@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.1 — unreleased
+## 0.2.1 — 2026-10-08
 
 - `client_name` `{host}` now falls back to the OS hostname (`/proc/sys/kernel/hostname`, then `/etc/hostname`) when `COMPUTERNAME`/`HOSTNAME` are unset, so names resolve to the machine instead of `unknown` under systemd.
 - Documented `deduplication.ttl_ms` as a diff TTL in the README, DESIGN and generated JSON Schema: only consecutive identical payloads are suppressed, and only until the window expires; changed payloads always publish and the current value is re-sent after the window.
