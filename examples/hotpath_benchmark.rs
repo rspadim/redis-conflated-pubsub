@@ -212,6 +212,9 @@ async fn publisher_task_closed_loop(
 ) -> Result<()> {
     let client = redis::Client::open(format!("redis://{raw_host}:6379/0"))?;
     let mut connection = client.get_multiplexed_async_connection().await?;
+    // The client defaults to a 500 ms response timeout; a saturated pipeline
+    // can exceed it, so keep a generous explicit bound.
+    connection.set_response_timeout(Duration::from_secs(30));
     wait_for_barrier(&barrier).await;
     for sequence in 0..messages_per_publisher {
         let index = publisher_id * messages_per_publisher + sequence;
@@ -230,40 +233,57 @@ async fn publisher_task_open_loop(
     publisher_id: usize,
     messages_per_publisher: usize,
     pipeline: usize,
+    connections: usize,
     starts: Arc<Vec<AtomicU64>>,
     acks: Arc<Vec<AtomicU64>>,
     base: Instant,
     barrier: Arc<tokio::sync::Barrier>,
 ) -> Result<()> {
-    let client = redis::Client::open(format!("redis://{raw_host}:6379/0"))?;
-    let connection = client.get_multiplexed_async_connection().await?;
     wait_for_barrier(&barrier).await;
     let pipeline = pipeline.max(1);
-    let mut chunk_start = 0;
-    while chunk_start < messages_per_publisher {
-        let chunk_end = (chunk_start + pipeline).min(messages_per_publisher);
-        let futures = (chunk_start..chunk_end).map(|sequence| {
-            let mut handle = connection.clone();
-            let index = publisher_id * messages_per_publisher + sequence;
-            let starts = Arc::clone(&starts);
-            let acks = Arc::clone(&acks);
-            async move {
-                let payload = format!("{publisher_id}:{sequence}");
-                let channel = source_channel(index % HOT_CHANNEL_COUNT);
-                starts[index].store(base.elapsed().as_nanos() as u64, Ordering::SeqCst);
-                let result = redis::cmd("PUBLISH")
-                    .arg(channel)
-                    .arg(payload)
-                    .query_async::<i64>(&mut handle)
-                    .await;
-                acks[index].store(base.elapsed().as_nanos() as u64, Ordering::SeqCst);
-                result
-            }
-        });
-        for result in futures_util::future::join_all(futures).await {
-            result.context("input PUBLISH failed")?;
+    let connections = connections.max(1).min(messages_per_publisher);
+    let stripe = messages_per_publisher.div_ceil(connections);
+    let mut workers = Vec::with_capacity(connections);
+    for connection_index in 0..connections {
+        let stripe_start = (connection_index * stripe).min(messages_per_publisher);
+        let stripe_end = ((connection_index + 1) * stripe).min(messages_per_publisher);
+        if stripe_start >= stripe_end {
+            continue;
         }
-        chunk_start = chunk_end;
+        let raw_host = raw_host.clone();
+        let starts = Arc::clone(&starts);
+        let acks = Arc::clone(&acks);
+        workers.push(async move {
+            let client = redis::Client::open(format!("redis://{raw_host}:6379/0"))?;
+            let mut connection = client.get_multiplexed_async_connection().await?;
+            connection.set_response_timeout(Duration::from_secs(30));
+            let mut sequence = stripe_start;
+            while sequence < stripe_end {
+                let chunk_end = (sequence + pipeline).min(stripe_end);
+                let mut pipe = redis::pipe();
+                for current in sequence..chunk_end {
+                    let index = publisher_id * messages_per_publisher + current;
+                    starts[index].store(base.elapsed().as_nanos() as u64, Ordering::SeqCst);
+                    pipe.cmd("PUBLISH")
+                        .arg(source_channel(index % HOT_CHANNEL_COUNT))
+                        .arg(format!("{publisher_id}:{current}"));
+                }
+                let _: Vec<i64> = pipe
+                    .query_async(&mut connection)
+                    .await
+                    .context("input PUBLISH batch failed")?;
+                let ack = base.elapsed().as_nanos() as u64;
+                for current in sequence..chunk_end {
+                    let index = publisher_id * messages_per_publisher + current;
+                    acks[index].store(ack, Ordering::SeqCst);
+                }
+                sequence = chunk_end;
+            }
+            Ok::<(), anyhow::Error>(())
+        });
+    }
+    for result in futures_util::future::join_all(workers).await {
+        result?;
     }
     Ok(())
 }
@@ -371,6 +391,7 @@ async fn main() -> Result<()> {
     let messages_per_publisher: usize = env_parse("MESSAGES_PER_PUBLISHER", 2500);
     let serial_messages: usize = env_parse("SERIAL_MESSAGES", 250);
     let pipeline: usize = env_parse("HOTPATH_PIPELINE", 64);
+    let connections: usize = env_parse("HOTPATH_CONNECTIONS", 1);
     let open_loop =
         env::var("HOTPATH_MODE").is_ok_and(|mode| mode.eq_ignore_ascii_case("open-loop"));
     let raw_host = env::var("REDIS_HOST").unwrap_or_else(|_| "redis-raw".to_owned());
@@ -526,6 +547,7 @@ async fn main() -> Result<()> {
                 publisher_id,
                 messages_per_publisher,
                 pipeline,
+                connections,
                 Arc::clone(&starts),
                 Arc::clone(&acks),
                 base,
@@ -596,8 +618,9 @@ async fn main() -> Result<()> {
         "closed-loop"
     };
     println!(
-        "hotpath-e2e mode={mode} publishers={publisher_count} messages_per_publisher={messages_per_publisher} outputs=2 cache_mode=worker-local messages={total_messages} pipeline={} publish_phase_s={:.3} output_drain_s={:.3} elapsed_s={:.3} end_to_end_messages_per_second={:.0} input_ack_rtt_p50_p95_ms={:.3}/{:.3}",
+        "hotpath-e2e mode={mode} publishers={publisher_count} messages_per_publisher={messages_per_publisher} outputs=2 cache_mode=worker-local messages={total_messages} pipeline={} connections={} publish_phase_s={:.3} output_drain_s={:.3} elapsed_s={:.3} end_to_end_messages_per_second={:.0} input_ack_rtt_p50_p95_ms={:.3}/{:.3}",
         if open_loop { pipeline } else { 1 },
+        if open_loop { connections } else { 1 },
         publisher_phase.as_secs_f64(),
         drain.as_secs_f64(),
         wall_elapsed.as_secs_f64(),

@@ -77,7 +77,7 @@ HOTPATH_KV_IMAGE=redis:7.4-alpine HOTPATH_KV_CLI=redis-cli docker compose -p hot
 docker compose -p hotpath-redis -f compose.hotpath.test.yml down --volumes --remove-orphans
 ```
 
-Publisher concurrency and volume can be varied with `HOTPATH_PUBLISHER_COUNT`, `HOTPATH_MESSAGES_PER_PUBLISHER`, and `HOTPATH_SERIAL_MESSAGES`. `HOTPATH_MODE=closed-loop` (default) waits for each input `PUBLISH` acknowledgement; `HOTPATH_MODE=open-loop` pipelines `HOTPATH_PIPELINE` commands (default 64) per batch without waiting for individual acknowledgements. The config and workload use synthetic channel names and payload IDs; they do not replay raw production names or payloads.
+Publisher concurrency and volume can be varied with `HOTPATH_PUBLISHER_COUNT`, `HOTPATH_MESSAGES_PER_PUBLISHER`, and `HOTPATH_SERIAL_MESSAGES`. `HOTPATH_MODE=closed-loop` (default) waits for each input `PUBLISH` acknowledgement; `HOTPATH_MODE=open-loop` sends messages as non-atomic pipelines of `HOTPATH_PIPELINE` commands (default 64) over `HOTPATH_CONNECTIONS` connections per publisher (default 1), without waiting for individual acknowledgements, and uses an explicit 30 s response timeout. The config and workload use synthetic channel names and payload IDs; they do not replay raw production names or payloads.
 
 To measure a mixed policy set (about one-third direct, one-third 200 ms conflation, and one-third 200 ms conflation with a 5 s deduplication TTL), switch to the mixed config and select the Python driver through `HOTPATH_BENCHMARK_CMD`; `HOTPATH_KV_IMAGE`/`HOTPATH_KV_CLI` choose the engine as in the direct runs:
 
