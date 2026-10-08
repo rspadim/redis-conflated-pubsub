@@ -1,0 +1,35 @@
+# Extra Redis instance for the distinct-endpoints experiment. Merge with the
+# main hotpath stack:
+#   docker compose -f compose.hotpath.test.yml -f compose.hotpath.endpoints.yml up ...
+services:
+  redis-output-2:
+    image: ${HOTPATH_KV_IMAGE:-valkey/valkey:9.1.2-alpine}
+    command:
+      - "--save"
+      - ""
+      - "--appendonly"
+      - "no"
+      - "--maxmemory"
+      - "0"
+      - "--maxmemory-clients"
+      - "0"
+      - "--disable-thp"
+      - "yes"
+      - "--latency-tracking"
+      - "no"
+      - "--slowlog-log-slower-than"
+      - "-1"
+      - "--tcp-backlog"
+      - "4096"
+      - "--client-output-buffer-limit"
+      - "pubsub"
+      - "0"
+      - "0"
+      - "0"
+    networks:
+      hotpath: {}
+    healthcheck:
+      test: ["CMD-SHELL", "${HOTPATH_KV_CLI:-valkey-cli} ping | grep -q PONG"]
+      interval: 1s
+      timeout: 1s
+      retries: 30

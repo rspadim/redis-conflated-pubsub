@@ -129,6 +129,8 @@ Run with `cargo test --release --locked <name> -- --ignored --nocapture`:
 
 Local Docker/WSL runs with synthetic 64-channel names, worker-local caches and Pub/Sub-only server settings (no persistence, latency tracking, slowlog or subscriber buffer limits; `--save '' --appendonly no --disable-thp yes --latency-tracking no --slowlog-log-slower-than -1 --tcp-backlog 4096 --client-output-buffer-limit pubsub 0 0 0`). Treat them as indicative, not as controlled engine comparisons. The open-loop load generator uses non-atomic pipelines (one round trip per `HOTPATH_PIPELINE` commands), an explicit 30 s response timeout and `HOTPATH_CONNECTIONS` connections per publisher.
 
+Window sweep (`max_commands_per_exec`, single output, 640k, Redis 7.4.11, open-loop pipeline 128): 256 → 99.8k msg/s, publish phase 2.87 s, queue wait 1135 ms, publish RTT avg 2.0 ms; 1024 → 85.6k msg/s, 3.47 s, 701 ms, 10.5 ms; 4096 → 93.8k msg/s, 3.11 s, 378 ms, 28.0 ms. The rate does not scale with the in-flight window while the publish RTT grows proportionally, so the plateau is server-side PUBLISH processing, not the client window; a larger window only redistributes latency (less queue wait, more per-batch RTT).
+
 Closed-loop, Redis 7.4.11, 4×2,500: with two outputs serial p50 ~0.9 ms, e2e p50 ~1.0 ms / p95 ~1.7 ms / p99 ~3.0 ms and ACK RTT p50 0.30 ms; with one output serial p50 0.61 ms, e2e p50 0.64 ms / p95 0.97 ms / p99 1.43 ms and ACK RTT p50 0.24 ms.
 
 Open-loop saturated runs (all drained to zero pending). "Outputs" is `HOTPATH_OUTPUTS`; every input message is published once per output.
