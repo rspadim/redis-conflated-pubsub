@@ -38,7 +38,7 @@ use filter::ChannelFilterSet;
 #[cfg(test)]
 use input::{
     OutputChannelFilter, fan_out, is_sentinel_pubsub_channel, map_output_channel,
-    matching_subscription,
+    matching_subscription, single_subscription_match,
 };
 use input::{output_echo_filters, read_input};
 #[cfg(test)]
@@ -165,6 +165,10 @@ struct OutputSender {
     name: String,
     channel_prefix: String,
     channel_suffix: String,
+    /// Precomputed `(output_prefix + subscription_prefix, subscription_suffix +
+    /// output_suffix)` when exactly one subscription is configured, avoiding
+    /// per-message concatenation in `fan_out`.
+    combined_channel_mapping: Option<(String, String)>,
     channel_filter: ChannelFilterSet,
     sender: mpsc::UnboundedSender<QueuedInboundMessage>,
     output_metrics: Arc<OutputMetrics>,
@@ -282,6 +286,18 @@ pub async fn run(
     } else {
         Vec::new()
     };
+    // With a single subscription the mapping is fixed, so each output can
+    // precompute its combined prefix/suffix once instead of per message.
+    let single_subscription_mapping = match config.input.subscriptions.as_slice() {
+        [subscription] => {
+            let (subscription_prefix, subscription_suffix) = subscription.output_mapping();
+            Some((
+                subscription_prefix.to_owned(),
+                subscription_suffix.to_owned(),
+            ))
+        }
+        _ => None,
+    };
     let (input_senders, mut output_tasks) = output_setups
         .into_iter()
         .map(
@@ -301,6 +317,21 @@ pub async fn run(
                 let sender_name = name.clone();
                 let channel_prefix = output_config.channel_prefix.clone();
                 let channel_suffix = output_config.channel_suffix.clone();
+                let combined_channel_mapping = single_subscription_mapping.as_ref().map(
+                    |(subscription_prefix, subscription_suffix)| {
+                        let mut prefix = String::with_capacity(
+                            output_config.channel_prefix.len() + subscription_prefix.len(),
+                        );
+                        prefix.push_str(&output_config.channel_prefix);
+                        prefix.push_str(subscription_prefix);
+                        let mut suffix = String::with_capacity(
+                            subscription_suffix.len() + output_config.channel_suffix.len(),
+                        );
+                        suffix.push_str(subscription_suffix);
+                        suffix.push_str(&output_config.channel_suffix);
+                        (prefix, suffix)
+                    },
+                );
                 // The in-flight window defaults to the per-batch ceilings.
                 let max_in_flight_commands = output_config
                     .conflation
@@ -335,6 +366,7 @@ pub async fn run(
                         name: sender_name,
                         channel_prefix,
                         channel_suffix,
+                        combined_channel_mapping,
                         channel_filter,
                         sender,
                         output_metrics: Arc::clone(&output_metrics),

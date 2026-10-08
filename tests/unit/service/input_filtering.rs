@@ -137,6 +137,7 @@ fn fan_out_counts_inputs_per_output_without_multiplying_global_input() {
             name: "first".to_owned(),
             channel_prefix: "first:".to_owned(),
             channel_suffix: String::new(),
+            combined_channel_mapping: None,
             channel_filter: ChannelFilterSet::default(),
             sender: first_sender,
             output_metrics: Arc::clone(&first_metrics),
@@ -145,6 +146,7 @@ fn fan_out_counts_inputs_per_output_without_multiplying_global_input() {
             name: "second".to_owned(),
             channel_prefix: "second:".to_owned(),
             channel_suffix: String::new(),
+            combined_channel_mapping: None,
             channel_filter: ChannelFilterSet::default(),
             sender: second_sender,
             output_metrics: Arc::clone(&second_metrics),
@@ -153,6 +155,7 @@ fn fan_out_counts_inputs_per_output_without_multiplying_global_input() {
             name: "unavailable".to_owned(),
             channel_prefix: "unavailable:".to_owned(),
             channel_suffix: String::new(),
+            combined_channel_mapping: None,
             channel_filter: ChannelFilterSet::default(),
             sender: unavailable_sender,
             output_metrics: Arc::clone(&unavailable_metrics),
@@ -181,6 +184,57 @@ fn fan_out_counts_inputs_per_output_without_multiplying_global_input() {
         second_receiver.try_recv().unwrap().message.payload.as_ref(),
         b"abc"
     );
+}
+
+#[test]
+fn fan_out_uses_precomputed_single_subscription_mapping() {
+    let metrics = Metrics::new();
+    let output_metrics = metrics.register_output("only");
+    let (sender, mut receiver) = mpsc::unbounded_channel();
+    let mut senders = [OutputSender {
+        name: "only".to_owned(),
+        channel_prefix: "out:".to_owned(),
+        channel_suffix: ":dest".to_owned(),
+        combined_channel_mapping: Some(("out:sub:".to_owned(), ":source:dest".to_owned())),
+        channel_filter: ChannelFilterSet::default(),
+        sender,
+        output_metrics: Arc::clone(&output_metrics),
+    }];
+
+    fan_out(
+        &mut senders,
+        "sub:",
+        "events:42",
+        ":source",
+        b"payload",
+        &metrics,
+    );
+
+    assert_eq!(
+        receiver.try_recv().unwrap().message.output_channel,
+        "out:sub:events:42:source:dest"
+    );
+    assert_eq!(metrics.snapshot().outputs["only"].input_messages_total, 1);
+}
+
+#[test]
+fn single_subscription_fast_path_matches_without_the_reported_pattern() {
+    let subscribe = Subscription::Subscribe {
+        channel: "events".to_owned(),
+        output_prefix: String::new(),
+        output_suffix: String::new(),
+    };
+    assert!(single_subscription_match(&subscribe, "events", false).is_some());
+    assert!(single_subscription_match(&subscribe, "other", false).is_none());
+    assert!(single_subscription_match(&subscribe, "events", true).is_none());
+
+    let psubscribe = Subscription::Psubscribe {
+        pattern: "sensor:*".to_owned(),
+        output_prefix: String::new(),
+        output_suffix: String::new(),
+    };
+    assert!(single_subscription_match(&psubscribe, "sensor:alpha", true).is_some());
+    assert!(single_subscription_match(&psubscribe, "sensor:alpha", false).is_none());
 }
 
 #[test]
@@ -405,6 +459,7 @@ fn output_filter_sees_input_mapping_but_not_output_namespace() {
             name: "filtered".to_owned(),
             channel_prefix: "out:filtered:".to_owned(),
             channel_suffix: ":dest".to_owned(),
+            combined_channel_mapping: None,
             channel_filter: ChannelFilterSet::compile(
                 &[ChannelFilterRule {
                     glob: Some("input:events:*:source".to_owned()),
@@ -422,6 +477,7 @@ fn output_filter_sees_input_mapping_but_not_output_namespace() {
             name: "accepted".to_owned(),
             channel_prefix: "out:accepted:".to_owned(),
             channel_suffix: ":dest".to_owned(),
+            combined_channel_mapping: None,
             channel_filter: ChannelFilterSet::compile(
                 &[ChannelFilterRule {
                     glob: Some("out:accepted:input:events:*:source".to_owned()),

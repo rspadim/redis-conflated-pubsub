@@ -95,6 +95,12 @@ pub(super) async fn read_input(
     metrics: Arc<Metrics>,
 ) {
     let mut retry_delay = Duration::from_millis(250);
+    // With a single subscription the connection only delivers messages for it,
+    // so the pattern reported by Redis can be ignored without allocating.
+    let single_subscription = match config.subscriptions.as_slice() {
+        [subscription] => Some(subscription),
+        _ => None,
+    };
     loop {
         match connect_input(&client, &config.redis, &config.subscriptions).await {
             Ok(mut pubsub) => {
@@ -116,12 +122,22 @@ pub(super) async fn read_input(
                         continue;
                     }
 
-                    let pattern = message.get_pattern::<Option<String>>().unwrap_or(None);
-                    let Some(subscription) = matching_subscription(
-                        &config.subscriptions,
-                        source_channel,
-                        pattern.as_deref(),
-                    ) else {
+                    let subscription = match single_subscription {
+                        Some(subscription) => single_subscription_match(
+                            subscription,
+                            source_channel,
+                            message.from_pattern(),
+                        ),
+                        None => {
+                            let pattern = message.get_pattern::<Option<String>>().unwrap_or(None);
+                            matching_subscription(
+                                &config.subscriptions,
+                                source_channel,
+                                pattern.as_deref(),
+                            )
+                        }
+                    };
+                    let Some(subscription) = subscription else {
                         metrics
                             .record_error("input message did not match a configured subscription");
                         warn!("input_message_subscription_not_found");
@@ -185,6 +201,8 @@ pub(super) fn fan_out(
                 "",
             )
         });
+    // One timestamp per inbound message instead of one per output.
+    let enqueued_at = time::Instant::now();
 
     for output in senders.iter_mut() {
         if let Some(channel) = input_mapped_channel.as_deref()
@@ -192,13 +210,8 @@ pub(super) fn fan_out(
         {
             continue;
         }
-        let output_channel = map_output_channel(
-            &output.channel_prefix,
-            subscription_prefix,
-            source_channel,
-            subscription_suffix,
-            &output.channel_suffix,
-        );
+        let output_channel =
+            output.mapped_channel(subscription_prefix, source_channel, subscription_suffix);
         let payload_bytes = payload.len();
         metrics.record_output_input(&output.output_metrics, payload_bytes);
         if output
@@ -208,7 +221,7 @@ pub(super) fn fan_out(
                     output_channel,
                     payload: Arc::clone(&payload),
                 },
-                enqueued_at: time::Instant::now(),
+                enqueued_at,
             })
             .is_err()
         {
@@ -216,6 +229,51 @@ pub(super) fn fan_out(
             metrics.record_error(format!("output worker {} is unavailable", output.name));
             warn!(output = %output.name, "output_worker_unavailable");
         }
+    }
+}
+
+impl OutputSender {
+    /// Builds the mapped channel without a per-message `format!`, reusing the
+    /// precomputed single-subscription prefix/suffix when available.
+    fn mapped_channel(
+        &self,
+        subscription_prefix: &str,
+        source_channel: &str,
+        subscription_suffix: &str,
+    ) -> String {
+        if let Some((prefix, suffix)) = &self.combined_channel_mapping {
+            let mut channel =
+                String::with_capacity(prefix.len() + source_channel.len() + suffix.len());
+            channel.push_str(prefix);
+            channel.push_str(source_channel);
+            channel.push_str(suffix);
+            channel
+        } else {
+            map_output_channel(
+                &self.channel_prefix,
+                subscription_prefix,
+                source_channel,
+                subscription_suffix,
+                &self.channel_suffix,
+            )
+        }
+    }
+}
+
+/// Fast path for a connection with exactly one subscription: Redis only
+/// delivers messages for it, so the pattern reported by Redis is redundant and
+/// `get_pattern` (which allocates) can be skipped.
+pub(super) fn single_subscription_match<'a>(
+    subscription: &'a Subscription,
+    channel: &str,
+    from_pattern: bool,
+) -> Option<&'a Subscription> {
+    match subscription {
+        Subscription::Subscribe {
+            channel: configured,
+            ..
+        } => (!from_pattern && configured == channel).then_some(subscription),
+        Subscription::Psubscribe { .. } => from_pattern.then_some(subscription),
     }
 }
 
@@ -241,9 +299,19 @@ pub(super) fn map_output_channel(
     subscription_suffix: &str,
     output_suffix: &str,
 ) -> String {
-    format!(
-        "{output_prefix}{subscription_prefix}{source_channel}{subscription_suffix}{output_suffix}"
-    )
+    let mut channel = String::with_capacity(
+        output_prefix.len()
+            + subscription_prefix.len()
+            + source_channel.len()
+            + subscription_suffix.len()
+            + output_suffix.len(),
+    );
+    channel.push_str(output_prefix);
+    channel.push_str(subscription_prefix);
+    channel.push_str(source_channel);
+    channel.push_str(subscription_suffix);
+    channel.push_str(output_suffix);
+    channel
 }
 
 async fn connect_input(
