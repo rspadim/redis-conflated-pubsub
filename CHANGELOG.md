@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0 — unreleased
+## 0.2.0 — 2026-10-08
 
 - Changed the default `outputs.<name>.deduplication.ttl_ms` from 5000 to 0; deduplication is disabled unless an output, profile, or channel policy enables it explicitly.
 - Added ordered input/output channel filters with glob, regex, and literal (`raw`/`single`/`string`) selectors; the last matching rule wins and `filter_default` defaults to `accept`.
