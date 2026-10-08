@@ -1,8 +1,32 @@
+x-kv-flags: &kv-flags
+  # Pub/Sub-only benchmark stack: no persistence, no latency tracking, no
+  # subscriber output-buffer limits (benchmark only; do not copy to production).
+  - "--save"
+  - ""
+  - "--appendonly"
+  - "no"
+  - "--maxmemory"
+  - "0"
+  - "--maxmemory-clients"
+  - "0"
+  - "--disable-thp"
+  - "yes"
+  - "--latency-tracking"
+  - "no"
+  - "--slowlog-log-slower-than"
+  - "-1"
+  - "--tcp-backlog"
+  - "4096"
+  - "--client-output-buffer-limit"
+  - "pubsub"
+  - "0"
+  - "0"
+  - "0"
+
 services:
   redis-raw:
     image: ${HOTPATH_KV_IMAGE:-valkey/valkey:9.1.2-alpine}
-    # Pub/Sub only: no RDB snapshots or AOF writes in the benchmark stack.
-    command: ["--save", "", "--appendonly", "no"]
+    command: *kv-flags
     networks:
       hotpath: {}
     healthcheck:
@@ -13,7 +37,7 @@ services:
 
   redis-output:
     image: ${HOTPATH_KV_IMAGE:-valkey/valkey:9.1.2-alpine}
-    command: ["--save", "", "--appendonly", "no"]
+    command: *kv-flags
     networks:
       hotpath: {}
     healthcheck:
