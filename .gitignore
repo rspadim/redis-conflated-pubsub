@@ -11,3 +11,8 @@ __pycache__/
 *.py[cod]
 *.tmp
 redis-conflated-pubsub.lock
+monitoring/config.json
+.env
+.env.*
+*.pem
+*.key
