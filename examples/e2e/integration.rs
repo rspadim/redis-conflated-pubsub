@@ -1,13 +1,19 @@
-//! Rust replacements for `tests/docker_protocol_integration.py` and
-//! `tests/docker_fault_integration.py`.
+//! Rust replacements for the Python integration drivers:
+//! `tests/docker_protocol_integration.py`, `tests/docker_fault_integration.py`,
+//! `tests/docker_integration.py`, `tests/docker_filter_integration.py`,
+//! `tests/docker_oversize_integration.py` and `tests/random_publisher.py`.
 //!
-//! Both drivers use raw RESP connections so the assertions keep the exact
+//! Every driver uses raw RESP connections so the assertions keep the exact
 //! behaviour of the Python versions: the protocol driver measures byte-sized
-//! transactions through the counting proxy, and the fault driver observes the
-//! uncertain transaction produced when the fault proxy drops an `EXEC` reply.
+//! transactions through the counting proxy, the fault driver observes the
+//! uncertain transaction produced when the fault proxy drops an `EXEC` reply,
+//! and the Pub/Sub/filter/oversize drivers exercise mapping, ordered filters,
+//! conflation and Redis's query-buffer limit. The `random-publisher`
+//! subcommand publishes the deterministic feed/decoy workload that the
+//! Pub/Sub integration driver expects.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env, io,
     time::{Duration, Instant},
 };
@@ -26,6 +32,7 @@ use tokio::{
 };
 use url::Url;
 
+use crate::payloads;
 use crate::resp::{Frame, RespValue, encode_command, read_frame};
 
 type Message = (Vec<u8>, Vec<u8>);
@@ -1286,6 +1293,1039 @@ pub async fn run_fault_integration() -> Result<()> {
         "Docker fault-injection test passed: Redis executed the ambiguous chunk once \
          before its reply was dropped; the app did not retry it, counted uncertainty, \
          and successfully published a later chunk without pausing the output."
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Pub/Sub integration: feed mapping, cross-database outputs, conflation and
+// echo prevention
+// ---------------------------------------------------------------------------
+
+const INTEGRATION_OUTPUT0: &str = "output0";
+const INTEGRATION_OUTPUT1: &str = "output1";
+const INTEGRATION_FEED_PREFIX: &[u8] = b"mapped:";
+const INTEGRATION_FEED_SUFFIX: &[u8] = b":source";
+const INTEGRATION_OUTPUT0_PREFIX: &[u8] = b"db0:";
+const INTEGRATION_OUTPUT1_PREFIX: &[u8] = b"db1:";
+const INTEGRATION_OUTPUT0_PATTERN: &str = "db0:*";
+const INTEGRATION_OUTPUT1_PATTERN: &str = "db1:*";
+const INTEGRATION_START_CHANNEL: &str = "test-control:start";
+const INTEGRATION_DONE_CHANNEL: &str = "test-control:done";
+const INTEGRATION_INPUT_PATTERN_COUNT: i64 = 3;
+
+fn expect_subscription_ack(acknowledgement: &RespValue, expected: &[u8]) -> Result<()> {
+    ensure!(
+        acknowledgement
+            .as_array()
+            .and_then(|items| items.first())
+            .and_then(RespValue::as_bytes)
+            == Some(expected),
+        "unexpected subscription acknowledgement: {acknowledgement:?}"
+    );
+    Ok(())
+}
+
+/// Reads a plain `SUBSCRIBE` message (`["message", channel, payload]`).
+fn parse_subscribe_message(value: &RespValue) -> Option<Message> {
+    let items = match value {
+        RespValue::Array(Some(items)) | RespValue::Push(items) => items,
+        _ => return None,
+    };
+    if items.len() == 3 && items[0].as_bytes() == Some(b"message") {
+        Some((items[1].as_bytes()?.to_vec(), items[2].as_bytes()?.to_vec()))
+    } else {
+        None
+    }
+}
+
+fn integration_channel_prefix(output_prefix: &[u8]) -> Vec<u8> {
+    let mut prefix = output_prefix.to_vec();
+    prefix.extend_from_slice(INTEGRATION_FEED_PREFIX);
+    prefix
+}
+
+fn integration_channel(output_prefix: &[u8], source: &[u8]) -> Vec<u8> {
+    let mut channel = integration_channel_prefix(output_prefix);
+    channel.extend_from_slice(source);
+    channel.extend_from_slice(INTEGRATION_FEED_SUFFIX);
+    channel
+}
+
+fn source_from_output_channel(
+    channel: &[u8],
+    output_prefix: &[u8],
+    expected_sources: &[(String, Vec<u8>)],
+) -> Result<String> {
+    let composed_prefix = integration_channel_prefix(output_prefix);
+    ensure!(
+        channel.starts_with(&composed_prefix),
+        "unexpected output channel: {}",
+        String::from_utf8_lossy(channel)
+    );
+    ensure!(
+        channel.ends_with(INTEGRATION_FEED_SUFFIX),
+        "unexpected output channel: {}",
+        String::from_utf8_lossy(channel)
+    );
+    let source = &channel[composed_prefix.len()..channel.len() - INTEGRATION_FEED_SUFFIX.len()];
+    let source = std::str::from_utf8(source)
+        .context("output channel source is not UTF-8")?
+        .to_owned();
+    ensure!(
+        expected_sources
+            .iter()
+            .any(|(expected, _)| expected == &source),
+        "unexpected output source channel: {source}"
+    );
+    ensure!(
+        channel == integration_channel(output_prefix, source.as_bytes()).as_slice(),
+        "unexpected output channel: {}",
+        String::from_utf8_lossy(channel)
+    );
+    Ok(source)
+}
+
+fn set_latest(latest: &mut Vec<(String, Vec<u8>)>, source: String, payload: Vec<u8>) {
+    match latest.iter_mut().find(|(seen, _)| seen == &source) {
+        Some((_, value)) => *value = payload,
+        None => latest.push((source, payload)),
+    }
+}
+
+fn sorted_latest(mut latest: Vec<(String, Vec<u8>)>) -> Vec<(String, Vec<u8>)> {
+    latest.sort();
+    latest
+}
+
+fn latest_payload<'a>(latest: &'a [(String, Vec<u8>)], channel: &str) -> Result<&'a [u8]> {
+    latest
+        .iter()
+        .find(|(name, _)| name == channel)
+        .map(|(_, payload)| payload.as_slice())
+        .with_context(|| format!("missing latest payload for {channel}"))
+}
+
+fn integration_output_metrics(status: &Value) -> Result<&serde_json::Map<String, Value>> {
+    let outputs = status
+        .get("outputs")
+        .and_then(Value::as_object)
+        .context("status has no outputs object")?;
+    ensure!(
+        outputs.len() == 2
+            && outputs.contains_key(INTEGRATION_OUTPUT0)
+            && outputs.contains_key(INTEGRATION_OUTPUT1),
+        "unexpected outputs: {status}"
+    );
+    Ok(outputs)
+}
+
+async fn wait_for_random_publisher() -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut last_count = None;
+    while Instant::now() < deadline {
+        let mut connection = RedisConnection::connect(0).await?;
+        let reply = connection
+            .command(&[b"PUBSUB", b"NUMSUB", INTEGRATION_START_CHANNEL.as_bytes()])
+            .await?;
+        let count = reply
+            .as_array()
+            .and_then(|items| items.get(1))
+            .and_then(RespValue::as_int);
+        last_count = count;
+        drop(connection);
+        if count.is_some_and(|count| count >= 1) {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    bail!("The random publisher did not subscribe to its start channel; NUMSUB={last_count:?}")
+}
+
+struct IntegrationCollection {
+    output0: Vec<Message>,
+    output1: Vec<Message>,
+}
+
+async fn collect_integration_messages(
+    output0: &mut RedisConnection,
+    output1: &mut RedisConnection,
+    feed_publications: &[(String, Vec<u8>)],
+    expected_latest: &[(String, Vec<u8>)],
+) -> Result<IntegrationCollection> {
+    let mut output0_messages: Vec<Message> = Vec::new();
+    let mut output1_messages: Vec<Message> = Vec::new();
+    let mut latest: Vec<(String, Vec<u8>)> = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut quiet_deadline: Option<Instant> = None;
+    let mut quiet_completed = false;
+
+    while Instant::now() < deadline {
+        let wait = match quiet_deadline {
+            Some(quiet) if quiet <= Instant::now() => {
+                quiet_completed = true;
+                break;
+            }
+            Some(quiet) => quiet
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_millis(100)),
+            None => Duration::from_millis(100),
+        };
+        tokio::select! {
+            frame = output0.next(wait) => {
+                if let Some(frame) = frame? {
+                    let (channel, payload) = parse_pmessage(&frame.value)
+                        .with_context(|| format!("unexpected Redis Pub/Sub response: {:?}", frame.value))?;
+                    source_from_output_channel(&channel, INTEGRATION_OUTPUT0_PREFIX, expected_latest)?;
+                    output0_messages.push((channel, payload));
+                }
+            }
+            frame = output1.next(wait) => {
+                if let Some(frame) = frame? {
+                    let (channel, payload) = parse_pmessage(&frame.value)
+                        .with_context(|| format!("unexpected Redis Pub/Sub response: {:?}", frame.value))?;
+                    let source = source_from_output_channel(
+                        &channel,
+                        INTEGRATION_OUTPUT1_PREFIX,
+                        expected_latest,
+                    )?;
+                    output1_messages.push((channel, payload.clone()));
+                    set_latest(&mut latest, source, payload);
+                }
+            }
+        }
+        if quiet_deadline.is_none()
+            && output0_messages.len() >= feed_publications.len()
+            && latest.len() == expected_latest.len()
+        {
+            quiet_deadline = Some(Instant::now() + Duration::from_secs(1));
+        }
+    }
+    ensure!(
+        quiet_completed,
+        "outputs did not become quiet; a Pub/Sub loop may be active"
+    );
+
+    let expected_output0: Vec<Message> = feed_publications
+        .iter()
+        .map(|(channel, payload)| {
+            (
+                integration_channel(INTEGRATION_OUTPUT0_PREFIX, channel.as_bytes()),
+                payload.clone(),
+            )
+        })
+        .collect();
+    ensure!(
+        counter(&output0_messages) == counter(&expected_output0),
+        "actual_output0_count: {}, expected_output0_count: {}",
+        output0_messages.len(),
+        feed_publications.len()
+    );
+
+    let expected_output1: Vec<Message> = expected_latest
+        .iter()
+        .map(|(channel, payload)| {
+            (
+                integration_channel(INTEGRATION_OUTPUT1_PREFIX, channel.as_bytes()),
+                payload.clone(),
+            )
+        })
+        .collect();
+    ensure!(
+        output1_messages.len() == expected_latest.len(),
+        "actual_output1_count: {}, expected_output1_count: {}",
+        output1_messages.len(),
+        expected_latest.len()
+    );
+    ensure!(
+        counter(&output1_messages) == counter(&expected_output1),
+        "actual: {output1_messages:?}, expected: {expected_output1:?}"
+    );
+    ensure!(
+        sorted_latest(latest.clone()) == sorted_latest(expected_latest.to_vec()),
+        "actual: {latest:?}, expected: {expected_latest:?}"
+    );
+
+    Ok(IntegrationCollection {
+        output0: output0_messages,
+        output1: output1_messages,
+    })
+}
+
+async fn assert_outputs_quiet(
+    output0: &mut RedisConnection,
+    output1: &mut RedisConnection,
+    duration: Duration,
+) -> Result<()> {
+    let deadline = Instant::now() + duration;
+    while Instant::now() < deadline {
+        let wait = deadline.saturating_duration_since(Instant::now());
+        tokio::select! {
+            frame = output0.next(wait) => {
+                if let Some(frame) = frame? {
+                    bail!(
+                        "the service republished its own output or emitted a decoy: {:?}",
+                        frame.value
+                    );
+                }
+            }
+            frame = output1.next(wait) => {
+                if let Some(frame) = frame? {
+                    bail!(
+                        "the service republished its own output or emitted a decoy: {:?}",
+                        frame.value
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn assert_database_selection() -> Result<()> {
+    let mut connection = RedisConnection::connect(0).await?;
+    let reply = connection.command(&[b"CLIENT", b"LIST"]).await?;
+    let list = match reply {
+        RespValue::Bulk(Some(bytes)) | RespValue::Simple(bytes) => bytes,
+        other => bail!("unexpected CLIENT LIST reply: {other:?}"),
+    };
+
+    let mut database_zero = Vec::new();
+    let mut database_one = Vec::new();
+    for line in list.split(|&byte| byte == b'\n') {
+        let line = String::from_utf8_lossy(line);
+        let mut fields = BTreeMap::new();
+        for field in line.split_whitespace() {
+            if let Some((key, value)) = field.split_once('=') {
+                fields.insert(key.to_owned(), value.to_owned());
+            }
+        }
+        match fields.get("db").map(String::as_str) {
+            Some("0") => database_zero.push(fields),
+            Some("1") => database_one.push(fields),
+            _ => {}
+        }
+    }
+
+    ensure!(
+        database_zero
+            .iter()
+            .any(|client| client.get("flags").is_some_and(|flags| flags.contains('P'))),
+        "the service input Pub/Sub connection is not using DB0"
+    );
+    ensure!(
+        database_zero
+            .iter()
+            .filter(|client| !client.get("flags").is_some_and(|flags| flags.contains('P')))
+            .count()
+            >= 3,
+        "DB0 should have the random publisher and output0 connections"
+    );
+    ensure!(
+        database_one
+            .iter()
+            .any(|client| !client.get("flags").is_some_and(|flags| flags.contains('P'))),
+        "output1 is not using DB1"
+    );
+    Ok(())
+}
+
+pub async fn run_integration() -> Result<()> {
+    let status_url = env::var("STATUS_URL").unwrap_or_else(|_| "http://service:9090/".to_owned());
+    let workload = payloads::make_publications();
+    let feed_count = workload.feed.len();
+
+    let mut control = RedisConnection::connect(0).await?;
+    let acknowledgement = control
+        .command(&[b"SUBSCRIBE", INTEGRATION_DONE_CHANNEL.as_bytes()])
+        .await?;
+    expect_subscription_ack(&acknowledgement, b"subscribe")?;
+
+    wait_for_input_subscription(INTEGRATION_INPUT_PATTERN_COUNT).await?;
+    wait_for_random_publisher().await?;
+
+    let mut output0 = RedisConnection::connect(0).await?;
+    let acknowledgement = output0
+        .command(&[b"PSUBSCRIBE", INTEGRATION_OUTPUT0_PATTERN.as_bytes()])
+        .await?;
+    expect_subscription_ack(&acknowledgement, b"psubscribe")?;
+    let mut output1 = RedisConnection::connect(1).await?;
+    let acknowledgement = output1
+        .command(&[b"PSUBSCRIBE", INTEGRATION_OUTPUT1_PATTERN.as_bytes()])
+        .await?;
+    expect_subscription_ack(&acknowledgement, b"psubscribe")?;
+
+    // Let the initial output1 interval tick pass so the rapid feed burst fits one flush.
+    sleep(Duration::from_millis(350)).await;
+
+    let mut publisher = RedisConnection::connect(0).await?;
+    let start_count = publisher
+        .command(&[b"PUBLISH", INTEGRATION_START_CHANNEL.as_bytes(), b"publish"])
+        .await?
+        .as_int();
+    ensure!(
+        start_count.is_some_and(|count| count >= 1),
+        "PUBLISH {INTEGRATION_START_CHANNEL} subscriber count: {start_count:?}"
+    );
+
+    let done = control
+        .next(Duration::from_secs(10))
+        .await?
+        .context("timed out waiting for the random publisher to finish")?;
+    let done = parse_subscribe_message(&done.value)
+        .with_context(|| format!("unexpected control message: {:?}", done.value))?;
+    ensure!(
+        done.0 == INTEGRATION_DONE_CHANNEL.as_bytes() && done.1 == b"done",
+        "unexpected control message: {done:?}"
+    );
+
+    let channels: BTreeSet<&str> = workload
+        .feed
+        .iter()
+        .map(|(channel, _)| channel.as_str())
+        .collect();
+    let expected_channels: BTreeSet<&str> = payloads::FEED_CHANNELS.into_iter().collect();
+    ensure!(
+        channels == expected_channels,
+        "unexpected feed channels: {channels:?}"
+    );
+    ensure!(
+        feed_count > payloads::FEED_CHANNELS.len(),
+        "expected more than {} feed messages",
+        payloads::FEED_CHANNELS.len()
+    );
+    ensure!(latest_payload(&workload.latest, "test-feed:alpha")?.starts_with(b"\x00\xff"));
+    ensure!(latest_payload(&workload.latest, "test-feed:beta")?.starts_with(b"final-beta:"));
+    ensure!(latest_payload(&workload.latest, "test-feed:gamma")?.starts_with(b"\x00\xff"));
+
+    wait_for_status(
+        &status_url,
+        |current| {
+            current.get("state").and_then(Value::as_str) == Some("running")
+                && current.get("input_messages_total").and_then(Value::as_u64)
+                    == Some(feed_count as u64)
+        },
+        "all raw feed messages to reach the input",
+        Duration::from_secs(10),
+    )
+    .await?;
+
+    let collected =
+        collect_integration_messages(&mut output0, &mut output1, &workload.feed, &workload.latest)
+            .await?;
+    ensure!(collected.output0.len() == feed_count);
+    ensure!(collected.output1.len() == payloads::FEED_CHANNELS.len());
+
+    let output0_count = collected.output0.len() as u64;
+    let output1_count = collected.output1.len() as u64;
+    let excluded = output0_count + output1_count;
+    let status = wait_for_status(
+        &status_url,
+        |current| {
+            if current.get("state").and_then(Value::as_str) != Some("running")
+                || current.get("input_messages_total").and_then(Value::as_u64)
+                    != Some(feed_count as u64)
+                || current
+                    .get("excluded_messages_total")
+                    .and_then(Value::as_u64)
+                    != Some(excluded)
+                || current
+                    .get("dropped_messages_total")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
+                    != 0
+            {
+                return false;
+            }
+            let Some(outputs) = current.get("outputs").and_then(Value::as_object) else {
+                return false;
+            };
+            outputs
+                .get(INTEGRATION_OUTPUT0)
+                .and_then(|metrics| metrics.get("output_messages_total"))
+                .and_then(Value::as_u64)
+                == Some(output0_count)
+                && outputs
+                    .get(INTEGRATION_OUTPUT1)
+                    .and_then(|metrics| metrics.get("output_messages_total"))
+                    .and_then(Value::as_u64)
+                    == Some(output1_count)
+                && outputs
+                    .get(INTEGRATION_OUTPUT1)
+                    .and_then(|metrics| metrics.get("output_batches_total"))
+                    .and_then(Value::as_u64)
+                    .is_some_and(|batches| (2..=3).contains(&batches))
+                && outputs
+                    .get(INTEGRATION_OUTPUT1)
+                    .and_then(|metrics| metrics.get("publish_errors_total"))
+                    .and_then(Value::as_u64)
+                    == Some(0)
+        },
+        "the per-output counters and echo filtering to settle",
+        Duration::from_secs(10),
+    )
+    .await?;
+
+    let outputs = integration_output_metrics(&status)?;
+    let output0_metrics = &outputs[INTEGRATION_OUTPUT0];
+    let output1_metrics = &outputs[INTEGRATION_OUTPUT1];
+    ensure!(
+        metric_u64(output0_metrics, "output_batches_total").is_some_and(|batches| batches >= 1),
+        "{output0_metrics}"
+    );
+    ensure!(
+        metric_u64(output0_metrics, "conflated_messages_total") == Some(0),
+        "{output0_metrics}"
+    );
+    ensure!(
+        metric_u64(output0_metrics, "publish_errors_total") == Some(0),
+        "{output0_metrics}"
+    );
+    ensure!(
+        metric_u64(output1_metrics, "output_batches_total")
+            .is_some_and(|batches| (2..=3).contains(&batches)),
+        "{output1_metrics}"
+    );
+    ensure!(
+        metric_u64(output1_metrics, "conflated_messages_total")
+            == Some(feed_count as u64 - output1_count),
+        "{output1_metrics}"
+    );
+    ensure!(
+        metric_u64(output1_metrics, "publish_errors_total") == Some(0),
+        "{output1_metrics}"
+    );
+    ensure!(
+        metric_u64(&status, "input_messages_total") == Some(feed_count as u64),
+        "{status}"
+    );
+    ensure!(
+        metric_u64(&status, "excluded_messages_total") == Some(excluded),
+        "{status}"
+    );
+    ensure!(
+        metric_u64(&status, "dropped_messages_total").unwrap_or(0) == 0,
+        "{status}"
+    );
+
+    assert_database_selection().await?;
+
+    assert_outputs_quiet(&mut output0, &mut output1, Duration::from_secs(1)).await?;
+    let final_status = get_status(&status_url).await?;
+    ensure!(
+        metric_u64(&final_status, "input_messages_total") == Some(feed_count as u64),
+        "{final_status}"
+    );
+    ensure!(
+        metric_u64(&final_status, "excluded_messages_total") == Some(excluded),
+        "{final_status}"
+    );
+    ensure!(
+        metric_u64(&final_status, "dropped_messages_total").unwrap_or(0) == 0,
+        "{final_status}"
+    );
+    let final_outputs = integration_output_metrics(&final_status)?;
+    ensure!(
+        metric_u64(&final_outputs[INTEGRATION_OUTPUT0], "output_messages_total")
+            == Some(output0_count),
+        "{final_status}"
+    );
+    ensure!(
+        metric_u64(&final_outputs[INTEGRATION_OUTPUT1], "output_messages_total")
+            == Some(output1_count),
+        "{final_status}"
+    );
+    ensure!(
+        metric_u64(&final_outputs[INTEGRATION_OUTPUT1], "output_batches_total")
+            .is_some_and(|batches| (2..=3).contains(&batches)),
+        "{final_status}"
+    );
+    ensure!(
+        metric_u64(&final_outputs[INTEGRATION_OUTPUT1], "publish_errors_total") == Some(0),
+        "{final_status}"
+    );
+
+    drop((control, output0, output1, publisher));
+    println!(
+        "Docker Redis Pub/Sub test passed: DB0 feed -> output0 on DB0 forwarded every raw \
+         message; output1 on DB1 emitted the latest value per source across multiple \
+         byte/command-limited MULTI/EXEC batches; decoys and output echoes were ignored."
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Random publisher: deterministic feed/decoy workload for the integration
+// driver
+// ---------------------------------------------------------------------------
+
+pub async fn run_random_publisher() -> Result<()> {
+    let workload = payloads::make_publications();
+    let mut control = RedisConnection::connect(0).await?;
+    let acknowledgement = control
+        .command(&[b"SUBSCRIBE", INTEGRATION_START_CHANNEL.as_bytes()])
+        .await?;
+    expect_subscription_ack(&acknowledgement, b"subscribe")?;
+    let mut publisher = RedisConnection::connect(0).await?;
+
+    loop {
+        let Some(frame) = control.next(Duration::from_secs(3600)).await? else {
+            continue;
+        };
+        let message = parse_subscribe_message(&frame.value)
+            .with_context(|| format!("unexpected control message: {:?}", frame.value))?;
+        ensure!(
+            message.0 == INTEGRATION_START_CHANNEL.as_bytes() && message.1 == b"publish",
+            "unexpected control message: {message:?}"
+        );
+
+        let mut feed_counts = Vec::new();
+        let mut decoy_counts = Vec::new();
+        for publication in &workload.publications {
+            let count = publisher
+                .command(&[
+                    b"PUBLISH",
+                    publication.channel.as_bytes(),
+                    publication.payload.as_slice(),
+                ])
+                .await?
+                .as_int()
+                .context("PUBLISH did not return an integer")?;
+            match publication.kind {
+                payloads::PublicationKind::Feed => feed_counts.push(count),
+                payloads::PublicationKind::Decoy => decoy_counts.push(count),
+            }
+        }
+        ensure!(
+            feed_counts.iter().all(|count| *count >= 1),
+            "{feed_counts:?}"
+        );
+        ensure!(
+            decoy_counts == vec![0; payloads::DECOY_CHANNELS.len()],
+            "{decoy_counts:?}"
+        );
+
+        let count = publisher
+            .command(&[b"PUBLISH", INTEGRATION_DONE_CHANNEL.as_bytes(), b"done"])
+            .await?
+            .as_int();
+        ensure!(
+            count.is_some_and(|count| count >= 1),
+            "PUBLISH {INTEGRATION_DONE_CHANNEL} subscriber count: {count:?}"
+        );
+        println!(
+            "Published {} raw feed messages and {} decoys on Redis DB0.",
+            workload.feed.len(),
+            payloads::DECOY_CHANNELS.len()
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Filter integration: ordered input/output filters and cache snapshots
+// ---------------------------------------------------------------------------
+
+const FILTER_OUTPUTS: [(&str, u32, &[u8]); 2] = [
+    ("regex-filtered", 1, b"out-a:"),
+    ("glob-filtered", 2, b"out-b:"),
+];
+const FILTER_INPUT_PREFIX: &[u8] = b"mapped:";
+const FILTER_INPUT_SUFFIX: &[u8] = b":source";
+const FILTER_OUTPUT_SUFFIX: &[u8] = b":dest";
+
+fn filter_output_channel(output_prefix: &[u8], source: &[u8]) -> Vec<u8> {
+    let mut channel = output_prefix.to_vec();
+    channel.extend_from_slice(FILTER_INPUT_PREFIX);
+    channel.extend_from_slice(source);
+    channel.extend_from_slice(FILTER_INPUT_SUFFIX);
+    channel.extend_from_slice(FILTER_OUTPUT_SUFFIX);
+    channel
+}
+
+async fn open_filter_subscribers() -> Result<Vec<(&'static str, RedisConnection)>> {
+    let mut subscribers = Vec::new();
+    for (name, database, prefix) in FILTER_OUTPUTS {
+        let mut connection = RedisConnection::connect(database).await?;
+        let pattern = [prefix, b"*"].concat();
+        let acknowledgement = connection
+            .command(&[b"PSUBSCRIBE", pattern.as_slice()])
+            .await?;
+        expect_subscription_ack(&acknowledgement, b"psubscribe")?;
+        subscribers.push((name, connection));
+    }
+    Ok(subscribers)
+}
+
+async fn publish_channel(
+    connection: &mut RedisConnection,
+    channel: &[u8],
+    payload: &[u8],
+) -> Result<i64> {
+    connection
+        .command(&[b"PUBLISH", channel, payload])
+        .await?
+        .as_int()
+        .context("PUBLISH did not return an integer")
+}
+
+async fn receive_expected(connection: &mut RedisConnection, expected: &Message) -> Result<()> {
+    let frame = connection
+        .next(Duration::from_secs(5))
+        .await?
+        .context("timed out waiting for the expected output")?;
+    let actual = parse_pmessage(&frame.value)
+        .with_context(|| format!("unexpected Redis Pub/Sub response: {:?}", frame.value))?;
+    ensure!(
+        actual == *expected,
+        "expected: {expected:?}, actual: {actual:?}"
+    );
+    Ok(())
+}
+
+async fn receive_on(
+    subscribers: &mut [(&'static str, RedisConnection)],
+    name: &str,
+    expected: &Message,
+) -> Result<()> {
+    for (subscriber, connection) in subscribers.iter_mut() {
+        if *subscriber == name {
+            return receive_expected(connection, expected).await;
+        }
+    }
+    bail!("no subscriber named {name}")
+}
+
+async fn assert_quiet(connections: &mut [&mut RedisConnection], duration: Duration) -> Result<()> {
+    let deadline = Instant::now() + duration;
+    while Instant::now() < deadline {
+        let wait = deadline
+            .saturating_duration_since(Instant::now())
+            .min(Duration::from_millis(20));
+        for connection in connections.iter_mut() {
+            if let Some(frame) = connection.next(wait).await? {
+                bail!(
+                    "a denied filter unexpectedly published a message: {:?}",
+                    frame.value
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn filter_cache_entries(
+    caches: &serde_json::Map<String, Value>,
+    name: &str,
+) -> Result<BTreeMap<String, String>> {
+    let entries = caches
+        .get(name)
+        .and_then(|cache| cache.get("entries_most_recent_first"))
+        .and_then(Value::as_array)
+        .with_context(|| format!("missing cache entries for {name}"))?;
+    let mut map = BTreeMap::new();
+    for entry in entries {
+        let channel = entry
+            .get("channel")
+            .and_then(Value::as_str)
+            .context("cache entry has no channel")?;
+        let value = entry
+            .get("value")
+            .and_then(Value::as_str)
+            .context("cache entry has no value")?;
+        map.insert(channel.to_owned(), value.to_owned());
+    }
+    Ok(map)
+}
+
+fn filter_cache_capacity(caches: &serde_json::Map<String, Value>, name: &str) -> Option<u64> {
+    caches
+        .get(name)
+        .and_then(|cache| cache.get("capacity"))
+        .and_then(Value::as_u64)
+}
+
+async fn assert_filter_caches(status_url: &str) -> Result<()> {
+    let snapshot = get_status(status_url).await?;
+    let caches = snapshot
+        .get("caches")
+        .and_then(Value::as_object)
+        .context("filter snapshot has no caches object")?;
+
+    ensure!(
+        filter_cache_entries(caches, "input.filters")?
+            .get("feed:input-denied")
+            .map(String::as_str)
+            == Some("deny")
+    );
+    ensure!(filter_cache_capacity(caches, "input.filters") == Some(8));
+    ensure!(
+        filter_cache_entries(caches, "outputs.regex-filtered.filters")?
+            .get("mapped:feed:regex-denied:source")
+            .map(String::as_str)
+            == Some("deny")
+    );
+    ensure!(
+        filter_cache_entries(caches, "outputs.glob-filtered.filters")?
+            .get("mapped:feed:glob-denied:source")
+            .map(String::as_str)
+            == Some("deny")
+    );
+    ensure!(filter_cache_capacity(caches, "outputs.regex-filtered.filters") == Some(12));
+    ensure!(filter_cache_capacity(caches, "outputs.regex-filtered.channel_policies") == Some(5));
+    ensure!(filter_cache_capacity(caches, "outputs.glob-filtered.filters") == Some(10));
+    ensure!(filter_cache_capacity(caches, "outputs.glob-filtered.channel_policies") == Some(7));
+    ensure!(
+        caches.contains_key("outputs.regex-filtered.channel_policies")
+            && caches.contains_key("outputs.glob-filtered.channel_policies")
+    );
+    Ok(())
+}
+
+pub async fn run_filter_integration() -> Result<()> {
+    let status_url =
+        env::var("STATUS_URL").unwrap_or_else(|_| "http://service-filter:9090/filters".to_owned());
+    wait_for_input_subscription(1).await?;
+    let mut subscribers = open_filter_subscribers().await?;
+    let mut publisher = RedisConnection::connect(0).await?;
+    let payload: &[u8] = b"\x00filter-test:\xff";
+
+    ensure!(publish_channel(&mut publisher, b"feed:input-denied", payload).await? >= 0);
+    {
+        let mut connections: Vec<&mut RedisConnection> = subscribers
+            .iter_mut()
+            .map(|(_, connection)| connection)
+            .collect();
+        assert_quiet(&mut connections, Duration::from_millis(200)).await?;
+    }
+
+    ensure!(publish_channel(&mut publisher, b"feed:regex-denied", payload).await? >= 0);
+    let expected = (
+        filter_output_channel(b"out-b:", b"feed:regex-denied"),
+        payload.to_vec(),
+    );
+    receive_on(&mut subscribers, "glob-filtered", &expected).await?;
+    {
+        let mut connections: Vec<&mut RedisConnection> = subscribers
+            .iter_mut()
+            .filter(|(name, _)| *name == "regex-filtered")
+            .map(|(_, connection)| connection)
+            .collect();
+        assert_quiet(&mut connections, Duration::from_millis(200)).await?;
+    }
+
+    ensure!(publish_channel(&mut publisher, b"feed:glob-denied", payload).await? >= 0);
+    let expected = (
+        filter_output_channel(b"out-a:", b"feed:glob-denied"),
+        payload.to_vec(),
+    );
+    receive_on(&mut subscribers, "regex-filtered", &expected).await?;
+    {
+        let mut connections: Vec<&mut RedisConnection> = subscribers
+            .iter_mut()
+            .filter(|(name, _)| *name == "glob-filtered")
+            .map(|(_, connection)| connection)
+            .collect();
+        assert_quiet(&mut connections, Duration::from_millis(200)).await?;
+    }
+
+    // This deny pattern includes the output namespace. It must not match because
+    // output filters run before output.channel_prefix/channel_suffix are applied.
+    ensure!(publish_channel(&mut publisher, b"feed:output-prefix-leak", payload).await? >= 0);
+    for (name, _, prefix) in FILTER_OUTPUTS {
+        let expected = (
+            filter_output_channel(prefix, b"feed:output-prefix-leak"),
+            payload.to_vec(),
+        );
+        receive_on(&mut subscribers, name, &expected).await?;
+    }
+
+    ensure!(publish_channel(&mut publisher, b"feed:allowed", payload).await? >= 0);
+    for (name, _, prefix) in FILTER_OUTPUTS {
+        let expected = (
+            filter_output_channel(prefix, b"feed:allowed"),
+            payload.to_vec(),
+        );
+        receive_on(&mut subscribers, name, &expected).await?;
+    }
+    {
+        let mut connections: Vec<&mut RedisConnection> = subscribers
+            .iter_mut()
+            .map(|(_, connection)| connection)
+            .collect();
+        assert_quiet(&mut connections, Duration::from_millis(200)).await?;
+    }
+    assert_filter_caches(&status_url).await?;
+
+    drop((publisher, subscribers));
+    println!(
+        "Filter E2E passed: input glob deny ran on the source channel; output regex/glob \
+         denies ran after subscription mapping but before output namespaces; defaults accepted."
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Oversize integration: Redis query-buffer limit and failed-chunk handling
+// ---------------------------------------------------------------------------
+
+const OVERSIZE_OUTPUT_NAME: &str = "oversize-output";
+const OVERSIZE_OUTPUT_PATTERN: &str = "oversize-out:*";
+const OVERSIZE_SMALL_PAYLOAD_BYTES: usize = 200 * 1024;
+const OVERSIZE_LARGE_PAYLOAD_BYTES: usize = 600 * 1024;
+
+fn oversize_publications() -> Vec<(&'static str, Vec<u8>)> {
+    vec![
+        (
+            "oversize-feed:a-large",
+            vec![b'a'; OVERSIZE_LARGE_PAYLOAD_BYTES],
+        ),
+        (
+            "oversize-feed:b-large",
+            vec![b'b'; OVERSIZE_LARGE_PAYLOAD_BYTES],
+        ),
+        (
+            "oversize-feed:c-small",
+            vec![b'c'; OVERSIZE_SMALL_PAYLOAD_BYTES],
+        ),
+    ]
+}
+
+pub async fn run_oversize_integration() -> Result<()> {
+    let status_url =
+        env::var("STATUS_URL").unwrap_or_else(|_| "http://service-oversize:9090/".to_owned());
+    let publications = oversize_publications();
+
+    wait_for_input_subscription(1).await?;
+
+    let mut output = RedisConnection::connect(1).await?;
+    let acknowledgement = output
+        .command(&[b"PSUBSCRIBE", OVERSIZE_OUTPUT_PATTERN.as_bytes()])
+        .await?;
+    expect_subscription_ack(&acknowledgement, b"psubscribe")?;
+    sleep(Duration::from_millis(350)).await;
+
+    let mut publisher = RedisConnection::connect(0).await?;
+    let mut subscriber_counts = Vec::with_capacity(publications.len());
+    for (channel, payload) in &publications {
+        let count = publisher
+            .command(&[b"PUBLISH", channel.as_bytes(), payload.as_slice()])
+            .await?
+            .as_int();
+        subscriber_counts.push(count);
+    }
+    ensure!(
+        subscriber_counts
+            .iter()
+            .all(|count| count.is_some_and(|count| count >= 1)),
+        "{subscriber_counts:?}"
+    );
+
+    let status = wait_for_status(
+        &status_url,
+        |current| {
+            let Some(metrics) = nested(current, &["outputs", OVERSIZE_OUTPUT_NAME]) else {
+                return false;
+            };
+            current.get("state").and_then(Value::as_str) == Some("running")
+                && current.get("input_messages_total").and_then(Value::as_u64)
+                    == Some(publications.len() as u64)
+                && metric_u64(metrics, "input_messages_total") == Some(publications.len() as u64)
+                && metric_u64(metrics, "publish_errors_total") == Some(1)
+                && metric_u64(metrics, "publish_error_messages_total") == Some(2)
+                && metric_u64(metrics, "uncertain_transactions_total") == Some(1)
+                && metric_u64(metrics, "uncertain_messages_total") == Some(2)
+                && metric_u64(metrics, "output_messages_total") == Some(1)
+                && metric_u64(metrics, "pending_messages") == Some(0)
+                && metric_u64(metrics, "pending_payload_bytes") == Some(0)
+                && metric_u64(metrics, "pending_keys") == Some(0)
+        },
+        "the oversized chunk to fail and the following smaller chunk to publish",
+        Duration::from_secs(15),
+    )
+    .await?;
+
+    let expected_small_channel = b"oversize-out:oversize-feed:c-small".to_vec();
+    let expected_small_payload = publications[2].1.clone();
+    let mut received: Vec<Message> = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut quiet_deadline: Option<Instant> = None;
+    while Instant::now() < deadline {
+        if quiet_deadline.is_some_and(|quiet| quiet <= Instant::now()) {
+            break;
+        }
+        let wait = quiet_deadline
+            .map(|quiet| {
+                quiet
+                    .saturating_duration_since(Instant::now())
+                    .min(Duration::from_millis(100))
+            })
+            .unwrap_or(Duration::from_millis(100));
+        if let Some(frame) = output.next(wait).await? {
+            let message = parse_pmessage(&frame.value)
+                .with_context(|| format!("unexpected Redis Pub/Sub response: {:?}", frame.value))?;
+            received.push(message);
+            quiet_deadline = Some(Instant::now() + Duration::from_millis(500));
+        }
+    }
+    ensure!(
+        received == vec![(expected_small_channel, expected_small_payload)],
+        "actual: {received:?}"
+    );
+
+    let metrics = nested(&status, &["outputs", OVERSIZE_OUTPUT_NAME])
+        .context("missing oversize output metrics")?;
+    ensure!(
+        nested_str(metrics, &["state"]) == Some("running"),
+        "{metrics}"
+    );
+    ensure!(
+        metric_u64(metrics, "output_batches_total") == Some(1),
+        "{metrics}"
+    );
+    ensure!(
+        metric_u64(metrics, "output_payload_bytes_total")
+            == Some(OVERSIZE_SMALL_PAYLOAD_BYTES as u64),
+        "{metrics}"
+    );
+    ensure!(
+        metric_u64(metrics, "uncertain_transactions_total") == Some(1),
+        "{metrics}"
+    );
+    ensure!(
+        metric_u64(metrics, "uncertain_messages_total") == Some(2),
+        "{metrics}"
+    );
+    ensure!(
+        metric_u64(metrics, "publish_error_messages_total") == Some(2),
+        "{metrics}"
+    );
+    ensure!(
+        metric_u64(metrics, "dropped_messages_total") == Some(0),
+        "{metrics}"
+    );
+    ensure!(
+        metric_u64(metrics, "dropped_payload_bytes_total") == Some(0),
+        "{metrics}"
+    );
+    ensure!(
+        metric_u64(metrics, "truncated_messages_total") == Some(0),
+        "{metrics}"
+    );
+    ensure!(metric_u64(metrics, "pending_keys") == Some(0), "{metrics}");
+    ensure!(
+        metric_u64(metrics, "pending_payload_bytes") == Some(0),
+        "{metrics}"
+    );
+    ensure!(
+        metric_u64(&status, "input_messages_total") == Some(publications.len() as u64),
+        "{status}"
+    );
+
+    drop((publisher, output));
+    println!(
+        "Oversize Redis test passed: a 1 MiB client-query-buffer limit rejected the first \
+         >1 MiB MULTI/EXEC before publishing; the next smaller chunk was sent once, with no \
+         retry or output pause."
     );
     Ok(())
 }

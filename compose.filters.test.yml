@@ -25,12 +25,12 @@ services:
         condition: service_healthy
 
   filter-integration-test:
-    image: python:3.13-alpine
-    command: ["python", "/tests/docker_filter_integration.py"]
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e
+    command: ["redis-conflated-e2e", "filter-integration"]
     environment:
       REDIS_HOST: redis-filter
-    volumes:
-      - ./tests:/tests:ro
     networks:
       filters: {}
     depends_on:

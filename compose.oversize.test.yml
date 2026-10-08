@@ -26,14 +26,14 @@ services:
         condition: service_healthy
 
   oversize-integration-test:
-    image: python:3.13-alpine
-    command: ["python", "/tests/docker_oversize_integration.py"]
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e
+    command: ["redis-conflated-e2e", "oversize-integration"]
     environment:
       REDIS_HOST: redis-oversize
       REDIS_PORT: 6379
       STATUS_URL: http://service-oversize:9090/
-    volumes:
-      - ./tests:/tests:ro
     networks:
       oversize: {}
     depends_on:

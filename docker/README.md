@@ -27,16 +27,25 @@ Each test starts project-scoped Redis/service containers, networks, and volumes;
 
 ### Pub/Sub integration
 
-Checks channel mapping, cross-database Pub/Sub, conflation, binary payloads, echo prevention, and HTTP status:
+Checks channel mapping, cross-database Pub/Sub, conflation, binary payloads, echo prevention, and HTTP status. The random publisher and the driver are the `random-publisher` and `integration` subcommands of `examples/e2e.rs`, built into the `Dockerfile.e2e` image:
 
 ```sh
 docker compose -f compose.test.yml up --build --abort-on-container-exit --exit-code-from integration-test
 docker compose -f compose.test.yml down --volumes --remove-orphans
 ```
 
+### Filter pipeline
+
+Checks ordered input/output filters, the output namespace mapping, and the `GET /filters` cache snapshot with the `filter-integration` subcommand:
+
+```sh
+docker compose -f compose.filters.test.yml up --build --abort-on-container-exit --exit-code-from filter-integration-test
+docker compose -f compose.filters.test.yml down --volumes --remove-orphans
+```
+
 ### Oversized request handling
 
-Uses Redis's 1 MiB query-buffer limit and checks failed-chunk handling:
+Uses Redis's 1 MiB query-buffer limit and checks failed-chunk handling with the `oversize-integration` subcommand:
 
 ```sh
 docker compose -f compose.oversize.test.yml up --build --abort-on-container-exit --exit-code-from oversize-integration-test

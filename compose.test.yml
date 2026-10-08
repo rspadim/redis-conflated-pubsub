@@ -25,12 +25,12 @@ services:
         condition: service_healthy
 
   random-publisher:
-    image: python:3.13-alpine
-    command: ["python", "/tests/random_publisher.py"]
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e
+    command: ["redis-conflated-e2e", "random-publisher"]
     environment:
       REDIS_HOST: redis
-    volumes:
-      - ./tests:/tests:ro
     networks:
       e2e: {}
     depends_on:
@@ -38,13 +38,13 @@ services:
         condition: service_healthy
 
   integration-test:
-    image: python:3.13-alpine
-    command: ["python", "/tests/docker_integration.py"]
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e
+    command: ["redis-conflated-e2e", "integration"]
     environment:
       REDIS_HOST: redis
       STATUS_URL: http://service:9090/
-    volumes:
-      - ./tests:/tests:ro
     networks:
       e2e: {}
     depends_on:
