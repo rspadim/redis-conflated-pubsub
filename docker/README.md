@@ -63,7 +63,7 @@ docker compose -f compose.protocol.test.yml down --volumes --remove-orphans
 
 ### TTL and conflation
 
-Checks duplicate suppression, changed payloads, individual and grouped TTL expiry/rounding, policy selection, independent schedules, Unix `SIGHUP` config reload, direct publishing, and conflation with deduplication disabled:
+Checks duplicate suppression, changed payloads, individual and grouped TTL expiry/rounding, policy selection, independent schedules, Unix `SIGHUP` config reload, direct publishing, and conflation with deduplication disabled. The driver is the `ttl-integration` subcommand of `examples/e2e.rs`, built into the `Dockerfile.e2e` image; Compose shares the service PID namespace and the `ttl-state` volume so it can rewrite the seeded config, signal `SIGHUP`, and read the service logs:
 
 ```sh
 docker compose -f compose.ttl.test.yml up --build --abort-on-container-exit --exit-code-from ttl-integration-test

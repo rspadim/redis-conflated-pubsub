@@ -35,7 +35,7 @@ use url::Url;
 use crate::payloads;
 use crate::resp::{Frame, RespValue, encode_command, read_frame};
 
-type Message = (Vec<u8>, Vec<u8>);
+pub(crate) type Message = (Vec<u8>, Vec<u8>);
 type Publication = (&'static str, Vec<u8>);
 type Truncated = (Vec<u8>, usize);
 
@@ -103,13 +103,13 @@ impl Drop for FrameStream {
     }
 }
 
-struct RedisConnection {
+pub(crate) struct RedisConnection {
     writer: OwnedWriteHalf,
     frames: FrameStream,
 }
 
 impl RedisConnection {
-    async fn connect(database: u32) -> Result<Self> {
+    pub(crate) async fn connect(database: u32) -> Result<Self> {
         let host = env::var("REDIS_HOST").unwrap_or_else(|_| "redis".to_owned());
         let port = env_parse("REDIS_PORT", 6379)?;
         let stream = timeout(
@@ -150,7 +150,7 @@ impl RedisConnection {
             .context("failed to send command")
     }
 
-    async fn next(&mut self, wait: Duration) -> Result<Option<Frame>> {
+    pub(crate) async fn next(&mut self, wait: Duration) -> Result<Option<Frame>> {
         match self.frames.next(wait).await {
             None => Ok(None),
             Some(Ok(frame)) => Ok(Some(frame)),
@@ -158,7 +158,7 @@ impl RedisConnection {
         }
     }
 
-    async fn command(&mut self, arguments: &[&[u8]]) -> Result<RespValue> {
+    pub(crate) async fn command(&mut self, arguments: &[&[u8]]) -> Result<RespValue> {
         self.send(arguments).await?;
         let frame = self
             .next(Duration::from_secs(5))
@@ -173,7 +173,7 @@ impl RedisConnection {
     }
 }
 
-fn parse_pmessage(value: &RespValue) -> Option<Message> {
+pub(crate) fn parse_pmessage(value: &RespValue) -> Option<Message> {
     let items = match value {
         RespValue::Array(Some(items)) | RespValue::Push(items) => items,
         _ => return None,
@@ -222,7 +222,7 @@ fn metric_array<'a>(metrics: &'a Value, key: &str) -> Result<&'a Vec<Value>> {
 // HTTP status and proxy stats helpers
 // ---------------------------------------------------------------------------
 
-async fn get_status(url: &str) -> Result<Value> {
+pub(crate) async fn get_status(url: &str) -> Result<Value> {
     let parsed = Url::parse(url).context("invalid status URL")?;
     let host = parsed.host_str().context("status URL has no host")?;
     let port = parsed
@@ -265,7 +265,7 @@ async fn get_status(url: &str) -> Result<Value> {
     serde_json::from_slice(&response[header_end + 4..]).context("invalid status JSON")
 }
 
-async fn wait_for_status<F>(
+pub(crate) async fn wait_for_status<F>(
     status_url: &str,
     predicate: F,
     description: &str,
@@ -434,7 +434,7 @@ fn max_payload_for_transaction(channel: &[u8], target: usize, maximum: usize) ->
     best.context("the channel and RESP framing exceed the test target")
 }
 
-async fn wait_for_input_subscription(expected_patterns: i64) -> Result<()> {
+pub(crate) async fn wait_for_input_subscription(expected_patterns: i64) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut last_count = None;
     while Instant::now() < deadline {
@@ -1314,7 +1314,7 @@ const INTEGRATION_START_CHANNEL: &str = "test-control:start";
 const INTEGRATION_DONE_CHANNEL: &str = "test-control:done";
 const INTEGRATION_INPUT_PATTERN_COUNT: i64 = 3;
 
-fn expect_subscription_ack(acknowledgement: &RespValue, expected: &[u8]) -> Result<()> {
+pub(crate) fn expect_subscription_ack(acknowledgement: &RespValue, expected: &[u8]) -> Result<()> {
     ensure!(
         acknowledgement
             .as_array()

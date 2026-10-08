@@ -22,6 +22,8 @@
 //!   the query-buffer-limit E2E in `compose.oversize.test.yml`.
 //! * `random-publisher` — `tests/random_publisher.py`: publishes the
 //!   deterministic feed/decoy workload expected by `integration`.
+//! * `ttl-integration` — `tests/docker_ttl_integration.py`: drives the
+//!   TTL/profile/group/SIGHUP E2E in `compose.ttl.test.yml`.
 //!
 //! Built by `Dockerfile.e2e` and installed as `redis-conflated-e2e`.
 
@@ -33,6 +35,8 @@ mod payloads;
 mod proxy;
 #[path = "e2e/resp.rs"]
 mod resp;
+#[path = "e2e/ttl.rs"]
+mod ttl;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -65,6 +69,8 @@ enum Command {
     OversizeIntegration,
     /// Publish the deterministic feed/decoy workload for the integration E2E.
     RandomPublisher,
+    /// Drive the TTL/profile/group/SIGHUP E2E.
+    TtlIntegration,
 }
 
 #[tokio::main]
@@ -78,5 +84,6 @@ async fn main() -> Result<()> {
         Command::FilterIntegration => integration::run_filter_integration().await,
         Command::OversizeIntegration => integration::run_oversize_integration().await,
         Command::RandomPublisher => integration::run_random_publisher().await,
+        Command::TtlIntegration => ttl::run_ttl_integration().await,
     }
 }

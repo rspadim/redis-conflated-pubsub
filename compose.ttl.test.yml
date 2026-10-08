@@ -45,14 +45,15 @@ services:
 
   ttl-integration-test:
     pid: "service:service-ttl"
-    image: python:3.13-alpine
-    command: ["python", "/tests/docker_ttl_integration.py"]
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e
+    command: ["redis-conflated-e2e", "ttl-integration"]
     environment:
       REDIS_HOST: redis-ttl
       STATUS_URL: http://service-ttl:9090/
       SERVICE_PID: "1"
     volumes:
-      - ./tests:/tests:ro
       - ttl-state:/state
     networks:
       ttl: {}
