@@ -22,7 +22,7 @@
       "deduplication": {"ttl_ms": 0}
     },
     "out-b": {
-      "redis": {"host": "redis-output-2", "port": 6379, "database": 0},
+      "redis": {"host": "redis-output-2", "port": 6379, "database": 1},
       "channel_prefix": "replica-b:",
       "channel_suffix": ":dest",
       "filters": [{"glob": "mapped:hot:*:source", "action": "accept"}],

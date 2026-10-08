@@ -404,6 +404,7 @@ async fn main() -> Result<()> {
         env::var("HOTPATH_MODE").is_ok_and(|mode| mode.eq_ignore_ascii_case("open-loop"));
     let raw_host = env::var("REDIS_HOST").unwrap_or_else(|_| "redis-raw".to_owned());
     let output_host = env::var("OUTPUT_REDIS_HOST").unwrap_or_else(|_| "redis-output".to_owned());
+    let output_host_b = env::var("OUTPUT_REDIS_HOST_2").unwrap_or_else(|_| output_host.clone());
     let status_url =
         env::var("STATUS_URL").unwrap_or_else(|_| "http://service-hotpath:9090/".to_owned());
     let status_endpoint = status_url.trim_start_matches("http://");
@@ -430,7 +431,7 @@ async fn main() -> Result<()> {
 
     let raw_client = redis::Client::open(format!("redis://{raw_host}:6379/0"))?;
     let out_a_client = redis::Client::open(format!("redis://{output_host}:6379/0"))?;
-    let out_b_client = redis::Client::open(format!("redis://{output_host}:6379/1"))?;
+    let out_b_client = redis::Client::open(format!("redis://{output_host_b}:6379/1"))?;
     let mut writer = raw_client.get_multiplexed_async_connection().await?;
 
     // Warm-up and serial phases on dedicated subscriber connections; the
@@ -538,8 +539,13 @@ async fn main() -> Result<()> {
 
     let mut subscriber_handles = Vec::with_capacity(output_count);
     for (output_index, recv) in recv_sets.iter().enumerate() {
+        let host = if output_index == 0 {
+            output_host.clone()
+        } else {
+            output_host_b.clone()
+        };
         subscriber_handles.push(tokio::spawn(subscriber_task(
-            output_host.clone(),
+            host,
             output_index,
             messages_per_publisher,
             publisher_count,

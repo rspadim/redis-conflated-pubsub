@@ -71,6 +71,7 @@ services:
     environment:
       REDIS_HOST: redis-raw
       OUTPUT_REDIS_HOST: redis-output
+      OUTPUT_REDIS_HOST_2: ${OUTPUT_REDIS_HOST_2:-redis-output}
       STATUS_URL: http://service-hotpath:9090/
       PUBLISHER_COUNT: ${HOTPATH_PUBLISHER_COUNT:-4}
       MESSAGES_PER_PUBLISHER: ${HOTPATH_MESSAGES_PER_PUBLISHER:-2500}
