@@ -135,6 +135,10 @@ Positive intervals and TTLs are capped at 365 days; group `round_ms` must not ex
 
 The mixed-policy workload (direct / 200 ms conflation / 200 ms conflation + 5 s TTL) uses its own Rust harness, `examples/hotpath_mix_benchmark.rs` (built into the benchmark image), selected with `HOTPATH_BENCHMARK_CMD='hotpath-mix-benchmark'`. It warms one payload per cohort/channel, runs the three cohorts in the same ~33/33/34 split as before and prints per-output delivered/by-cohort counts, direct/conflate p50/p95 receive latencies, the service's conflated/deduplicated totals and the `GET /filters` cache snapshot.
 
+### Capture and replay
+
+`capture-feed` records read-only Pub/Sub metadata (relative timestamp, channel, payload length; never payload contents) to local NDJSON plus a summary, and `replay-feed` republishes a capture with the recorded inter-arrival timing (rate-scalable, pipelined, synthetic payloads of the recorded length, optional repeated payloads for TTL) so realistic feed shapes can drive load tests without exporting application data.
+
 ### Loopback (no Redis/Valkey)
 
 `examples/loopback_benchmark.rs` (built into the same benchmark image) implements a minimal RESP2 broker in Rust: it accepts the service's `PSUBSCRIBE`, feeds messages as fast as the socket accepts them, and acts as the output server that receives the service's `PUBLISH`/`MULTI/EXEC` commands, reporting end-to-end percentiles. `compose.loopback.test.yml` runs it with no Redis containers, isolating the service and the wire protocol. A 200k-message smoke measured ~35k msg/s with the broker process sharing CPU with the service; `LOOPBACK_MESSAGES`, `LOOPBACK_CHUNK`, `LOOPBACK_WARMUP` and `LOOPBACK_TIMEOUT_S` tune the run.

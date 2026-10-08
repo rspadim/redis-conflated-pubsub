@@ -16,10 +16,14 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
         --example hotpath_benchmark \
         --example hotpath_mix_benchmark \
         --example loopback_benchmark \
+        --example capture_feed \
+        --example replay_feed \
     && mkdir -p /out \
     && cp target/x86_64-unknown-linux-musl/release/examples/hotpath_benchmark /out/ \
     && cp target/x86_64-unknown-linux-musl/release/examples/hotpath_mix_benchmark /out/ \
-    && cp target/x86_64-unknown-linux-musl/release/examples/loopback_benchmark /out/
+    && cp target/x86_64-unknown-linux-musl/release/examples/loopback_benchmark /out/ \
+    && cp target/x86_64-unknown-linux-musl/release/examples/capture_feed /out/ \
+    && cp target/x86_64-unknown-linux-musl/release/examples/replay_feed /out/
 
 # Alpine keeps a shell for the `sh -c "exec ${HOTPATH_BENCHMARK_CMD}"` entrypoint.
 FROM alpine:3.22
@@ -27,3 +31,5 @@ FROM alpine:3.22
 COPY --from=builder /out/hotpath_benchmark /usr/local/bin/hotpath-benchmark
 COPY --from=builder /out/hotpath_mix_benchmark /usr/local/bin/hotpath-mix-benchmark
 COPY --from=builder /out/loopback_benchmark /usr/local/bin/loopback-benchmark
+COPY --from=builder /out/capture_feed /usr/local/bin/capture-feed
+COPY --from=builder /out/replay_feed /usr/local/bin/replay-feed

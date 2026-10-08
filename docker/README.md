@@ -118,6 +118,15 @@ docker compose -p loopback -f compose.loopback.test.yml down --volumes --remove-
 
 `LOOPBACK_MESSAGES` (default 1,000,000), `LOOPBACK_CHUNK`, `LOOPBACK_WARMUP` and `LOOPBACK_TIMEOUT_S` tune the run. The broker shares CPU with the service, so treat the numbers as service-plus-broker measurements.
 
+### Feed capture and replay
+
+The benchmark image also ships `capture-feed` and `replay-feed` for realistic load tests:
+
+- `capture-feed` subscribes read-only (`CAPTURE_PATTERN`, default `*`) and records per-message metadata only — relative timestamp, channel and payload length; payload contents are never written. It emits NDJSON plus a summary JSON (rate, per-second series, payload-size buckets, top channels) used to size the workload.
+- `replay-feed` republishes a capture to a target Redis (`REPLAY_HOST`/`REPLAY_PORT`) preserving the recorded inter-arrival timing, optionally rate-scaled (`REPLAY_RATE_SCALE`), with pipelined chunks (`REPLAY_PIPELINE`), synthetic payloads of the recorded length, and optional repeating payloads per channel (`REPLAY_DUP_EVERY`) to exercise TTL deduplication. With `REPLAY_STATUS_URL` it prints the service's queue/publish counters before and after the run.
+
+Capture files stay local (`tests/.tmp-*` is gitignored); only anonymized aggregates should ever be committed.
+
 ### Fault handling
 
 The `fault` profile in `compose.test.yml` exercises uncertain/failed publish handling through the Rust fault proxy and driver from `examples/e2e.rs` (built into the `Dockerfile.e2e` image):
