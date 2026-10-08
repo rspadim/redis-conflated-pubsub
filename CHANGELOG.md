@@ -13,6 +13,10 @@
 - Reworked the documentation to describe the current release: `src/DESIGN.md` covers architecture, defaults and reference measurements, and the README/Docker guides no longer narrate previous development steps.
 - Added a loopback load test (`examples/loopback_benchmark.rs` plus `compose.loopback.test.yml`) with a minimal RESP2 broker in Rust, so the service can be measured without Redis or Valkey.
 - Added `logging.prefix` (base log-file name; lets several services share one directory without touching each other's files) and `logging.enabled` (default `true`; `false` disables file logging).
+- Shared message payloads with `Arc<[u8]>`, cutting the per-output copies in fan-out, batching and deduplication.
+- Decoupled the direct in-flight window from the batch cap (`conflation.max_in_flight_commands` / `max_in_flight_bytes`) and made conflated flushes fair per turn (completions before timers, one chunk per bucket per turn).
+- Trimmed input-path allocations (precomputed channel mappings, a single enqueue timestamp, no pattern allocation for a single subscription) and coalesced worker metric updates per intake/settlement pass.
+- Sped up the loopback broker (reused RESP buffers, no per-message formatting, `LOOPBACK_PAYLOAD_BYTES`) and made the hotpath harness wait for subscriber readiness before releasing publishers.
 
 ## 0.1.4 — 2026-10-06
 

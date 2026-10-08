@@ -162,6 +162,7 @@ Other reference points:
 
 Observations:
 
+- Post-optimization runs (payload `Arc<[u8]>`, decoupled in-flight window, per-turn flush fairness, input/metric trims; Redis 7.4.11): single output 640k — **139.4k msg/s** with the default window and **149.1k** with `max_in_flight_commands: 1024`; two outputs 640k — **77.6k msg/s** (~155k publishes/s), identical whether both outputs share one server or use two; loopback (no Redis) 1M — **80k msg/s**. Before these changes the same runs measured 99.8k (single), 50.1k (two outputs) and 57.6k (split endpoints): single-output rose ~40%, two-output ~55%, and the split-endpoint advantage disappeared. The service publish path (~150–160k publishes/s) is now the limiter rather than the output server.
 - The end-to-end rate plateaus near 40–49k messages/s under this load generator; larger bursts raise the median delay roughly in proportion to the backlog rather than lowering throughput.
 - Output lanes keep up: publish RTT stays at 1.7–4.4 ms even at 640k, and pending ends at zero. The term that grows at 640k is the intake queue wait (fan-out to worker acceptance), so the single input reader plus per-worker intake is the next concurrency lever.
 - Redis and Valkey were close at 320k; at 640k the Valkey sample showed 3–6× higher queue wait and ~2.6× peak pending. This is one sample per engine, not a controlled comparison.
