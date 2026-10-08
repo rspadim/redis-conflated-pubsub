@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.2 — unreleased
+## 0.2.2 — 2026-10-08
 
 - The Pub/Sub input now sets `CLIENT SETNAME` before subscribing (plain TCP): the service opens the socket itself, authenticates with the configured username/password and only then hands the stream to redis-rs, so `CLIENT LIST` shows the `-i` name on the input server the same way it already did for outputs. TLS inputs keep the previous unnamed connection.
 

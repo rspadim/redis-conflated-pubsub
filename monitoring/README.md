@@ -1,10 +1,10 @@
-# Zabbix monitoring (v0.2.1)
+# Zabbix monitoring (v0.2.2)
 
 This guide configures the Python 3 collector and the Zabbix 5.0 or 7.0 template. The collector reads the service status over HTTP and sends trapper-item values with `zabbix_sender`; it uses only Python standard-library modules.
 
 ## Prerequisites
 
-- Redis Conflated Pub/Sub v0.2.1 running with its HTTP status listener enabled. The project configuration example uses:
+- Redis Conflated Pub/Sub v0.2.2 running with its HTTP status listener enabled. The project configuration example uses:
 
   ```json
   "status": {
@@ -56,7 +56,7 @@ The status endpoint is `GET /`; configure `base_url` with the HTTP(S) origin, su
 | Status field or derived value | Zabbix key suffix | Type / meaning |
 | --- | --- | --- |
 | Derived from `state` | `health` | Unsigned integer: `1` when `state` is `running`, otherwise `0` |
-| `schema_version` | `schema_version` | Unsigned integer; remains `5` in v0.2.1 |
+| `schema_version` | `schema_version` | Unsigned integer; remains `5` in v0.2.2 |
 | `state` | `state` | Text service state |
 | `updated_at`, `started_at`, `last_input_at`, `last_flush_at` | Same field name | Text timestamps; null is sent as `never` |
 | `last_error` | `last_error` | Text; null is sent as `none` |
