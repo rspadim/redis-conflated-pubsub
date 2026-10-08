@@ -23,7 +23,7 @@ This example maps `test-feed:alpha` to `db0:sub:test-feed:alpha:source` and `db1
 {
   "max_bytes_per_exec": 4194304,
   "oversized_message_policy": "send",
-  "client_name": "ConflatedPS-{version}",
+  "client_name": "ConflatedPS-{version}-{role}::{user}::{host}",
   "input": {
     "redis": {
       "host": "localhost",
@@ -239,7 +239,7 @@ This example forwards `test-feed:*` from a remote Redis input to local Redis at 
 {
   "max_bytes_per_exec": 4194304,
   "oversized_message_policy": "send",
-  "client_name": "ConflatedPS-{version}",
+  "client_name": "ConflatedPS-{version}-{role}::{user}::{host}",
   "input": {
     "redis": {
       "host": "redis.example.net",
@@ -297,7 +297,7 @@ redis-cli PUBLISH 'test-feed:alpha' 'hello'
 
 The optional `status.http` serves per-output metrics at `GET /`; check it with `curl http://127.0.0.1:9090/`. `GET /filters` exposes the full channel names and current filter/policy cache entries; it is disabled by default. Enable it explicitly with `status.http.filters_endpoint_enabled: true` only on a trusted/private interface because channel names can be sensitive. `status.path` writes an atomic JSON snapshot instead. See [Zabbix monitoring](monitoring/README.md) for the collector and templates.
 
-Service connections identify themselves in `CLIENT LIST`. Every connection (including the Pub/Sub input) sends `CLIENT SETINFO` so `lib-name` shows the resolved name and `lib-ver` the program version; output connections additionally send `CLIENT SETNAME`, which fills `name`. Resolved names append the role to the `client_name` template: `-input`, `-output-<output>`. `{version}` in the template expands to the program version (default `ConflatedPS-{version}`); an empty `client_name` disables naming.
+Service connections identify themselves in `CLIENT LIST`. Every connection (including the Pub/Sub input) sends `CLIENT SETINFO` so `lib-name` shows the resolved name and `lib-ver` the program version; output connections additionally send `CLIENT SETNAME`, which fills `name`. The `client_name` template defaults to `ConflatedPS-{version}-{role}::{user}::{host}`: `{version}` is the program version, `{role}` is `input` or `output-<output>`, `{user}` is `USERDOMAIN\USERNAME` on Windows or `USER`/`LOGNAME` elsewhere, and `{host}` is `COMPUTERNAME`/`HOSTNAME`; missing values fall back to `unknown`. A template without `{role}` gets `-<role>` appended, and an empty `client_name` disables naming.
 
 ## Observed reduction
 

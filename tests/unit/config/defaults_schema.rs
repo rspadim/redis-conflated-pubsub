@@ -52,7 +52,10 @@ fn example_config_uses_one_input_and_named_outputs() {
         config.oversized_message_policy,
         OversizedMessagePolicy::Send
     );
-    assert_eq!(config.client_name.as_deref(), Some("ConflatedPS-{version}"));
+    assert_eq!(
+        config.client_name.as_deref(),
+        Some("ConflatedPS-{version}-{role}::{user}::{host}")
+    );
     assert_eq!(
         config.outputs["output0"].conflation.max_bytes_per_exec,
         None

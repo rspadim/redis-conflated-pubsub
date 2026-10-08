@@ -100,7 +100,7 @@ The status snapshot (`schema_version` 5) exposes global and per-output counters 
 
 `GET /filters` optionally exposes full channel names and cache entries and is disabled by default because it reveals raw channel names; enabling it switches the filter/policy LRUs to shared, mutex-protected storage.
 
-`CLIENT LIST` identifies the service connections. Every connection (including the Pub/Sub input) sends `CLIENT SETINFO` (`lib-name` = resolved name, `lib-ver` = program version) through the redis-rs connection info; output connections also send `CLIENT SETNAME` when they connect (and reconnect), filling `name`. Naming is a best-effort cosmetic step: a forbidden `CLIENT SETNAME` logs one warning per connection and the output keeps publishing.
+`CLIENT LIST` identifies the service connections. Every connection (including the Pub/Sub input) sends `CLIENT SETINFO` (`lib-name` = resolved name, `lib-ver` = program version) through the redis-rs connection info; output connections also send `CLIENT SETNAME` when they connect (and reconnect), filling `name`. Names come from the `client_name` template (`{version}`, `{role}`, `{user}`, `{host}`). Naming is a best-effort cosmetic step: a forbidden `CLIENT SETNAME` logs one warning per connection and the output keeps publishing.
 
 ## Configuration defaults
 
@@ -118,7 +118,7 @@ The status snapshot (`schema_version` 5) exposes global and per-output counters 
 | Filter/policy cache capacity (each) | `16384`, max `100000`, `0` disables |
 | `exclude_output_echoes`, `exclude_sentinel_pubsub` | `true` |
 | `logging.prefix` / `logging.enabled` | `redis-conflated-pubsub` / `true` |
-| `client_name` template | `ConflatedPS-{version}` (empty disables naming) |
+| `client_name` template | `ConflatedPS-{version}-{role}::{user}::{host}` (empty disables naming) |
 | Status update interval | `1000 ms` |
 
 Positive intervals and TTLs are capped at 365 days; group `round_ms` must not exceed a positive group TTL.

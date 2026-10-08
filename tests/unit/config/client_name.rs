@@ -20,40 +20,60 @@ fn minimal_config() -> AppConfig {
 }
 
 #[test]
-fn client_name_defaults_to_program_version_and_role() {
-    let config = minimal_config();
+fn client_name_defaults_include_version_role_user_and_host() {
     let version = env!("CARGO_PKG_VERSION");
+    assert_eq!(
+        resolve_client_name_with(None, "input", "ACME\\alice", "node-01"),
+        Some(format!("ConflatedPS-{version}-input::ACME\\alice::node-01"))
+    );
+    assert_eq!(
+        resolve_client_name_with(None, "output-out-a", "ACME\\alice", "node-01"),
+        Some(format!(
+            "ConflatedPS-{version}-output-out-a::ACME\\alice::node-01"
+        ))
+    );
 
-    assert_eq!(config.client_name, None);
-    assert_eq!(
-        config.client_name_for("input"),
-        Some(format!("ConflatedPS-{version}-input"))
-    );
-    assert_eq!(
-        config.client_name_for("output-out-a"),
-        Some(format!("ConflatedPS-{version}-output-out-a"))
-    );
+    // The config-facing helper resolves the identity from the environment.
+    let config = minimal_config();
+    let name = config.client_name_for("input").unwrap();
+    assert!(name.starts_with(&format!("ConflatedPS-{version}-input::")));
+    assert!(name.contains("::"));
 }
 
 #[test]
-fn client_name_template_expands_version_and_empty_disables_naming() {
+fn client_name_template_expands_placeholders_and_empty_disables_naming() {
     let mut config = minimal_config();
+    let version = env!("CARGO_PKG_VERSION");
 
+    config.client_name = Some("my-bridge-{role}@{version}".to_owned());
+    assert_eq!(
+        config.client_name_for("input"),
+        Some(format!("my-bridge-input@{version}"))
+    );
+
+    // Without {role} the role is appended after a dash.
     config.client_name = Some("my-bridge".to_owned());
     assert_eq!(
         config.client_name_for("input"),
         Some("my-bridge-input".to_owned())
     );
 
-    config.client_name = Some("bridge/{version}/agent".to_owned());
-    assert_eq!(
-        config.client_name_for("input"),
-        Some(format!("bridge/{}/agent-input", env!("CARGO_PKG_VERSION")))
-    );
-
     config.client_name = Some(String::new());
     assert_eq!(config.client_name_for("input"), None);
     config.validate().unwrap();
+}
+
+#[test]
+fn client_name_placeholders_use_the_injected_identity() {
+    assert_eq!(
+        resolve_client_name_with(
+            Some("{version}/{role}::{user}::{host}"),
+            "output-x",
+            "R\\u",
+            "H"
+        ),
+        Some(format!("{}/output-x::R\\u::H", env!("CARGO_PKG_VERSION")))
+    );
 }
 
 #[test]
@@ -87,7 +107,7 @@ fn client_name_schema_exposes_default_and_length_limit() {
     let schema = AppConfig::json_schema();
     assert_eq!(
         schema["properties"]["client_name"]["default"],
-        "ConflatedPS-{version}"
+        "ConflatedPS-{version}-{role}::{user}::{host}"
     );
     assert_eq!(
         schema["properties"]["client_name"]["maxLength"],

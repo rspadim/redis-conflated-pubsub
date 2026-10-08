@@ -1,7 +1,7 @@
 {
   "max_bytes_per_exec": 4194304,
   "oversized_message_policy": "send",
-  "client_name": "ConflatedPS-{version}",
+  "client_name": "ConflatedPS-{version}-{role}::{user}::{host}",
   "input": {
     "redis": {
       "host": "localhost",

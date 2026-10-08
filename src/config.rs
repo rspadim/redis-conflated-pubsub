@@ -17,7 +17,7 @@ pub const MAX_DEDUPLICATION_CACHE_ENTRIES: usize = 100_000;
 pub const MAX_DEDUPLICATION_CACHE_BYTES: usize = 256 * 1024 * 1024;
 pub const DEFAULT_CHANNEL_CACHE_MAX_ENTRIES: usize = 16_384;
 pub const MAX_CHANNEL_CACHE_MAX_ENTRIES: usize = 100_000;
-pub const DEFAULT_CLIENT_NAME_TEMPLATE: &str = "ConflatedPS-{version}";
+pub const DEFAULT_CLIENT_NAME_TEMPLATE: &str = "ConflatedPS-{version}-{role}::{user}::{host}";
 pub const MAX_CLIENT_NAME_TEMPLATE_LEN: usize = 128;
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
@@ -31,9 +31,10 @@ pub struct AppConfig {
     #[serde(default)]
     pub oversized_message_policy: OversizedMessagePolicy,
     /// Template for the connection names reported in `CLIENT LIST` (`CLIENT SETNAME`
-    /// and `CLIENT SETINFO`). `{version}` expands to the program version and the
-    /// connection role is appended: `-input` or `-output-<name>`. An empty string
-    /// disables naming.
+    /// and `CLIENT SETINFO`). Placeholders: `{version}` (program version), `{role}`
+    /// (`input` or `output-<name>`), `{user}` (`USERDOMAIN\USERNAME` or `USER`/`LOGNAME`)
+    /// and `{host}` (`COMPUTERNAME`/`HOSTNAME`). Missing values fall back to `unknown`;
+    /// a template without `{role}` gets `-<role>` appended. An empty string disables naming.
     #[serde(default)]
     #[schemars(length(max = 128))]
     pub client_name: Option<String>,
@@ -72,12 +73,59 @@ impl AppConfig {
 /// disabled. `{version}` is replaced by the program version and the role is
 /// appended (for example `-input` or `-output-out-a`).
 pub fn resolve_client_name(template: Option<&str>, role: &str) -> Option<String> {
+    resolve_client_name_with(
+        template,
+        role,
+        &default_client_user(),
+        &default_client_host(),
+    )
+}
+
+/// Testable core of [`resolve_client_name`]: `{version}`, `{user}` and `{host}`
+/// are replaced with the given values; `{role}` is replaced with the connection
+/// role, or appended after a dash when the template omits it.
+pub fn resolve_client_name_with(
+    template: Option<&str>,
+    role: &str,
+    user: &str,
+    host: &str,
+) -> Option<String> {
     let template = template.unwrap_or(DEFAULT_CLIENT_NAME_TEMPLATE);
     if template.is_empty() {
         return None;
     }
-    let base = template.replace("{version}", env!("CARGO_PKG_VERSION"));
-    Some(format!("{base}-{role}"))
+    let mut name = template
+        .replace("{version}", env!("CARGO_PKG_VERSION"))
+        .replace("{user}", user)
+        .replace("{host}", host);
+    if name.contains("{role}") {
+        name = name.replace("{role}", role);
+    } else {
+        name.push('-');
+        name.push_str(role);
+    }
+    Some(name)
+}
+
+fn first_env(keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| env::var(key).ok().filter(|value| !value.is_empty()))
+}
+
+/// Windows defaults to `DOMAIN\user`; otherwise the first non-empty of
+/// `USERNAME`, `USER`, `LOGNAME`, falling back to `unknown`.
+fn default_client_user() -> String {
+    match (env::var("USERDOMAIN"), env::var("USERNAME")) {
+        (Ok(domain), Ok(user)) if !domain.is_empty() && !user.is_empty() => {
+            format!("{domain}\\{user}")
+        }
+        _ => first_env(&["USERNAME", "USER", "LOGNAME"]).unwrap_or_else(|| "unknown".to_owned()),
+    }
+}
+
+/// The first non-empty of `COMPUTERNAME`, `HOSTNAME`, falling back to `unknown`.
+fn default_client_host() -> String {
+    first_env(&["COMPUTERNAME", "HOSTNAME"]).unwrap_or_else(|| "unknown".to_owned())
 }
 
 pub fn same_pubsub_server(left: &RedisConfig, right: &RedisConfig) -> bool {
