@@ -228,7 +228,7 @@ On v0.1.4 and later, send `SIGHUP` to reload the configured JSON without restart
 sudo systemctl kill --signal=HUP --kill-whom=main redis-conflated-pubsub.service
 ```
 
-The service validates the file before switching; an invalid configuration is rejected and the current runtime keeps running. A valid reload drains pending output queues and restarts the Redis input/output workers, so there is a brief Pub/Sub input gap and messages may be missed (Pub/Sub has no replay). Status counters and uptime reset. Changes to `logging` or `instance_lock`, or updating the executable itself, still require a full service restart.
+The service validates the file before switching; an invalid configuration is rejected and the current runtime keeps running. A valid reload drains pending output queues and restarts the Redis input/output workers, so there is a brief Pub/Sub input gap and messages may be missed (Pub/Sub has no replay). Status counters and uptime reset. A changed `instance_lock.path` is acquired during the reload before the old lock is released, and the reload is rejected if the new lock is unavailable. Changes to `logging` or updating the executable itself still require a full service restart.
 
 ## Remote input to local Redis
 

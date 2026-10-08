@@ -64,7 +64,13 @@ const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 pub enum RunOutcome {
     Shutdown,
     #[cfg(unix)]
-    Reload(Box<AppConfig>),
+    Reload {
+        config: Box<AppConfig>,
+        /// Replacement instance lock acquired during the reload when
+        /// `instance_lock.path` changed; the caller swaps it in after the drain,
+        /// releasing the previous lock only then.
+        instance_lock: Option<std::fs::File>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -461,8 +467,8 @@ pub async fn run(
             ServiceSignal::Shutdown => break RunOutcome::Shutdown,
             #[cfg(unix)]
             ServiceSignal::Reload => {
-                let next_config = match load_reload_config(&config, config_path) {
-                    Ok(next_config) => next_config,
+                let plan = match load_reload_config(&config, config_path) {
+                    Ok(plan) => plan,
                     Err(error) => {
                         warn!(error = %error, "configuration_reload_rejected");
                         continue;
@@ -470,7 +476,10 @@ pub async fn run(
                 };
                 info!("configuration_reload_accepted");
                 metrics.set_state("reloading");
-                break RunOutcome::Reload(Box::new(next_config));
+                break RunOutcome::Reload {
+                    config: Box::new(plan.config),
+                    instance_lock: plan.instance_lock,
+                };
             }
         }
     };
@@ -482,7 +491,7 @@ pub async fn run(
     match &run_outcome {
         RunOutcome::Shutdown => info!("shutdown_signal_received"),
         #[cfg(unix)]
-        RunOutcome::Reload(_) => info!("configuration_reload_draining_outputs"),
+        RunOutcome::Reload { .. } => info!("configuration_reload_draining_outputs"),
     }
     input_task.abort();
     let _ = input_task.await;
@@ -513,9 +522,16 @@ pub async fn run(
 }
 
 #[cfg(unix)]
-fn reload_process_settings_unchanged(current: &AppConfig, next: &AppConfig) -> bool {
-    current.instance_lock.path == next.instance_lock.path
-        && current.logging.directory == next.logging.directory
+#[derive(Debug)]
+struct ReloadPlan {
+    config: AppConfig,
+    /// Replacement lock, already held, when `instance_lock.path` changed.
+    instance_lock: Option<std::fs::File>,
+}
+
+#[cfg(unix)]
+fn reload_logging_settings_unchanged(current: &AppConfig, next: &AppConfig) -> bool {
+    current.logging.directory == next.logging.directory
         && current.logging.level == next.logging.level
         && current.logging.prefix == next.logging.prefix
         && current.logging.enabled == next.logging.enabled
@@ -524,13 +540,25 @@ fn reload_process_settings_unchanged(current: &AppConfig, next: &AppConfig) -> b
 }
 
 #[cfg(unix)]
-fn load_reload_config(current: &AppConfig, path: &Path) -> Result<AppConfig> {
+fn load_reload_config(current: &AppConfig, path: &Path) -> Result<ReloadPlan> {
     let next = AppConfig::load(path).context("failed to load configuration after SIGHUP")?;
     next.validate()?;
-    if !reload_process_settings_unchanged(current, &next) {
-        bail!("changes to instance_lock or logging require a full service restart");
+    if !reload_logging_settings_unchanged(current, &next) {
+        bail!("changes to logging require a full service restart");
     }
-    Ok(next)
+    let instance_lock = if current.instance_lock.path == next.instance_lock.path {
+        None
+    } else {
+        // Acquire the replacement before the caller releases the previous lock;
+        // a failure rejects the reload and leaves the current lock in place.
+        Some(next.instance_lock.acquire().context(
+            "failed to acquire the new instance lock after SIGHUP; reload rejected and previous lock retained",
+        )?)
+    };
+    Ok(ReloadPlan {
+        config: next,
+        instance_lock,
+    })
 }
 
 async fn bind_status_http(

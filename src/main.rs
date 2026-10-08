@@ -35,7 +35,7 @@ If one PUBLISH exceeds its output target, oversized_message_policy selects send 
 Each output can configure outputs.<name>.deduplication.ttl_ms as a signed integer (default 0; nonpositive disables only deduplication; positive durations are limited to 365 days). Deduplication compares the exact mapped output channel and raw incoming payload bytes, including bytes removed by truncate. The cache remembers only the latest successfully or uncertainly published payload per channel: A->B->A publishes all three values, while consecutive repeats are suppressed until the TTL expires. In direct mode, changed values pass immediately; in conflated mode, only the final pending value per channel is compared immediately before each chunk is sent. Caches are independent, in-memory per output, and expired entries are periodically pruned.\n\n\
 Output-local deduplication_groups set ttl_ms, round_ms, restart_on_change, max_members, and max_cache_bytes; round_ms floors the Unix-epoch TTL-start timestamp to a bucket (0 disables rounding). Shared expiry starts on the first successful or uncertain publication. With restart_on_change=true, a new member's first successful or uncertain publication or a changed final value successfully or uncertainly published restarts it; restart_on_change=false keeps it fixed. Each group cache defaults to 16384 members and 64 MiB of channel-name plus payload data (maximum 100000 members and 256 MiB); old entries are evicted at capacity, while a single item over the byte limit is not cached (but still published). Profiles contain partial conflation and TTL/group overrides.\n\n\
 channel_policies are ordered rules for the final mapped output channel. Each rule has exactly one glob, prefix, or suffix selector, or default: true as the last catch-all rule, and chooses either a profile or inline conflation.interval_ms, deduplication.ttl_ms, or deduplication.group values. Only the first match applies; unmatched channels use output-level defaults. Runtime validation checks that the default is last and that round_ms does not exceed a positive group TTL. Positive intervals and TTLs are limited to 365 days.\n\n\
-When input and output use the same Redis server, exclude_output_echoes defaults to true and filters mapped output channels before fan-out. exclude_sentinel_pubsub also defaults to true and filters Sentinel hello/notification channels. Channel filters use ordered `filters` with one `glob`, `regex`, `raw`, `single`, or `string` selector and an `accept`/`deny` action. `raw`, `single`, and `string` all compare the complete channel string literally. All rules are evaluated and the last match wins; `filter_default` defaults to `accept` if none match. Input filters see the source channel before subscription mappings; output filters see the subscription-mapped channel before that output's prefix/suffix. Selectors compile to internal enum variants and their source config is discarded after setup. `input.filter_cache_max_entries`, `outputs.<name>.filter_cache_max_entries`, and `outputs.<name>.channel_policy_cache_max_entries` independently size the local LRUs (default 16384 each, maximum 100000; zero disables that cache). `status.http.filters_endpoint_enabled` explicitly enables `GET /filters` with full cache contents; it is disabled by default. On Unix, SIGHUP reloads a valid configuration; an invalid file leaves the current runtime active. An accepted reload drains pending output queues and restarts input/output workers, creating a brief Pub/Sub input gap and resetting status counters. Changes to logging or instance_lock still require a full systemd restart. Payloads and pending queues are process-local; there is no disk spool.",
+When input and output use the same Redis server, exclude_output_echoes defaults to true and filters mapped output channels before fan-out. exclude_sentinel_pubsub also defaults to true and filters Sentinel hello/notification channels. Channel filters use ordered `filters` with one `glob`, `regex`, `raw`, `single`, or `string` selector and an `accept`/`deny` action. `raw`, `single`, and `string` all compare the complete channel string literally. All rules are evaluated and the last match wins; `filter_default` defaults to `accept` if none match. Input filters see the source channel before subscription mappings; output filters see the subscription-mapped channel before that output's prefix/suffix. Selectors compile to internal enum variants and their source config is discarded after setup. `input.filter_cache_max_entries`, `outputs.<name>.filter_cache_max_entries`, and `outputs.<name>.channel_policy_cache_max_entries` independently size the local LRUs (default 16384 each, maximum 100000; zero disables that cache). `status.http.filters_endpoint_enabled` explicitly enables `GET /filters` with full cache contents; it is disabled by default. On Unix, SIGHUP reloads a valid configuration; an invalid file leaves the current runtime active. An accepted reload drains pending output queues and restarts input/output workers, creating a brief Pub/Sub input gap and resetting status counters. Changes to logging still require a full systemd restart; when instance_lock.path changes, the new lock is acquired before the previous lock is released, and the reload is rejected if the new lock is unavailable. Payloads and pending queues are process-local; there is no disk spool.",
     after_help = "Examples:\n  redis-conflated-pubsub --config config.json\n  redis-conflated-pubsub --config config.json --check-config\n  redis-conflated-pubsub --config-json-schema > config.schema.json"
 )]
 struct Args {
@@ -106,6 +106,9 @@ async fn run() -> Result<()> {
         return Ok(());
     }
 
+    #[cfg(unix)]
+    let mut instance_lock = config.instance_lock.acquire()?;
+    #[cfg(not(unix))]
     let _instance_lock = config.instance_lock.acquire()?;
     // `None` when logging is disabled; tracing events then have no subscriber and are no-ops.
     let _logging_guard = logging::init(&config.logging)?;
@@ -114,7 +117,7 @@ async fn run() -> Result<()> {
     {
         let mut active_config = config;
         let mut metrics = Arc::new(status::Metrics::new());
-        let mut fallback_config = None;
+        let mut fallback_config: Option<AppConfig> = None;
 
         info!(version = env!("CARGO_PKG_VERSION"), "service_started");
         loop {
@@ -130,6 +133,18 @@ async fn run() -> Result<()> {
                 Err(error) => {
                     if let Some(previous_config) = fallback_config.take() {
                         warn!(error = %error, "configuration_reload_start_failed; restoring previous configuration");
+                        if active_config.instance_lock.path != previous_config.instance_lock.path {
+                            // The failed start had already swapped in its own lock; hold the
+                            // restored lock before releasing the failed one.
+                            let restored_lock =
+                                previous_config.instance_lock.acquire().with_context(|| {
+                                    format!(
+                                        "failed to reacquire instance lock {} while restoring the previous configuration",
+                                        previous_config.instance_lock.path.display()
+                                    )
+                                })?;
+                            drop(std::mem::replace(&mut instance_lock, restored_lock));
+                        }
                         active_config = previous_config;
                         metrics = Arc::new(status::Metrics::new());
                         continue;
@@ -140,9 +155,20 @@ async fn run() -> Result<()> {
             };
             match outcome {
                 service::RunOutcome::Shutdown => break,
-                service::RunOutcome::Reload(next_config) => {
+                service::RunOutcome::Reload {
+                    config: next_config,
+                    instance_lock: next_lock,
+                } => {
                     fallback_config = Some(active_config.clone());
                     active_config = *next_config;
+                    if let Some(next_lock) = next_lock {
+                        // Acquired before the drain; the previous lock is dropped only now.
+                        drop(std::mem::replace(&mut instance_lock, next_lock));
+                        info!(
+                            path = %active_config.instance_lock.path.display(),
+                            "instance_lock_switched"
+                        );
+                    }
                     metrics = Arc::new(status::Metrics::new());
                     info!("service_configuration_reloaded");
                 }

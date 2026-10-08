@@ -88,7 +88,7 @@ Shed messages are counted per output and globally (`shed_messages_total`/`shed_p
 
 ### Reload and shutdown
 
-On Unix, `SIGHUP` parses and validates the new file before switching; invalid files leave the running configuration in place. An accepted reload drains pending output queues and restarts input/output workers in-process, which creates a brief input gap and resets status counters. Logging and instance-lock changes still require a full restart. Shutdown stops input, drains workers, and flushes the remaining conflated buckets.
+On Unix, `SIGHUP` parses and validates the new file before switching; invalid files leave the running configuration in place. An accepted reload drains pending output queues and restarts input/output workers in-process, which creates a brief input gap and resets status counters. Logging changes still require a full restart; a changed `instance_lock.path` is acquired during the reload (the new lock before the old one is released) and the reload is rejected when the new lock is unavailable. Shutdown stops input, drains workers, and flushes the remaining conflated buckets.
 
 ### Observability
 
