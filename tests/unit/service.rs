@@ -324,5 +324,6 @@ mod input_filtering;
 mod policy_schedules;
 #[path = "service/queue_limits.rs"]
 mod queue_limits;
+#[cfg(unix)]
 #[path = "service/reload_runtime.rs"]
 mod reload_runtime;
