@@ -23,20 +23,20 @@ fn minimal_config() -> AppConfig {
 fn client_name_defaults_include_version_role_user_and_host() {
     let version = env!("CARGO_PKG_VERSION");
     assert_eq!(
-        resolve_client_name_with(None, "input", "ACME\\alice", "node-01"),
-        Some(format!("ConflatedPS-{version}-input::ACME\\alice::node-01"))
+        resolve_client_name_with(None, "i", "ACME\\alice", "node-01"),
+        Some(format!("ConflatedPS-{version}-i::ACME\\alice::node-01"))
     );
     assert_eq!(
-        resolve_client_name_with(None, "output-out-a", "ACME\\alice", "node-01"),
+        resolve_client_name_with(None, "o-out-a", "ACME\\alice", "node-01"),
         Some(format!(
-            "ConflatedPS-{version}-output-out-a::ACME\\alice::node-01"
+            "ConflatedPS-{version}-o-out-a::ACME\\alice::node-01"
         ))
     );
 
     // The config-facing helper resolves the identity from the environment.
     let config = minimal_config();
-    let name = config.client_name_for("input").unwrap();
-    assert!(name.starts_with(&format!("ConflatedPS-{version}-input::")));
+    let name = config.client_name_for("i").unwrap();
+    assert!(name.starts_with(&format!("ConflatedPS-{version}-i::")));
     assert!(name.contains("::"));
 }
 
@@ -47,32 +47,24 @@ fn client_name_template_expands_placeholders_and_empty_disables_naming() {
 
     config.client_name = Some("my-bridge-{role}@{version}".to_owned());
     assert_eq!(
-        config.client_name_for("input"),
-        Some(format!("my-bridge-input@{version}"))
+        config.client_name_for("i"),
+        Some(format!("my-bridge-i@{version}"))
     );
 
     // Without {role} the role is appended after a dash.
     config.client_name = Some("my-bridge".to_owned());
-    assert_eq!(
-        config.client_name_for("input"),
-        Some("my-bridge-input".to_owned())
-    );
+    assert_eq!(config.client_name_for("i"), Some("my-bridge-i".to_owned()));
 
     config.client_name = Some(String::new());
-    assert_eq!(config.client_name_for("input"), None);
+    assert_eq!(config.client_name_for("i"), None);
     config.validate().unwrap();
 }
 
 #[test]
 fn client_name_placeholders_use_the_injected_identity() {
     assert_eq!(
-        resolve_client_name_with(
-            Some("{version}/{role}::{user}::{host}"),
-            "output-x",
-            "R\\u",
-            "H"
-        ),
-        Some(format!("{}/output-x::R\\u::H", env!("CARGO_PKG_VERSION")))
+        resolve_client_name_with(Some("{version}/{role}::{user}::{host}"), "o-x", "R\\u", "H"),
+        Some(format!("{}/o-x::R\\u::H", env!("CARGO_PKG_VERSION")))
     );
 }
 

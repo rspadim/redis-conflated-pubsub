@@ -256,7 +256,7 @@ pub async fn run(
     #[cfg(not(unix))]
     let _ = config_path;
     metrics.clear_channel_cache_inspectors();
-    let input_client = match config.client_name_for("input") {
+    let input_client = match config.client_name_for("i") {
         Some(lib_name) => config.input.redis.client_with_lib_name(&lib_name)?,
         None => config.input.redis.client()?,
     };
@@ -281,7 +281,7 @@ pub async fn run(
     let output_client_names = config
         .outputs
         .keys()
-        .map(|name| config.client_name_for(&format!("output-{name}")))
+        .map(|name| config.client_name_for(&format!("o-{name}")))
         .collect::<Vec<_>>();
     let output_setups = config
         .outputs

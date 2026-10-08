@@ -32,7 +32,7 @@ pub struct AppConfig {
     pub oversized_message_policy: OversizedMessagePolicy,
     /// Template for the connection names reported in `CLIENT LIST` (`CLIENT SETNAME`
     /// and `CLIENT SETINFO`). Placeholders: `{version}` (program version), `{role}`
-    /// (`input` or `output-<name>`), `{user}` (`USERDOMAIN\USERNAME` or `USER`/`LOGNAME`)
+    /// (`i` or `o-<name>`), `{user}` (`USERDOMAIN\USERNAME` or `USER`/`LOGNAME`)
     /// and `{host}` (`COMPUTERNAME`/`HOSTNAME`). Missing values fall back to `unknown`;
     /// a template without `{role}` gets `-<role>` appended. An empty string disables naming.
     #[serde(default)]
