@@ -1,0 +1,44 @@
+{
+  "input": {
+    "redis": {
+      "host": "loopback-benchmark",
+      "port": 6379,
+      "database": 0
+    },
+    "subscriptions": [
+      {
+        "type": "psubscribe",
+        "pattern": "hot:*",
+        "output_prefix": "mapped:",
+        "output_suffix": ":source"
+      }
+    ]
+  },
+  "outputs": {
+    "out-a": {
+      "redis": {
+        "host": "loopback-benchmark",
+        "port": 6380,
+        "database": 0
+      },
+      "channel_prefix": "replica-a:",
+      "channel_suffix": ":dest",
+      "conflation": {
+        "interval_ms": 0
+      },
+      "deduplication": {
+        "ttl_ms": 0
+      }
+    }
+  },
+  "instance_lock": {
+    "path": "/state/redis-conflated-loopback.lock"
+  },
+  "logging": {
+    "directory": "/state/logs",
+    "level": "warn",
+    "retention_days": 2,
+    "max_total_size_mb": 10
+  },
+  "status": {}
+}

@@ -118,6 +118,10 @@ Positive intervals and TTLs are capped at 365 days; group `round_ms` must not ex
 
 The mixed-policy workload (direct / 200 ms conflation / 200 ms conflation + 5 s TTL) still uses the Python driver selected with `HOTPATH_BENCHMARK_CMD='python /tests/docker_hotpath_policy_mix.py'`.
 
+### Loopback (no Redis/Valkey)
+
+`examples/loopback_benchmark.rs` (built into the same benchmark image) implements a minimal RESP2 broker in Rust: it accepts the service's `PSUBSCRIBE`, feeds messages as fast as the socket accepts them, and acts as the output server that receives the service's `PUBLISH`/`MULTI/EXEC` commands, reporting end-to-end percentiles. `compose.loopback.test.yml` runs it with no Redis containers, isolating the service and the wire protocol. A 200k-message smoke measured ~35k msg/s with the broker process sharing CPU with the service; `LOOPBACK_MESSAGES`, `LOOPBACK_CHUNK`, `LOOPBACK_WARMUP` and `LOOPBACK_TIMEOUT_S` tune the run.
+
 ### Manual unit benchmarks
 
 Run with `cargo test --release --locked <name> -- --ignored --nocapture`:

@@ -1,0 +1,37 @@
+services:
+  loopback-benchmark:
+    build:
+      context: .
+      dockerfile: Dockerfile.benchmark
+    command: ["loopback-benchmark"]
+    environment:
+      LOOPBACK_INPUT_PORT: ${LOOPBACK_INPUT_PORT:-6379}
+      LOOPBACK_OUTPUT_PORT: ${LOOPBACK_OUTPUT_PORT:-6380}
+      LOOPBACK_WARMUP: ${LOOPBACK_WARMUP:-64}
+      LOOPBACK_MESSAGES: ${LOOPBACK_MESSAGES:-1000000}
+      LOOPBACK_CHUNK: ${LOOPBACK_CHUNK:-256}
+      LOOPBACK_TIMEOUT_S: ${LOOPBACK_TIMEOUT_S:-120}
+    networks:
+      loopback: {}
+
+  service-loopback:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["--config", "/config/loopback-config.json"]
+    working_dir: /state
+    volumes:
+      - ./tests/docker-loopback-config.json:/config/loopback-config.json:ro
+      - loopback-state:/state
+    networks:
+      loopback: {}
+    depends_on:
+      loopback-benchmark:
+        condition: service_started
+
+volumes:
+  loopback-state: {}
+
+networks:
+  loopback:
+    driver: bridge

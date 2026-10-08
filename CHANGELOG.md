@@ -11,6 +11,7 @@
 - Added an optional single-container Redis/Valkey bundle selected with `KV_ENGINE`, plus an example configuration and persistent data paths.
 - Completed internal service/config module extraction and moved unit tests to `tests/unit/` without expanding public runtime APIs.
 - Reworked the documentation to describe the current release: `src/DESIGN.md` covers architecture, defaults and reference measurements, and the README/Docker guides no longer narrate previous development steps.
+- Added a loopback load test (`examples/loopback_benchmark.rs` plus `compose.loopback.test.yml`) with a minimal RESP2 broker in Rust, so the service can be measured without Redis or Valkey.
 
 ## 0.1.4 — 2026-10-06
 

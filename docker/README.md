@@ -98,6 +98,17 @@ docker compose -p hotpath-mixed -f compose.hotpath.test.yml down --volumes --rem
 
 For the TTL cohort, this workload repeats one identical payload per channel; with unique payloads, a positive TTL would not suppress those publishes.
 
+### Loopback (no Redis/Valkey)
+
+The loopback benchmark runs the service against a minimal RESP2 broker implemented in Rust (same benchmark image), with no Redis containers:
+
+```sh
+docker compose -p loopback -f compose.loopback.test.yml up --build --abort-on-container-exit --exit-code-from loopback-benchmark
+docker compose -p loopback -f compose.loopback.test.yml down --volumes --remove-orphans
+```
+
+`LOOPBACK_MESSAGES` (default 1,000,000), `LOOPBACK_CHUNK`, `LOOPBACK_WARMUP` and `LOOPBACK_TIMEOUT_S` tune the run. The broker shares CPU with the service, so treat the numbers as service-plus-broker measurements.
+
 ### Fault handling
 
 The `fault` profile in `compose.test.yml` exercises uncertain/failed publish handling through a Redis fault proxy:
