@@ -70,6 +70,18 @@ Per-channel deduplication compares the exact mapped output channel and the raw i
 
 Named `deduplication_groups` share one expiry across member channels: `round_ms` floors the Unix-epoch start, `restart_on_change` reanchors the deadline when a changed/new member publishes, and `max_members`/`max_cache_bytes` bound the cache. Suppressed duplicates and intermediate conflated values never renew the deadline.
 
+`deduplication.in_flight_suppression` (default `false`) treats a value that was sent but not yet acknowledged as published for suppression purposes: identical repeats are dropped without waiting for the in-flight batch to settle. A definitive pre-send (`NotSent`) failure rolls the remembered value back; an ambiguous (`Uncertain`) outcome keeps it because the publish may have reached the broker. `deduplication.max_entries` and `deduplication.max_cache_bytes` (optional; unset means unbounded) bound the per-channel TTL cache with LRU eviction, counted in `deduplication_evictions_total`.
+
+### Intake queue limits
+
+Each output's intake queue is unbounded by default. `queue_max_messages`/`queue_max_bytes` bound it (bytes count channel name plus payload) with `queue_overflow_policy`:
+
+- `drop_newest` (default): the fan-out refuses the new message when a limit is exceeded;
+- `drop_oldest`: uses a shared queue so the oldest entry is evicted to admit the new one;
+- `drop_by_age`: the worker sheds messages older than `queue_max_age_ms` at intake (no item/byte limit).
+
+Shed messages are counted per output and globally (`shed_messages_total`/`shed_payload_bytes_total`), `pending_queue_bytes` is the queue byte gauge and `oldest_pending_age_ms` the oldest pending age. Pub/Sub has no replay, so any shedding policy loses events explicitly; blocking the reader is not offered because Redis would buffer and then disconnect the subscriber.
+
 ### Channel policies
 
 `channel_policies` are ordered rules matched against the final mapped channel: exactly one `glob`, `prefix` or `suffix` selector per rule, plus optionally one `default: true` catch-all that must be last. Each rule selects either a `profile` or inline `conflation.interval_ms`, `deduplication.ttl_ms`/`deduplication.group` overrides. Only the first match applies; unmatched channels use output defaults. Resolved policies are memoized per output.
@@ -80,10 +92,11 @@ On Unix, `SIGHUP` parses and validates the new file before switching; invalid fi
 
 ### Observability
 
-The status snapshot (`schema_version` 5) exposes global and per-output counters for inputs, published/conflated/deduplicated/dropped/truncated messages and bytes, publish errors, uncertain operations, reconnects and pending messages/bytes/keys. Per output it also exposes:
+The status snapshot (`schema_version` 5) exposes global and per-output counters for inputs, published/conflated/deduplicated/dropped/truncated/shed messages and bytes, deduplication evictions, publish errors, uncertain operations, reconnects and pending messages/bytes/keys. Per output it also exposes:
 
 - **queue wait** samples/total/max from fan-out enqueue to worker acceptance (includes policy resolution);
-- **publish RTT** samples/total/max around the Redis publish round trip.
+- **publish RTT** samples/total/max around the Redis publish round trip;
+- **pending queue bytes** and **oldest pending age** gauges for the bounded-queue policies.
 
 `GET /filters` optionally exposes full channel names and cache entries and is disabled by default because it reveals raw channel names; enabling it switches the filter/policy LRUs to shared, mutex-protected storage.
 
@@ -96,7 +109,10 @@ The status snapshot (`schema_version` 5) exposes global and per-output counters 
 | `max_bytes_per_exec` / per-output override | `4 MiB` |
 | `oversized_message_policy` | `send` |
 | `outputs.<name>.deduplication.ttl_ms` | `0` (disabled) |
+| `deduplication.in_flight_suppression` | `false` |
+| Per-channel TTL caps (`max_entries`/`max_cache_bytes`) | unset (unbounded) |
 | Deduplication group limits | `16384` members / `64 MiB` |
+| Intake queue limits (`queue_max_messages`/`queue_max_bytes`/`queue_max_age_ms`) | unset (unbounded), `drop_newest` |
 | Filter/policy cache capacity (each) | `16384`, max `100000`, `0` disables |
 | `exclude_output_echoes`, `exclude_sentinel_pubsub` | `true` |
 | `logging.prefix` / `logging.enabled` | `redis-conflated-pubsub` / `true` |

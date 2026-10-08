@@ -70,8 +70,14 @@ This example maps `test-feed:alpha` to `db0:sub:test-feed:alpha:source` and `db1
         "oversized_message_policy": "send"
       },
       "deduplication": {
-        "ttl_ms": 5000
-      }
+        "ttl_ms": 5000,
+        "in_flight_suppression": false,
+        "max_entries": 16384,
+        "max_cache_bytes": 67108864
+      },
+      "queue_max_messages": 65536,
+      "queue_max_bytes": 67108864,
+      "queue_overflow_policy": "drop_newest"
     },
     "output1": {
       "redis": {
@@ -157,6 +163,10 @@ This example maps `test-feed:alpha` to `db0:sub:test-feed:alpha:source` and `db1
 ## Profiles and channel policies
 
 Per-output defaults stay in `conflation.interval_ms` and `deduplication.ttl_ms`. Positive intervals and TTLs are limited to 365 days; nonpositive intervals select direct publishing and nonpositive TTLs disable deduplication. Output-local `deduplication_groups` map names to `{ "ttl_ms", "round_ms", "restart_on_change", "max_members", "max_cache_bytes" }`. `round_ms` floors the Unix-epoch timestamp used for the group TTL to a bucket; `0` disables rounding, and flooring can shorten an active TTL by up to `round_ms`. For positive TTLs, `round_ms` cannot exceed `ttl_ms` (checked by `--check-config`). The group cache defaults to 16,384 channels and 64 MiB of combined channel-name/payload bytes; limits can be raised up to 100,000 members and 256 MiB. When full, it evicts the least recently used member. A single member larger than the byte limit is still published but is not cached for deduplication, with a warning.
+
+`deduplication.in_flight_suppression` (default `false`) treats a value that was sent but not yet acknowledged as published for suppression purposes, so identical repeats are dropped without waiting for the in-flight batch to settle; a definitive pre-send failure rolls the remembered value back, while an ambiguous outcome keeps it. `deduplication.max_entries` and `deduplication.max_cache_bytes` (optional; unset means unbounded) bound the per-channel TTL cache with LRU eviction and count evictions in `deduplication_evictions_total`.
+
+Each output can bound its intake queue with `queue_max_messages` and `queue_max_bytes` (unset means unbounded) plus `queue_overflow_policy`: `drop_newest` (default), `drop_oldest`, or `drop_by_age` with `queue_max_age_ms`. Shed messages are counted per output and globally in `shed_messages_total`/`shed_payload_bytes_total`, the queue byte gauge is `pending_queue_bytes`, and the oldest pending age is `oldest_pending_age_ms`. Redis Pub/Sub has no replay, so any shedding policy drops events explicitly; the default configuration stays unbounded.
 
 Named `profiles` are partial overrides: set `conflation.interval_ms`, `deduplication.ttl_ms`, or `deduplication.group` as needed; unset values inherit the output defaults. A profile cannot set both `deduplication.ttl_ms` and `deduplication.group`.
 
