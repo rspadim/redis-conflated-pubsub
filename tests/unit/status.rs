@@ -162,6 +162,22 @@ fn deduplication_metrics_count_raw_bytes_and_clear_truncated_pending_payload() {
 }
 
 #[test]
+fn deduplication_evictions_are_counted_globally_and_per_output() {
+    let metrics = Metrics::new();
+    let output = metrics.register_output("evict-output");
+    metrics.record_deduplication_evictions(&output, 3);
+    metrics.record_deduplication_evictions(&output, 0);
+
+    let snapshot = serde_json::to_value(metrics.snapshot()).unwrap();
+    assert_eq!(snapshot["schema_version"], 5);
+    assert_eq!(snapshot["deduplication_evictions_total"], 3);
+    assert_eq!(
+        snapshot["outputs"]["evict-output"]["deduplication_evictions_total"],
+        3
+    );
+}
+
+#[test]
 fn oversized_policy_counters_and_pending_bytes_are_exposed_per_output() {
     let metrics = Metrics::new();
     let output = metrics.register_output("policy-output");

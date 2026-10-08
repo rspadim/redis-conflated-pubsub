@@ -98,8 +98,9 @@ pub(super) fn direct_batch_boundary_required(
     passthrough: &VecDeque<PendingMessage>,
     message: &InboundMessage,
     policy: &ResolvedChannelPolicy,
+    in_flight_suppression: bool,
 ) -> bool {
-    if policy.interval_ms > 0 || passthrough.is_empty() {
+    if in_flight_suppression || policy.interval_ms > 0 || passthrough.is_empty() {
         return false;
     }
     let group = policy.deduplication_group.as_deref();
@@ -110,6 +111,34 @@ pub(super) fn direct_batch_boundary_required(
         queued.output_channel == message.output_channel
             || group.is_some_and(|group| queued.deduplication_group.as_deref() == Some(group))
     })
+}
+
+/// Remembers a direct batch at dispatch time when in-flight suppression is
+/// enabled, so identical values are suppressed before the batch settles.
+pub(super) fn remember_dispatched_batch(
+    deduplication_cache: &mut DeduplicationCache,
+    batch: &[PendingMessage],
+    in_flight_suppression: bool,
+) -> usize {
+    if !in_flight_suppression {
+        return 0;
+    }
+    deduplication_cache.remember(batch, time::Instant::now())
+}
+
+/// Settles a dispatched direct batch, rolling back the dispatch-time remember
+/// on a definitive pre-send failure. `Uncertain` outcomes keep the remembered
+/// value because the publish may have reached the broker.
+pub(super) fn settle_dispatched_batch(
+    batch: &[PendingMessage],
+    result: std::result::Result<i64, PublishFailure>,
+    in_flight_suppression: bool,
+    context: &mut OutputPublishContext<'_>,
+) -> std::result::Result<i64, PublishFailure> {
+    if in_flight_suppression && matches!(result, Err(PublishFailure::NotSent(_))) {
+        context.deduplication_cache.rollback(batch);
+    }
+    settle_publish_result(batch, result, context)
 }
 
 pub(super) async fn publish_output(
@@ -135,8 +164,13 @@ pub(super) async fn publish_output(
         channel_policy_cache_max_entries,
         filters_endpoint_enabled.then(|| (&*metrics, format!("outputs.{name}.channel_policies"))),
     );
-    let mut deduplication_cache =
-        DeduplicationCache::with_groups(config.deduplication.ttl_ms, &config.deduplication_groups);
+    let in_flight_suppression = config.deduplication.in_flight_suppression;
+    let mut deduplication_cache = DeduplicationCache::with_limits(
+        config.deduplication.ttl_ms,
+        &config.deduplication_groups,
+        config.deduplication.max_entries,
+        config.deduplication.max_cache_bytes,
+    );
     let mut deduplication_prune_interval = deduplication_prune_interval(&config).map(|interval| {
         let mut ticker = time::interval_at(time::Instant::now() + interval, interval);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -233,6 +267,7 @@ pub(super) async fn publish_output(
                     enqueue_context.passthrough,
                     &queued_message.message,
                     &policy,
+                    in_flight_suppression,
                 ) {
                     deferred_input = Some(queued_message);
                     break;
@@ -346,6 +381,9 @@ pub(super) async fn publish_output(
                 .take(batch_length)
                 .cloned()
                 .collect::<Vec<_>>();
+            let evictions =
+                remember_dispatched_batch(&mut deduplication_cache, &batch, in_flight_suppression);
+            metrics.record_deduplication_evictions(&output_metrics, evictions);
 
             if connection.is_none() {
                 metrics.set_output_state(&output_metrics, "connecting");
@@ -359,7 +397,12 @@ pub(super) async fn publish_output(
                         metrics: &metrics,
                         output_metrics: &output_metrics,
                     };
-                    let result = settle_publish_result(&batch, Err(failure), &mut publish_context);
+                    let result = settle_dispatched_batch(
+                        &batch,
+                        Err(failure),
+                        in_flight_suppression,
+                        &mut publish_context,
+                    );
                     if let Err(failure) = result {
                         let pending_keys = flush::settle_failed_batch(
                             0,
@@ -426,7 +469,12 @@ pub(super) async fn publish_output(
                         output_metrics: &output_metrics,
                     };
                     metrics.record_output_publish_rtt(&output_metrics, publish_rtt);
-                    let result = settle_publish_result(&batch, result, &mut publish_context);
+                    let result = settle_dispatched_batch(
+                        &batch,
+                        result,
+                        in_flight_suppression,
+                        &mut publish_context,
+                    );
                     let pending_keys = match result {
                         Ok(subscribers) => {
                             let payload_bytes =

@@ -179,6 +179,59 @@ fn output_deduplication_ttl_defaults_and_accepts_override_or_nonpositive_disable
     );
 }
 #[test]
+fn deduplication_extras_default_to_disabled_and_unlimited() {
+    let config: AppConfig = serde_json::from_str(
+            r#"{
+                "input":{"redis":{"host":"input.example.net"},"subscriptions":[{"type":"subscribe","channel":"events"}]},
+                "outputs":{"custom-output":{"redis":{"host":"output.example.net"},"conflation":{"interval_ms":0}}},
+                "instance_lock":{"path":"lock"}
+            }"#,
+        )
+        .unwrap();
+    let deduplication = &config.outputs["custom-output"].deduplication;
+    assert!(!deduplication.in_flight_suppression);
+    assert_eq!(deduplication.max_entries, None);
+    assert_eq!(deduplication.max_cache_bytes, None);
+    config.validate().unwrap();
+
+    let configured: AppConfig = serde_json::from_str(
+            r#"{
+                "input":{"redis":{"host":"input.example.net"},"subscriptions":[{"type":"subscribe","channel":"events"}]},
+                "outputs":{"custom-output":{"redis":{"host":"output.example.net"},"conflation":{"interval_ms":0},"deduplication":{"ttl_ms":5000,"in_flight_suppression":true,"max_entries":64,"max_cache_bytes":4096}}},
+                "instance_lock":{"path":"lock"}
+            }"#,
+        )
+        .unwrap();
+    configured.validate().unwrap();
+    let deduplication = &configured.outputs["custom-output"].deduplication;
+    assert!(deduplication.in_flight_suppression);
+    assert_eq!(deduplication.max_entries, Some(64));
+    assert_eq!(deduplication.max_cache_bytes, Some(4096));
+
+    let schema = AppConfig::json_schema();
+    let properties = &schema["$defs"]["DeduplicationConfig"]["properties"];
+    assert_eq!(properties["in_flight_suppression"]["default"], false);
+    assert_eq!(
+        properties["max_entries"]["default"],
+        serde_json::Value::Null
+    );
+    assert_eq!(properties["max_entries"]["minimum"], 1);
+    assert_eq!(
+        properties["max_entries"]["maximum"],
+        MAX_DEDUPLICATION_CACHE_ENTRIES
+    );
+    assert_eq!(
+        properties["max_cache_bytes"]["default"],
+        serde_json::Value::Null
+    );
+    assert_eq!(properties["max_cache_bytes"]["minimum"], 1);
+    assert_eq!(
+        properties["max_cache_bytes"]["maximum"],
+        MAX_DEDUPLICATION_CACHE_BYTES
+    );
+}
+
+#[test]
 fn channel_profiles_and_policy_schema_use_literal_dotted_keys_and_signed_values() {
     let schema = AppConfig::json_schema();
     let output_properties = &schema["$defs"]["OutputConfig"]["properties"];

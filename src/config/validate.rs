@@ -2,6 +2,7 @@ use anyhow::{Result, bail};
 
 use super::{
     AppConfig, ChannelFilterRule, ChannelOverrides, MAX_CHANNEL_CACHE_MAX_ENTRIES,
+    MAX_DEDUPLICATION_CACHE_BYTES, MAX_DEDUPLICATION_CACHE_ENTRIES,
     MAX_DEDUPLICATION_GROUP_CACHE_BYTES, MAX_DEDUPLICATION_GROUP_MEMBERS, MAX_RUNTIME_DURATION_MS,
     OutputConfig, RedisConfig, Subscription, same_pubsub_server,
 };
@@ -90,6 +91,16 @@ fn validate_redis_and_outputs(config: &AppConfig) -> Result<()> {
             &format!("outputs.{name}.deduplication.ttl_ms"),
             output.deduplication.ttl_ms,
         )?;
+        validate_deduplication_cache_capacity(
+            &format!("outputs.{name}.deduplication.max_entries"),
+            output.deduplication.max_entries,
+            MAX_DEDUPLICATION_CACHE_ENTRIES,
+        )?;
+        validate_deduplication_cache_capacity(
+            &format!("outputs.{name}.deduplication.max_cache_bytes"),
+            output.deduplication.max_cache_bytes,
+            MAX_DEDUPLICATION_CACHE_BYTES,
+        )?;
         validate_filter_rules(&format!("outputs.{name}.filters"), &output.filters)?;
         validate_groups(name, output)?;
         validate_profiles(name, output)?;
@@ -103,6 +114,20 @@ fn validate_channel_cache_capacity(path: &str, capacity: usize) -> Result<()> {
         bail!("{path} must not exceed {MAX_CHANNEL_CACHE_MAX_ENTRIES}");
     }
     Ok(())
+}
+
+fn validate_deduplication_cache_capacity(
+    path: &str,
+    capacity: Option<usize>,
+    maximum: usize,
+) -> Result<()> {
+    match capacity {
+        Some(0) => bail!("{path} must be greater than zero"),
+        Some(capacity) if capacity > maximum => {
+            bail!("{path} must not exceed {maximum}");
+        }
+        _ => Ok(()),
+    }
 }
 
 fn validate_groups(name: &str, output: &OutputConfig) -> Result<()> {

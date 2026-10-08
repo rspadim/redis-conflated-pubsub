@@ -45,7 +45,7 @@ use input::{output_echo_filters, read_input};
 use output::{
     clear_published_batch, direct_batch_boundary_required, enqueue_message,
     publish_conflated_interval_pending, publish_conflated_pending, publish_passthrough_batch,
-    publish_passthrough_pending,
+    publish_passthrough_pending, remember_dispatched_batch, settle_dispatched_batch,
 };
 use output::{publish_output, write_status};
 #[cfg(test)]

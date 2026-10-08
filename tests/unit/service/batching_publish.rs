@@ -206,7 +206,8 @@ fn direct_batch_boundary_preserves_per_channel_and_group_ttl_order() {
     assert!(direct_batch_boundary_required(
         &passthrough,
         &same_channel,
-        &per_channel_policy
+        &per_channel_policy,
+        false,
     ));
     let different_channel = InboundMessage {
         output_channel: "events:b".to_owned(),
@@ -215,7 +216,8 @@ fn direct_batch_boundary_preserves_per_channel_and_group_ttl_order() {
     assert!(!direct_batch_boundary_required(
         &passthrough,
         &different_channel,
-        &per_channel_policy
+        &per_channel_policy,
+        false,
     ));
 
     passthrough.front_mut().unwrap().deduplication_group = Some("shared".to_owned());
@@ -227,8 +229,121 @@ fn direct_batch_boundary_preserves_per_channel_and_group_ttl_order() {
     assert!(direct_batch_boundary_required(
         &passthrough,
         &different_channel,
-        &group_policy
+        &group_policy,
+        false,
     ));
+}
+
+#[test]
+fn in_flight_suppression_disables_the_direct_batch_boundary() {
+    let mut queued = pending_message("events:a", b"first".to_vec());
+    queued.deduplication_ttl_ms = Some(5000);
+    let passthrough = VecDeque::from([queued]);
+    let same_channel = InboundMessage {
+        output_channel: "events:a".to_owned(),
+        payload: b"second".to_vec().into(),
+    };
+    let policy = ResolvedChannelPolicy {
+        interval_ms: 0,
+        deduplication_ttl_ms: 5000,
+        deduplication_group: None,
+    };
+
+    assert!(direct_batch_boundary_required(
+        &passthrough,
+        &same_channel,
+        &policy,
+        false,
+    ));
+    assert!(!direct_batch_boundary_required(
+        &passthrough,
+        &same_channel,
+        &policy,
+        true,
+    ));
+}
+
+#[tokio::test]
+async fn in_flight_suppression_remembers_at_dispatch_and_rolls_back_only_not_sent() {
+    let metrics = Metrics::new();
+    let output_metrics = metrics.register_output("in-flight-suppression-output");
+    let message = pending_message("events", b"payload".to_vec());
+    let batch = std::slice::from_ref(&message);
+
+    let mut disabled_cache = DeduplicationCache::new(5000);
+    assert_eq!(
+        remember_dispatched_batch(&mut disabled_cache, batch, false),
+        0
+    );
+    assert!(disabled_cache.entries.is_empty());
+    disabled_cache.remember(batch, time::Instant::now());
+    let mut publisher = RecordingPublisher {
+        not_sent_failures_remaining: 1,
+        ..RecordingPublisher::default()
+    };
+    let result = publisher.publish(batch, false).await;
+    let mut failure_log = OutputFailureLog::default();
+    {
+        let mut context = publish_context_for_test(
+            "in-flight-suppression-output",
+            &mut failure_log,
+            &mut disabled_cache,
+            &metrics,
+            &output_metrics,
+        );
+        assert!(settle_dispatched_batch(batch, result, false, &mut context).is_err());
+    }
+    assert!(
+        disabled_cache.should_suppress(&message, time::Instant::now()),
+        "the flag being off must not roll back a previously remembered value"
+    );
+
+    let mut cache = DeduplicationCache::new(5000);
+    assert_eq!(remember_dispatched_batch(&mut cache, batch, true), 0);
+    assert!(cache.should_suppress(&message, time::Instant::now()));
+
+    let mut publisher = RecordingPublisher {
+        not_sent_failures_remaining: 1,
+        ..RecordingPublisher::default()
+    };
+    let result = publisher.publish(batch, false).await;
+    let mut failure_log = OutputFailureLog::default();
+    {
+        let mut context = publish_context_for_test(
+            "in-flight-suppression-output",
+            &mut failure_log,
+            &mut cache,
+            &metrics,
+            &output_metrics,
+        );
+        assert!(settle_dispatched_batch(batch, result, true, &mut context).is_err());
+    }
+    assert!(
+        !cache.should_suppress(&message, time::Instant::now()),
+        "a definitive pre-send failure must roll back the dispatch-time value"
+    );
+
+    assert_eq!(remember_dispatched_batch(&mut cache, batch, true), 0);
+    let mut publisher = RecordingPublisher {
+        uncertain_failures_remaining: 1,
+        ..RecordingPublisher::default()
+    };
+    let result = publisher.publish(batch, false).await;
+    let mut failure_log = OutputFailureLog::default();
+    {
+        let mut context = publish_context_for_test(
+            "in-flight-suppression-output",
+            &mut failure_log,
+            &mut cache,
+            &metrics,
+            &output_metrics,
+        );
+        assert!(settle_dispatched_batch(batch, result, true, &mut context).is_err());
+    }
+    assert!(
+        cache.should_suppress(&message, time::Instant::now()),
+        "an uncertain outcome may have been published and must not be rolled back"
+    );
 }
 
 #[tokio::test]

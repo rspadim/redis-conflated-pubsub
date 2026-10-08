@@ -14,6 +14,7 @@ use super::PendingMessage;
 pub(super) struct CachedPublishedValue {
     pub(super) raw_payload: Arc<[u8]>,
     published_at: time::Instant,
+    last_used: time::Instant,
     ttl: Duration,
 }
 
@@ -41,6 +42,9 @@ pub(super) struct CachedDeduplicationGroup {
 pub(super) struct DeduplicationCache {
     ttl: Option<Duration>,
     pub(super) entries: HashMap<String, CachedPublishedValue>,
+    pub(super) entries_bytes: usize,
+    max_entries: Option<usize>,
+    max_cache_bytes: Option<usize>,
     group_settings: HashMap<String, DeduplicationGroupSettings>,
     pub(super) groups: HashMap<String, CachedDeduplicationGroup>,
 }
@@ -48,16 +52,29 @@ pub(super) struct DeduplicationCache {
 impl DeduplicationCache {
     #[cfg(test)]
     pub(super) fn new(ttl_ms: i64) -> Self {
-        Self::with_groups(ttl_ms, &BTreeMap::new())
+        Self::with_limits(ttl_ms, &BTreeMap::new(), None, None)
     }
 
+    #[cfg(test)]
     pub(super) fn with_groups(
         ttl_ms: i64,
         deduplication_groups: &BTreeMap<String, DeduplicationGroup>,
     ) -> Self {
+        Self::with_limits(ttl_ms, deduplication_groups, None, None)
+    }
+
+    pub(super) fn with_limits(
+        ttl_ms: i64,
+        deduplication_groups: &BTreeMap<String, DeduplicationGroup>,
+        max_entries: Option<usize>,
+        max_cache_bytes: Option<usize>,
+    ) -> Self {
         Self {
             ttl: positive_ttl(ttl_ms),
             entries: HashMap::new(),
+            entries_bytes: 0,
+            max_entries,
+            max_cache_bytes,
             group_settings: deduplication_groups
                 .iter()
                 .map(|(name, group)| {
@@ -130,14 +147,19 @@ impl DeduplicationCache {
             .is_some_and(|ttl_ms| ttl_ms <= 0)
             || now.saturating_duration_since(cached.published_at) >= cached.ttl
         {
-            self.entries.remove(&message.output_channel);
+            self.remove_entry(&message.output_channel);
             return false;
         }
+        let cached = self
+            .entries
+            .get_mut(&message.output_channel)
+            .expect("cached entry was checked");
+        cached.last_used = now;
         cached.raw_payload.as_ref() == message.raw_payload()
     }
 
-    pub(super) fn remember(&mut self, messages: &[PendingMessage], now: time::Instant) {
-        self.remember_at(messages, now, epoch_millis());
+    pub(super) fn remember(&mut self, messages: &[PendingMessage], now: time::Instant) -> usize {
+        self.remember_at(messages, now, epoch_millis())
     }
 
     pub(super) fn remember_at(
@@ -145,7 +167,7 @@ impl DeduplicationCache {
         messages: &[PendingMessage],
         now: time::Instant,
         now_epoch_ms: u128,
-    ) {
+    ) -> usize {
         if !self.has_active_ttls()
             && messages.iter().all(|message| {
                 message.deduplication_group.is_none()
@@ -154,9 +176,10 @@ impl DeduplicationCache {
                         .is_some_and(|ttl_ms| ttl_ms > 0)
             })
         {
-            return;
+            return 0;
         }
 
+        let mut evictions = 0usize;
         let mut grouped = HashMap::<String, Vec<&PendingMessage>>::new();
         for message in messages {
             if let Some(group_name) = message.deduplication_group.as_deref() {
@@ -172,17 +195,32 @@ impl DeduplicationCache {
                 None => self.ttl,
             };
             let Some(ttl) = ttl.filter(|ttl| !ttl.is_zero()) else {
-                self.entries.remove(&message.output_channel);
+                self.remove_entry(&message.output_channel);
                 continue;
             };
+            let channel = &message.output_channel;
+            let payload = message.raw_payload_arc();
+            let entry_bytes = group_entry_bytes(channel, payload);
+            self.remove_entry(channel);
+            if self
+                .max_cache_bytes
+                .is_some_and(|max_cache_bytes| entry_bytes > max_cache_bytes)
+            {
+                // Mirror the group cache: a single entry over the byte budget is
+                // never cached, so it cannot flush the whole map.
+                continue;
+            }
+            self.entries_bytes = self.entries_bytes.saturating_add(entry_bytes);
             self.entries.insert(
-                message.output_channel.clone(),
+                channel.clone(),
                 CachedPublishedValue {
-                    raw_payload: Arc::clone(message.raw_payload_arc()),
+                    raw_payload: Arc::clone(payload),
                     published_at: now,
+                    last_used: now,
                     ttl,
                 },
             );
+            evictions = evictions.saturating_add(self.evict_lru_entries());
         }
 
         for (group_name, messages) in grouped {
@@ -271,12 +309,99 @@ impl DeduplicationCache {
                 }
             }
         }
+
+        evictions
+    }
+
+    /// Rolls back dispatch-time `remember` calls after a definitive pre-send
+    /// failure. A value is removed only while the cached entry still matches it;
+    /// an `Uncertain` outcome is never rolled back because it may have reached
+    /// the broker. Group members that become the last one drop their group, so
+    /// the shared deadline does not outlive the rollback.
+    pub(super) fn rollback(&mut self, messages: &[PendingMessage]) {
+        for message in messages {
+            if let Some(group_name) = message.deduplication_group.as_deref() {
+                let mut remove_group = false;
+                if let Some(group) = self.groups.get_mut(group_name) {
+                    let matches = group
+                        .entries
+                        .get(&message.output_channel)
+                        .is_some_and(|entry| entry.raw_payload.as_ref() == message.raw_payload());
+                    if matches {
+                        if let Some(entry) = group.entries.remove(&message.output_channel) {
+                            group.cache_bytes = group.cache_bytes.saturating_sub(
+                                group_entry_bytes(&message.output_channel, &entry.raw_payload),
+                            );
+                        }
+                        remove_group = group.entries.is_empty();
+                    }
+                }
+                if remove_group {
+                    self.groups.remove(group_name);
+                }
+                continue;
+            }
+            let matches = self
+                .entries
+                .get(&message.output_channel)
+                .is_some_and(|entry| entry.raw_payload.as_ref() == message.raw_payload());
+            if matches {
+                self.remove_entry(&message.output_channel);
+            }
+        }
     }
 
     pub(super) fn prune_expired(&mut self, now: time::Instant) {
-        self.entries
-            .retain(|_, cached| now.saturating_duration_since(cached.published_at) < cached.ttl);
+        let mut entries_bytes = 0usize;
+        self.entries.retain(|channel, cached| {
+            let keep = now.saturating_duration_since(cached.published_at) < cached.ttl;
+            if keep {
+                entries_bytes =
+                    entries_bytes.saturating_add(group_entry_bytes(channel, &cached.raw_payload));
+            }
+            keep
+        });
+        self.entries_bytes = entries_bytes;
         self.groups.retain(|_, group| now < group.expires_at);
+    }
+
+    fn remove_entry(&mut self, channel: &str) -> bool {
+        let Some(entry) = self.entries.remove(channel) else {
+            return false;
+        };
+        self.entries_bytes = self
+            .entries_bytes
+            .saturating_sub(group_entry_bytes(channel, &entry.raw_payload));
+        true
+    }
+
+    /// Evicts least-recently-used per-channel entries until both optional
+    /// limits hold, reporting how many entries were dropped.
+    fn evict_lru_entries(&mut self) -> usize {
+        let mut evictions = 0usize;
+        loop {
+            let over_entries = self
+                .max_entries
+                .is_some_and(|max_entries| self.entries.len() > max_entries);
+            let over_bytes = self
+                .max_cache_bytes
+                .is_some_and(|max_cache_bytes| self.entries_bytes > max_cache_bytes);
+            if !over_entries && !over_bytes {
+                break;
+            }
+            let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, cached)| cached.last_used)
+                .map(|(channel, _)| channel.clone())
+            else {
+                break;
+            };
+            if self.remove_entry(&oldest) {
+                evictions = evictions.saturating_add(1);
+            }
+        }
+        evictions
     }
 }
 

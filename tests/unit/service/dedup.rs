@@ -719,3 +719,155 @@ fn direct_queue_deduplicates_inside_ttl_and_accepts_same_value_after_expiry() {
     assert_eq!(snapshot.outputs["direct-dedup-output"].pending_keys, 1);
     assert_eq!(snapshot.pending_keys, 1);
 }
+
+#[test]
+fn per_channel_cache_evicts_least_recently_used_entries_at_entry_capacity() {
+    let now = time::Instant::now();
+    let mut cache = DeduplicationCache::with_limits(5000, &BTreeMap::new(), Some(2), None);
+    let a = pending_message("a", b"111".to_vec());
+    let b = pending_message("b", b"222".to_vec());
+    let c = pending_message("c", b"333".to_vec());
+
+    assert_eq!(cache.remember_at(std::slice::from_ref(&a), now, 10_000), 0);
+    assert_eq!(
+        cache.remember_at(
+            std::slice::from_ref(&b),
+            now + Duration::from_millis(1),
+            10_001,
+        ),
+        0
+    );
+    // Touching `a` through a suppression check refreshes its LRU position.
+    assert!(cache.should_suppress(&a, now + Duration::from_millis(2)));
+    assert_eq!(
+        cache.remember_at(
+            std::slice::from_ref(&c),
+            now + Duration::from_millis(3),
+            10_003,
+        ),
+        1
+    );
+
+    assert!(cache.entries.contains_key("a"));
+    assert!(!cache.entries.contains_key("b"));
+    assert!(cache.entries.contains_key("c"));
+    assert_eq!(cache.entries_bytes, 8);
+}
+
+#[test]
+fn per_channel_cache_evicts_at_byte_capacity_and_bypasses_oversized_values() {
+    let now = time::Instant::now();
+    let mut cache = DeduplicationCache::with_limits(5000, &BTreeMap::new(), None, Some(8));
+    let a = pending_message("a", b"111".to_vec());
+    let b = pending_message("b", b"222".to_vec());
+    let c = pending_message("c", b"333".to_vec());
+
+    assert_eq!(cache.remember_at(std::slice::from_ref(&a), now, 1), 0);
+    assert_eq!(
+        cache.remember_at(std::slice::from_ref(&b), now + Duration::from_millis(1), 2),
+        0
+    );
+    assert_eq!(
+        cache.remember_at(std::slice::from_ref(&c), now + Duration::from_millis(2), 3),
+        1
+    );
+
+    assert!(!cache.entries.contains_key("a"));
+    assert!(cache.entries.contains_key("b"));
+    assert!(cache.entries.contains_key("c"));
+    assert_eq!(cache.entries_bytes, 8);
+
+    // A single value over the byte budget is not cached, mirroring groups.
+    let oversized = pending_message("large", b"0123456789".to_vec());
+    assert_eq!(
+        cache.remember_at(
+            std::slice::from_ref(&oversized),
+            now + Duration::from_millis(3),
+            4,
+        ),
+        0
+    );
+    assert!(!cache.entries.contains_key("large"));
+    assert_eq!(cache.entries_bytes, 8);
+    assert!(!cache.should_suppress(&oversized, now + Duration::from_millis(4)));
+}
+
+#[test]
+fn rollback_removes_matching_values_and_keeps_newer_ones() {
+    let now = time::Instant::now();
+    let groups = group_settings(600, true);
+    let mut cache = DeduplicationCache::with_groups(5000, &groups);
+    let first = pending_group_message("events:first", b"first", "shared");
+    let sibling = pending_group_message("events:sibling", b"sibling", "shared");
+    cache.remember(&[first.clone(), sibling.clone()], now);
+
+    // A value overwritten after dispatch must not be rolled back.
+    let changed = pending_group_message("events:first", b"changed", "shared");
+    cache.remember(
+        std::slice::from_ref(&changed),
+        now + Duration::from_millis(1),
+    );
+    cache.rollback(std::slice::from_ref(&first));
+    assert!(cache.should_suppress(&changed, now + Duration::from_millis(2)));
+
+    // Matching members are removed and the group bytes shrink with them.
+    cache.rollback(std::slice::from_ref(&changed));
+    assert!(!cache.groups["shared"].entries.contains_key("events:first"));
+    assert_eq!(
+        cache.groups["shared"].cache_bytes,
+        "events:sibling".len() + "sibling".len()
+    );
+
+    // Rolling back the last member drops the shared group and its deadline.
+    cache.rollback(std::slice::from_ref(&sibling));
+    assert!(!cache.groups.contains_key("shared"));
+
+    // Per-channel entries follow the same rule.
+    let per_channel = pending_message("events:per-channel", b"value".to_vec());
+    let mut cache = DeduplicationCache::new(5000);
+    cache.remember(std::slice::from_ref(&per_channel), now);
+    let updated = pending_message("events:per-channel", b"updated".to_vec());
+    cache.remember(std::slice::from_ref(&updated), now);
+    cache.rollback(std::slice::from_ref(&per_channel));
+    assert!(cache.should_suppress(&updated, now));
+    cache.rollback(std::slice::from_ref(&updated));
+    assert!(cache.entries.is_empty());
+    assert_eq!(cache.entries_bytes, 0);
+}
+
+#[tokio::test]
+async fn successful_publishes_report_deduplication_evictions() {
+    let metrics = Metrics::new();
+    let output_metrics = metrics.register_output("evicting-output");
+    let mut cache = DeduplicationCache::with_limits(5000, &BTreeMap::new(), Some(1), None);
+    let first = pending_message("events:a", b"first".to_vec());
+    let second = pending_message("events:b", b"second".to_vec());
+    cache.remember(std::slice::from_ref(&first), time::Instant::now());
+
+    let mut publisher = RecordingPublisher::default();
+    let mut failure_log = OutputFailureLog::default();
+    let mut context = publish_context_for_test(
+        "evicting-output",
+        &mut failure_log,
+        &mut cache,
+        &metrics,
+        &output_metrics,
+    );
+    publish_once(
+        &mut publisher,
+        std::slice::from_ref(&second),
+        false,
+        &mut context,
+    )
+    .await
+    .unwrap();
+
+    assert!(!cache.entries.contains_key("events:a"));
+    assert!(cache.entries.contains_key("events:b"));
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot.deduplication_evictions_total, 1);
+    assert_eq!(
+        snapshot.outputs["evicting-output"].deduplication_evictions_total,
+        1
+    );
+}

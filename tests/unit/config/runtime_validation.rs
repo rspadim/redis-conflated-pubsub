@@ -95,6 +95,51 @@ fn channel_cache_capacity_defaults_is_configurable_and_zero_disables_it() {
 }
 
 #[test]
+fn deduplication_cache_limits_reject_zero_and_excessive_values() {
+    let mut config = filter_test_config();
+    config.validate().unwrap();
+
+    let deduplication = &mut config.outputs.get_mut("out").unwrap().deduplication;
+    deduplication.max_entries = Some(0);
+    let error = config.validate().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("outputs.out.deduplication.max_entries must be greater than zero")
+    );
+    let deduplication = &mut config.outputs.get_mut("out").unwrap().deduplication;
+    deduplication.max_entries = Some(MAX_DEDUPLICATION_CACHE_ENTRIES + 1);
+    let error = config.validate().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("outputs.out.deduplication.max_entries must not exceed")
+    );
+
+    let deduplication = &mut config.outputs.get_mut("out").unwrap().deduplication;
+    deduplication.max_entries = Some(MAX_DEDUPLICATION_CACHE_ENTRIES);
+    deduplication.max_cache_bytes = Some(0);
+    let error = config.validate().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("outputs.out.deduplication.max_cache_bytes must be greater than zero")
+    );
+    let deduplication = &mut config.outputs.get_mut("out").unwrap().deduplication;
+    deduplication.max_cache_bytes = Some(MAX_DEDUPLICATION_CACHE_BYTES + 1);
+    let error = config.validate().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("outputs.out.deduplication.max_cache_bytes must not exceed")
+    );
+
+    let deduplication = &mut config.outputs.get_mut("out").unwrap().deduplication;
+    deduplication.max_cache_bytes = Some(MAX_DEDUPLICATION_CACHE_BYTES);
+    config.validate().unwrap();
+}
+
+#[test]
 fn configured_runtime_durations_are_limited_to_avoid_instant_overflow() {
     let mut config: AppConfig = serde_json::from_str(
             r#"{

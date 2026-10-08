@@ -1,5 +1,6 @@
 use super::{
     AppConfig, DEFAULT_CHANNEL_CACHE_MAX_ENTRIES, MAX_CHANNEL_CACHE_MAX_ENTRIES,
+    MAX_DEDUPLICATION_CACHE_BYTES, MAX_DEDUPLICATION_CACHE_ENTRIES,
     MAX_DEDUPLICATION_GROUP_CACHE_BYTES, MAX_DEDUPLICATION_GROUP_MEMBERS, MAX_RUNTIME_DURATION_MS,
 };
 
@@ -126,6 +127,10 @@ pub(super) fn json_schema() -> serde_json::Value {
         serde_json::json!(MAX_DEDUPLICATION_GROUP_MEMBERS);
     schema["$defs"]["DeduplicationGroup"]["properties"]["max_cache_bytes"]["maximum"] =
         serde_json::json!(MAX_DEDUPLICATION_GROUP_CACHE_BYTES);
+    schema["$defs"]["DeduplicationConfig"]["properties"]["max_entries"]["maximum"] =
+        serde_json::json!(MAX_DEDUPLICATION_CACHE_ENTRIES);
+    schema["$defs"]["DeduplicationConfig"]["properties"]["max_cache_bytes"]["maximum"] =
+        serde_json::json!(MAX_DEDUPLICATION_CACHE_BYTES);
     schema["$defs"]["ChannelPolicy"]["allOf"] = serde_json::json!([
         {
             "oneOf": [

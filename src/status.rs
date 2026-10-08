@@ -30,6 +30,7 @@ pub struct Metrics {
     pub conflated_payload_bytes_total: AtomicU64,
     pub deduplicated_messages_total: AtomicU64,
     pub deduplicated_payload_bytes_total: AtomicU64,
+    pub deduplication_evictions_total: AtomicU64,
     pub excluded_messages_total: AtomicU64,
     pub dropped_messages_total: AtomicU64,
     pub dropped_payload_bytes_total: AtomicU64,
@@ -78,6 +79,7 @@ pub struct OutputMetrics {
     conflated_payload_bytes_total: AtomicU64,
     deduplicated_messages_total: AtomicU64,
     deduplicated_payload_bytes_total: AtomicU64,
+    deduplication_evictions_total: AtomicU64,
     dropped_messages_total: AtomicU64,
     dropped_payload_bytes_total: AtomicU64,
     truncated_messages_total: AtomicU64,
@@ -113,6 +115,7 @@ impl OutputMetrics {
             conflated_payload_bytes_total: AtomicU64::new(0),
             deduplicated_messages_total: AtomicU64::new(0),
             deduplicated_payload_bytes_total: AtomicU64::new(0),
+            deduplication_evictions_total: AtomicU64::new(0),
             dropped_messages_total: AtomicU64::new(0),
             dropped_payload_bytes_total: AtomicU64::new(0),
             truncated_messages_total: AtomicU64::new(0),
@@ -156,6 +159,9 @@ impl OutputMetrics {
             deduplicated_messages_total: self.deduplicated_messages_total.load(Ordering::Relaxed),
             deduplicated_payload_bytes_total: self
                 .deduplicated_payload_bytes_total
+                .load(Ordering::Relaxed),
+            deduplication_evictions_total: self
+                .deduplication_evictions_total
                 .load(Ordering::Relaxed),
             dropped_messages_total: self.dropped_messages_total.load(Ordering::Relaxed),
             dropped_payload_bytes_total: self.dropped_payload_bytes_total.load(Ordering::Relaxed),
@@ -208,6 +214,7 @@ impl Metrics {
             conflated_payload_bytes_total: AtomicU64::new(0),
             deduplicated_messages_total: AtomicU64::new(0),
             deduplicated_payload_bytes_total: AtomicU64::new(0),
+            deduplication_evictions_total: AtomicU64::new(0),
             excluded_messages_total: AtomicU64::new(0),
             dropped_messages_total: AtomicU64::new(0),
             dropped_payload_bytes_total: AtomicU64::new(0),
@@ -404,6 +411,18 @@ impl Metrics {
             .fetch_sub(payload_bytes, Ordering::Relaxed);
     }
 
+    pub fn record_deduplication_evictions(&self, output: &OutputMetrics, evictions: usize) {
+        if evictions == 0 {
+            return;
+        }
+        let evictions = evictions as u64;
+        self.deduplication_evictions_total
+            .fetch_add(evictions, Ordering::Relaxed);
+        output
+            .deduplication_evictions_total
+            .fetch_add(evictions, Ordering::Relaxed);
+    }
+
     pub fn record_output_deduplicated(
         &self,
         output: &OutputMetrics,
@@ -581,6 +600,9 @@ impl Metrics {
             deduplicated_payload_bytes_total: self
                 .deduplicated_payload_bytes_total
                 .load(Ordering::Relaxed),
+            deduplication_evictions_total: self
+                .deduplication_evictions_total
+                .load(Ordering::Relaxed),
             excluded_messages_total: self.excluded_messages_total.load(Ordering::Relaxed),
             dropped_messages_total: self.dropped_messages_total.load(Ordering::Relaxed),
             dropped_payload_bytes_total: self.dropped_payload_bytes_total.load(Ordering::Relaxed),
@@ -628,6 +650,8 @@ pub struct StatusSnapshot {
     pub conflated_payload_bytes_total: u64,
     pub deduplicated_messages_total: u64,
     pub deduplicated_payload_bytes_total: u64,
+    /// Per-channel deduplication cache entries evicted by the optional LRU limits.
+    pub deduplication_evictions_total: u64,
     pub excluded_messages_total: u64,
     pub dropped_messages_total: u64,
     pub dropped_payload_bytes_total: u64,
@@ -661,6 +685,8 @@ pub struct OutputStatusSnapshot {
     pub conflated_payload_bytes_total: u64,
     pub deduplicated_messages_total: u64,
     pub deduplicated_payload_bytes_total: u64,
+    /// Per-channel deduplication cache entries evicted by the optional LRU limits.
+    pub deduplication_evictions_total: u64,
     pub dropped_messages_total: u64,
     pub dropped_payload_bytes_total: u64,
     pub truncated_messages_total: u64,

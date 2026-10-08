@@ -13,6 +13,8 @@ mod validate;
 pub const MAX_RUNTIME_DURATION_MS: i64 = 31_536_000_000;
 pub const MAX_DEDUPLICATION_GROUP_MEMBERS: usize = 100_000;
 pub const MAX_DEDUPLICATION_GROUP_CACHE_BYTES: usize = 256 * 1024 * 1024;
+pub const MAX_DEDUPLICATION_CACHE_ENTRIES: usize = 100_000;
+pub const MAX_DEDUPLICATION_CACHE_BYTES: usize = 256 * 1024 * 1024;
 pub const DEFAULT_CHANNEL_CACHE_MAX_ENTRIES: usize = 16_384;
 pub const MAX_CHANNEL_CACHE_MAX_ENTRIES: usize = 100_000;
 
@@ -347,12 +349,36 @@ pub struct DeduplicationConfig {
         description = "Deduplication TTL in milliseconds; 0 by default and values <= 0 disable deduplication."
     )]
     pub ttl_ms: i64,
+    /// Treat a direct-mode batch as published as soon as it is dispatched instead of waiting for in-flight batches on the same channel or group to settle.
+    #[serde(default)]
+    #[schemars(
+        default,
+        description = "When true, direct-mode batches are remembered for deduplication at dispatch time instead of waiting for in-flight batches on the same channel or group to settle; a definitive pre-send failure (NotSent) rolls the value back. Defaults to false."
+    )]
+    pub in_flight_suppression: bool,
+    /// Optional maximum number of per-channel deduplication entries; the least-recently-used entry is evicted at capacity.
+    #[serde(default)]
+    #[schemars(
+        range(min = 1),
+        description = "Maximum cached per-channel deduplication entries. At capacity, the least-recently-used entry is evicted; absent or null means unlimited."
+    )]
+    pub max_entries: Option<usize>,
+    /// Optional maximum combined bytes of cached channel names and raw payloads for per-channel deduplication.
+    #[serde(default)]
+    #[schemars(
+        range(min = 1),
+        description = "Maximum combined bytes of cached channel names and raw payloads for per-channel deduplication. At capacity, the least-recently-used entry is evicted; absent or null means unlimited."
+    )]
+    pub max_cache_bytes: Option<usize>,
 }
 
 impl Default for DeduplicationConfig {
     fn default() -> Self {
         Self {
             ttl_ms: default_deduplication_ttl_ms(),
+            in_flight_suppression: false,
+            max_entries: None,
+            max_cache_bytes: None,
         }
     }
 }

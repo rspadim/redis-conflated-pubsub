@@ -106,16 +106,22 @@ pub(super) fn settle_publish_result(
 ) -> std::result::Result<i64, PublishFailure> {
     match result {
         Ok(subscribers) => {
-            context
+            let evictions = context
                 .deduplication_cache
                 .remember(batch, time::Instant::now());
+            context
+                .metrics
+                .record_deduplication_evictions(context.output_metrics, evictions);
             Ok(subscribers)
         }
         Err(failure) => {
             if matches!(&failure, PublishFailure::Uncertain(_)) {
-                context
+                let evictions = context
                     .deduplication_cache
                     .remember(batch, time::Instant::now());
+                context
+                    .metrics
+                    .record_deduplication_evictions(context.output_metrics, evictions);
             }
             match &failure {
                 PublishFailure::NotSent(error) => {
