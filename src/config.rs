@@ -419,6 +419,14 @@ pub struct ConflationConfig {
     #[serde(default)]
     #[schemars(range(min = 1))]
     pub max_bytes_per_exec: Option<usize>,
+    /// Optional in-flight command window; defaults to max_commands_per_exec.
+    #[serde(default)]
+    #[schemars(range(min = 1))]
+    pub max_in_flight_commands: Option<usize>,
+    /// Optional in-flight request-byte window; defaults to the resolved max_bytes_per_exec.
+    #[serde(default)]
+    #[schemars(range(min = 1))]
+    pub max_in_flight_bytes: Option<usize>,
     #[serde(default)]
     pub oversized_message_policy: Option<OversizedMessagePolicy>,
 }

@@ -419,6 +419,97 @@ fn conflation_command_limit_defaults_and_must_be_positive() {
     assert!(error.to_string().contains("max_bytes_per_exec"));
 }
 #[test]
+fn conflation_in_flight_limits_default_to_none_and_must_be_positive() {
+    let mut config: AppConfig = serde_json::from_str(
+            r#"{
+                "input":{"redis":{"host":"input.example.net"},"subscriptions":[{"type":"subscribe","channel":"events"}]},
+                "outputs":{"custom-output":{"redis":{"host":"output.example.net"},"conflation":{"interval_ms":10}}},
+                "instance_lock":{"path":"lock"}
+            }"#,
+        )
+        .unwrap();
+    assert_eq!(
+        config.outputs["custom-output"]
+            .conflation
+            .max_in_flight_commands,
+        None
+    );
+    assert_eq!(
+        config.outputs["custom-output"]
+            .conflation
+            .max_in_flight_bytes,
+        None
+    );
+    config.validate().unwrap();
+
+    let schema = AppConfig::json_schema();
+    let properties = &schema["$defs"]["ConflationConfig"]["properties"];
+    assert_eq!(properties["max_in_flight_commands"]["minimum"], 1);
+    assert_eq!(
+        properties["max_in_flight_commands"]["default"],
+        serde_json::Value::Null
+    );
+    assert_eq!(properties["max_in_flight_bytes"]["minimum"], 1);
+    assert_eq!(
+        properties["max_in_flight_bytes"]["default"],
+        serde_json::Value::Null
+    );
+
+    let overridden: AppConfig = serde_json::from_str(
+            r#"{
+                "input":{"redis":{"host":"input.example.net"},"subscriptions":[{"type":"subscribe","channel":"events"}]},
+                "outputs":{"custom-output":{"redis":{"host":"output.example.net"},"conflation":{"interval_ms":10,"max_in_flight_commands":8,"max_in_flight_bytes":4096}}},
+                "instance_lock":{"path":"lock"}
+            }"#,
+        )
+        .unwrap();
+    assert_eq!(
+        overridden.outputs["custom-output"]
+            .conflation
+            .max_in_flight_commands,
+        Some(8)
+    );
+    assert_eq!(
+        overridden.outputs["custom-output"]
+            .conflation
+            .max_in_flight_bytes,
+        Some(4096)
+    );
+    overridden.validate().unwrap();
+
+    config
+        .outputs
+        .get_mut("custom-output")
+        .unwrap()
+        .conflation
+        .max_in_flight_commands = Some(0);
+    let error = config.validate().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("outputs.custom-output.conflation.max_in_flight_commands")
+    );
+
+    config
+        .outputs
+        .get_mut("custom-output")
+        .unwrap()
+        .conflation
+        .max_in_flight_commands = None;
+    config
+        .outputs
+        .get_mut("custom-output")
+        .unwrap()
+        .conflation
+        .max_in_flight_bytes = Some(0);
+    let error = config.validate().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("outputs.custom-output.conflation.max_in_flight_bytes")
+    );
+}
+#[test]
 fn oversized_message_policy_defaults_and_rejects_unknown_values() {
     let config: AppConfig = serde_json::from_str(
             r#"{

@@ -123,6 +123,8 @@ pub(super) async fn publish_output(
         name,
         config,
         max_bytes_per_exec,
+        max_in_flight_commands,
+        max_in_flight_bytes,
         oversized_policy,
         filters_endpoint_enabled,
         channel_policy_cache_max_entries,
@@ -173,9 +175,11 @@ pub(super) async fn publish_output(
 
     metrics.set_output_state(&output_metrics, "running");
     loop {
+        // Intake measures queued payload bytes, while the in-flight window
+        // measures encoded request bytes; the two quotas are intentionally asymmetric.
         let input_command_capacity =
-            max_commands_per_exec.saturating_sub(in_flight_direct_messages);
-        let input_byte_capacity = max_bytes_per_exec.saturating_sub(in_flight_direct_bytes);
+            max_in_flight_commands.saturating_sub(in_flight_direct_messages);
+        let input_byte_capacity = max_in_flight_bytes.saturating_sub(in_flight_direct_bytes);
         if due_intervals.is_empty()
             && passthrough.len() == in_flight_direct_messages
             && input_command_capacity > 0
@@ -271,7 +275,7 @@ pub(super) async fn publish_output(
                     metrics: &metrics,
                     output_metrics: &output_metrics,
                 };
-                publish_conflated_interval_pending(
+                let has_remaining = publish_conflated_interval_pending(
                     &mut publisher,
                     &mut pending,
                     &mut passthrough,
@@ -282,16 +286,24 @@ pub(super) async fn publish_output(
                 )
                 .await;
                 metrics.set_output_state(&output_metrics, "running");
+                if has_remaining {
+                    // One chunk per turn: keep the interval due so the next turn
+                    // drains it after completions, timers, and the receiver got a turn.
+                    due_intervals.push(interval_ms);
+                }
             }
-            continue;
         }
 
         while passthrough.len() > in_flight_direct_messages
-            && in_flight_direct_messages < max_commands_per_exec
+            && in_flight_direct_messages < max_in_flight_commands
             && !(connection.is_none() && !in_flight_direct.is_empty())
         {
-            let available_commands = max_commands_per_exec - in_flight_direct_messages;
-            let available_bytes = max_bytes_per_exec.saturating_sub(in_flight_direct_bytes);
+            // A new batch is bounded by both the per-batch ceilings and the
+            // remaining in-flight window.
+            let available_commands =
+                max_commands_per_exec.min(max_in_flight_commands - in_flight_direct_messages);
+            let available_bytes =
+                max_bytes_per_exec.min(max_in_flight_bytes.saturating_sub(in_flight_direct_bytes));
             let (batch_length, atomic, request_bytes) = passthrough_batch_length(
                 available_commands,
                 available_bytes,
@@ -369,22 +381,8 @@ pub(super) async fn publish_output(
         let next_flush_tick = next_schedule_tick(&flush_schedules);
         tokio::select! {
             biased;
-            _ = async {
-                if let Some(next_tick) = next_flush_tick {
-                    time::sleep_until(next_tick).await;
-                } else {
-                    std::future::pending::<()>().await;
-                }
-            }, if !flush_schedules.is_empty() => {}
-            _ = async {
-                if let Some(interval) = deduplication_prune_interval.as_mut() {
-                    interval.tick().await;
-                } else {
-                    std::future::pending::<()>().await;
-                }
-            }, if deduplication_prune_interval.is_some() => {
-                deduplication_cache.prune_expired(time::Instant::now());
-            }
+            // Settle in-flight completions before the timer so a busy flush
+            // schedule cannot starve them.
             completed = in_flight_direct.next(), if !in_flight_direct.is_empty() => {
                 if let Some((batch, result, publish_rtt)) = completed {
                     let (message_count, request_bytes) = in_flight_batches
@@ -445,12 +443,28 @@ pub(super) async fn publish_output(
                     }
                 }
             }
+            _ = async {
+                if let Some(next_tick) = next_flush_tick {
+                    time::sleep_until(next_tick).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            }, if !flush_schedules.is_empty() => {}
+            _ = async {
+                if let Some(interval) = deduplication_prune_interval.as_mut() {
+                    interval.tick().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            }, if deduplication_prune_interval.is_some() => {
+                deduplication_cache.prune_expired(time::Instant::now());
+            }
             message = receiver.recv(), if !input_closed
                 && deferred_input.is_none()
                 && due_intervals.is_empty()
                 && passthrough.len() == in_flight_direct_messages
-                && in_flight_direct_messages < max_commands_per_exec
-                && in_flight_direct_bytes < max_bytes_per_exec => {
+                && in_flight_direct_messages < max_in_flight_commands
+                && in_flight_direct_bytes < max_in_flight_bytes => {
                 match message {
                     Some(message) => {
                         deferred_input = Some(message);

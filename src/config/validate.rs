@@ -76,6 +76,12 @@ fn validate_redis_and_outputs(config: &AppConfig) -> Result<()> {
         if output.conflation.max_bytes_per_exec == Some(0) {
             bail!("outputs.{name}.conflation.max_bytes_per_exec must be greater than zero");
         }
+        if output.conflation.max_in_flight_commands == Some(0) {
+            bail!("outputs.{name}.conflation.max_in_flight_commands must be greater than zero");
+        }
+        if output.conflation.max_in_flight_bytes == Some(0) {
+            bail!("outputs.{name}.conflation.max_in_flight_bytes must be greater than zero");
+        }
         validate_runtime_duration_ms(
             &format!("outputs.{name}.conflation.interval_ms"),
             output.conflation.interval_ms,

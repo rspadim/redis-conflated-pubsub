@@ -401,3 +401,84 @@ async fn distinct_interval_groups_keep_cadence_and_flush_only_the_due_group() {
         [200, 300]
     );
 }
+
+#[tokio::test]
+async fn large_conflated_bucket_drains_one_chunk_per_turn_and_stays_due_until_empty() {
+    let metrics = Metrics::new();
+    let output_metrics = metrics.register_output("fairness-output");
+    let mut pending = PendingByInterval::new();
+    let mut passthrough = VecDeque::new();
+    let mut cache = DeduplicationCache::new(0);
+    for suffix in ["a", "b", "c", "d", "e"] {
+        enqueue_for_test_with_cache(
+            50,
+            InboundMessage {
+                output_channel: format!("events:{suffix}"),
+                payload: suffix.as_bytes().to_vec().into(),
+            },
+            &mut pending,
+            &mut passthrough,
+            &metrics,
+            &output_metrics,
+            &mut cache,
+        );
+    }
+
+    let mut publisher = RecordingPublisher::default();
+    let mut failure_log = OutputFailureLog::default();
+    let mut context = publish_context_for_test(
+        "fairness-output",
+        &mut failure_log,
+        &mut cache,
+        &metrics,
+        &output_metrics,
+    );
+
+    // Mirrors the worker caller: the interval is re-added to `due_intervals`
+    // while the bucket reports remaining work, so it stays due until drained.
+    let mut due_intervals = vec![50];
+    let mut turns = 0;
+    while let Some(interval_ms) = due_intervals.pop() {
+        turns += 1;
+        let has_remaining = publish_conflated_interval_pending(
+            &mut publisher,
+            &mut pending,
+            &mut passthrough,
+            interval_ms,
+            2,
+            usize::MAX,
+            &mut context,
+        )
+        .await;
+        assert_eq!(
+            publisher.successful_batches.len(),
+            turns,
+            "each turn must publish at most one chunk"
+        );
+        if has_remaining {
+            assert!(pending.contains_key(&interval_ms));
+            due_intervals.push(interval_ms);
+        } else {
+            assert!(!pending.contains_key(&interval_ms));
+        }
+    }
+
+    assert_eq!(turns, 3);
+    assert!(due_intervals.is_empty());
+    assert!(pending.is_empty());
+    assert_eq!(
+        publisher
+            .successful_batches
+            .iter()
+            .map(|batch| batch
+                .iter()
+                .map(|message| message.output_channel.as_str())
+                .collect::<Vec<_>>())
+            .collect::<Vec<_>>(),
+        vec![
+            vec!["events:a", "events:b"],
+            vec!["events:c", "events:d"],
+            vec!["events:e"],
+        ]
+    );
+}

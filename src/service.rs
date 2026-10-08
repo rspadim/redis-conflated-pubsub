@@ -174,6 +174,8 @@ struct OutputRuntimeSetup {
     name: String,
     config: OutputConfig,
     max_bytes_per_exec: usize,
+    max_in_flight_commands: usize,
+    max_in_flight_bytes: usize,
     oversized_policy: OversizedMessagePolicy,
     filters_endpoint_enabled: bool,
     channel_policy_cache_max_entries: usize,
@@ -299,10 +301,21 @@ pub async fn run(
                 let sender_name = name.clone();
                 let channel_prefix = output_config.channel_prefix.clone();
                 let channel_suffix = output_config.channel_suffix.clone();
+                // The in-flight window defaults to the per-batch ceilings.
+                let max_in_flight_commands = output_config
+                    .conflation
+                    .max_in_flight_commands
+                    .unwrap_or(output_config.conflation.max_commands_per_exec);
+                let max_in_flight_bytes = output_config
+                    .conflation
+                    .max_in_flight_bytes
+                    .unwrap_or(max_bytes_per_exec);
                 let runtime_setup = OutputRuntimeSetup {
                     name,
                     config: output_config,
                     max_bytes_per_exec,
+                    max_in_flight_commands,
+                    max_in_flight_bytes,
                     oversized_policy,
                     filters_endpoint_enabled,
                     channel_policy_cache_max_entries,
