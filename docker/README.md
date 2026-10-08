@@ -45,7 +45,7 @@ docker compose -f compose.oversize.test.yml down --volumes --remove-orphans
 
 ### RESP protocol and oversized-message policies
 
-Checks byte-sized transactions, `send`/`truncate`/`drop`, and direct `PUBLISH` without transaction wrappers:
+Checks byte-sized transactions, `send`/`truncate`/`drop`, and direct `PUBLISH` without transaction wrappers. The counting proxy and the driver are Rust subcommands of `examples/e2e.rs`, built into the `Dockerfile.e2e` image:
 
 ```sh
 docker compose -f compose.protocol.test.yml up --build --abort-on-container-exit --exit-code-from protocol-integration-test
@@ -111,7 +111,7 @@ docker compose -p loopback -f compose.loopback.test.yml down --volumes --remove-
 
 ### Fault handling
 
-The `fault` profile in `compose.test.yml` exercises uncertain/failed publish handling through a Redis fault proxy:
+The `fault` profile in `compose.test.yml` exercises uncertain/failed publish handling through the Rust fault proxy and driver from `examples/e2e.rs` (built into the `Dockerfile.e2e` image):
 
 ```sh
 docker compose -f compose.test.yml --profile fault up --build --abort-on-container-exit --exit-code-from fault-integration fault-integration

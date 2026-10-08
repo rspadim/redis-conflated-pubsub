@@ -55,20 +55,20 @@ services:
 
   fault-proxy:
     profiles: ["fault"]
-    image: python:3.13-alpine
-    command: ["python", "/tests/redis_fault_proxy.py"]
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e
+    command: ["redis-conflated-e2e", "fault-proxy"]
     environment:
       REDIS_HOST: redis
       REDIS_PORT: 6379
       PROXY_PORT: 6379
       STATS_PORT: 9091
       FAULT_ON_SUCCESSFUL_EXEC_NUMBER: 2
-    volumes:
-      - ./tests:/tests:ro
     networks:
       e2e: {}
     healthcheck:
-      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('127.0.0.1',6379),2); s.close()"]
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 6379"]
       interval: 1s
       timeout: 2s
       retries: 30
@@ -94,15 +94,15 @@ services:
 
   fault-integration:
     profiles: ["fault"]
-    image: python:3.13-alpine
-    command: ["python", "/tests/docker_fault_integration.py"]
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e
+    command: ["redis-conflated-e2e", "fault-integration"]
     environment:
       REDIS_HOST: redis
       PROXY_HOST: fault-proxy
       FAULT_APP_HOST: fault-service
       STATUS_URL: http://fault-service:9090/
-    volumes:
-      - ./tests:/tests:ro
     networks:
       e2e: {}
     depends_on:

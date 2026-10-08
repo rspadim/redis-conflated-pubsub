@@ -204,6 +204,6 @@ Observations:
 
 ## Test suite
 
-- Unit and integration tests live in `tests/unit/`, included as crate modules; `${cargo test --locked}` currently runs 98 tests and lists 8 ignored manual benchmarks.
-- Compose E2Es (see [`../docker/README.md`](../docker/README.md)): Pub/Sub integration, oversized request handling, RESP protocol/policies, TTL/groups/SIGHUP, hot-path latency (closed/open/mixed), and fault handling through a Redis proxy.
+- Unit and integration tests live in `tests/unit/`, included as crate modules; `${cargo test --locked}` currently runs 130 tests and lists 8 ignored manual benchmarks.
+- Compose E2Es (see [`../docker/README.md`](../docker/README.md)): Pub/Sub integration, oversized request handling, RESP protocol/policies, TTL/groups/SIGHUP, hot-path latency (closed/open/mixed), and fault handling. The RESP protocol and fault stacks run the Rust proxies and drivers from `examples/e2e.rs` (built by `Dockerfile.e2e`) instead of Python.
 - `cargo fmt --all --check` and `cargo clippy --all-targets --locked -- -D warnings` are expected clean.

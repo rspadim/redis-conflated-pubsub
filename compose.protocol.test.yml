@@ -11,19 +11,19 @@ services:
       retries: 30
 
   counting-proxy:
-    image: python:3.13-alpine
-    command: ["python", "/tests/redis_counting_proxy.py"]
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e
+    command: ["redis-conflated-e2e", "counting-proxy"]
     environment:
       REDIS_HOST: redis-protocol
       REDIS_PORT: 6379
       PROXY_PORT: 6379
       STATS_PORT: 9091
-    volumes:
-      - ./tests:/tests:ro
     networks:
       protocol: {}
     healthcheck:
-      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('127.0.0.1',6379),2); s.close()"]
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 6379"]
       interval: 1s
       timeout: 2s
       retries: 30
@@ -49,16 +49,16 @@ services:
         condition: service_healthy
 
   protocol-integration-test:
-    image: python:3.13-alpine
-    command: ["python", "/tests/docker_protocol_integration.py"]
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e
+    command: ["redis-conflated-e2e", "protocol-integration"]
     environment:
       REDIS_HOST: redis-protocol
       REDIS_PORT: 6379
       STATUS_URL: http://service-protocol:9090/
       PROXY_HOST: counting-proxy
       PROXY_STATS_PORT: 9091
-    volumes:
-      - ./tests:/tests:ro
     networks:
       protocol: {}
     depends_on:
