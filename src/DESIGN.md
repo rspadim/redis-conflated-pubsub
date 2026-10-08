@@ -152,6 +152,22 @@ Local Docker/WSL runs with synthetic 64-channel names, worker-local caches and P
 
 Window sweep (`max_commands_per_exec`, single output, 640k, Redis 7.4.11, open-loop pipeline 128): 256 → 99.8k msg/s, publish phase 2.87 s, queue wait 1135 ms, publish RTT avg 2.0 ms; 1024 → 85.6k msg/s, 3.47 s, 701 ms, 10.5 ms; 4096 → 93.8k msg/s, 3.11 s, 378 ms, 28.0 ms. The rate does not scale with the in-flight window while the publish RTT grows proportionally, so the plateau is server-side PUBLISH processing, not the client window; a larger window only redistributes latency (less queue wait, more per-batch RTT).
 
+2D grid after the decoupling (`max_commands_per_exec` × `max_in_flight_commands`, single output, 640k, open-loop, median of 3 reps):
+
+| Batch | Window | Rate (msg/s) | Publish phase | Drain | Queue wait avg | Publish RTT avg |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 64 | 256 | 116.1k | 3.16 s | 2.63 s | 1566 ms | 2.0 ms |
+| 64 | 1024 | 129.3k | 2.79 s | 2.17 s | 848 ms | 6.9 ms |
+| 64 | 4096 | 114.8k | 3.15 s | 2.37 s | 800 ms | 30.8 ms |
+| 256 | 256 | 130.5k | 2.79 s | 2.11 s | 1225 ms | 1.6 ms |
+| 256 | 1024 | 129.3k | 2.98 s | 2.08 s | 898 ms | 6.6 ms |
+| 256 | 4096 | 117.3k | 2.88 s | 2.43 s | 655 ms | 27.5 ms |
+| 1024 | 256 | 130.6k | 2.80 s | 2.15 s | 1396 ms | 1.7 ms |
+| 1024 | 1024 | 123.0k | 2.95 s | 2.27 s | 979 ms | 7.0 ms |
+| 1024 | 4096 | 119.8k | 2.99 s | 2.14 s | 712 ms | 21.3 ms |
+
+The window helps up to 1024 (rate up, queue wait roughly halved); at 4096 the publish RTT explodes because too many concurrent `MULTI/EXEC` requests queue at the output server. The batch cap helps mainly with a small window (64→256/1024 at window 256 is ~+12%); batch larger than the window is harmless (the dispatch chunks by window), while window much larger than batch underfills transactions and hurts. Best region: window 1024 with batch 64–256. Run-to-run variance is high (for example 256/1024 measured 91k and 138k msg/s), so rate differences under ~10% are noise; the latency signals are the robust ones.
+
 Closed-loop, Redis 7.4.11, 4×2,500: with two outputs serial p50 ~0.9 ms, e2e p50 ~1.0 ms / p95 ~1.7 ms / p99 ~3.0 ms and ACK RTT p50 0.30 ms; with one output serial p50 0.61 ms, e2e p50 0.64 ms / p95 0.97 ms / p99 1.43 ms and ACK RTT p50 0.24 ms.
 
 Open-loop saturated runs (all drained to zero pending). "Outputs" is `HOTPATH_OUTPUTS`; every input message is published once per output.
