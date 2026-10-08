@@ -112,7 +112,7 @@ fn output_deduplication_ttl_defaults_and_accepts_override_or_nonpositive_disable
         .unwrap();
     assert_eq!(
         default_config.outputs["custom-output"].deduplication.ttl_ms,
-        5000
+        0
     );
 
     let override_config: AppConfig = serde_json::from_str(

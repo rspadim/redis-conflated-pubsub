@@ -344,7 +344,7 @@ pub struct DeduplicationConfig {
     #[serde(default = "default_deduplication_ttl_ms")]
     #[schemars(
         default = "default_deduplication_ttl_ms",
-        description = "Deduplication TTL in milliseconds; 5000 by default and values <= 0 disable deduplication."
+        description = "Deduplication TTL in milliseconds; 0 by default and values <= 0 disable deduplication."
     )]
     pub ttl_ms: i64,
 }
@@ -553,7 +553,7 @@ fn default_channel_cache_max_entries() -> usize {
 }
 
 fn default_deduplication_ttl_ms() -> i64 {
-    5000
+    0
 }
 
 fn default_restart_on_change() -> bool {

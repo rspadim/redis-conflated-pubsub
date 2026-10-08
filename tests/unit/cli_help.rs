@@ -79,6 +79,6 @@ fn generated_config_schema_is_json_and_includes_filter_options() {
     );
     let deduplication_ttl = &schema["$defs"]["DeduplicationConfig"]["properties"]["ttl_ms"];
     assert_eq!(deduplication_ttl["type"], "integer");
-    assert_eq!(deduplication_ttl["default"], 5000);
+    assert_eq!(deduplication_ttl["default"], 0);
     assert!(deduplication_ttl.get("minimum").is_none());
 }
