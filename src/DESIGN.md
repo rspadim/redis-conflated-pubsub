@@ -100,6 +100,8 @@ The status snapshot (`schema_version` 5) exposes global and per-output counters 
 
 `GET /filters` optionally exposes full channel names and cache entries and is disabled by default because it reveals raw channel names; enabling it switches the filter/policy LRUs to shared, mutex-protected storage.
 
+`CLIENT LIST` identifies the service connections. Every connection (including the Pub/Sub input) sends `CLIENT SETINFO` (`lib-name` = resolved name, `lib-ver` = program version) through the redis-rs connection info; output connections also send `CLIENT SETNAME` when they connect (and reconnect), filling `name`. Naming is a best-effort cosmetic step: a forbidden `CLIENT SETNAME` logs one warning per connection and the output keeps publishing.
+
 ## Configuration defaults
 
 | Setting | Default |
@@ -116,6 +118,7 @@ The status snapshot (`schema_version` 5) exposes global and per-output counters 
 | Filter/policy cache capacity (each) | `16384`, max `100000`, `0` disables |
 | `exclude_output_echoes`, `exclude_sentinel_pubsub` | `true` |
 | `logging.prefix` / `logging.enabled` | `redis-conflated-pubsub` / `true` |
+| `client_name` template | `ConflatedPS-{version}` (empty disables naming) |
 | Status update interval | `1000 ms` |
 
 Positive intervals and TTLs are capped at 365 days; group `round_ms` must not exceed a positive group TTL.
@@ -138,6 +141,18 @@ The mixed-policy workload (direct / 200 ms conflation / 200 ms conflation + 5 s 
 ### Capture and replay
 
 `capture-feed` records read-only Pub/Sub metadata (relative timestamp, channel, payload length; never payload contents) to local NDJSON plus a summary, and `replay-feed` republishes a capture with the recorded inter-arrival timing (rate-scalable, pipelined, synthetic payloads of the recorded length, optional repeated payloads for TTL) so realistic feed shapes can drive load tests without exporting application data.
+
+A 30-minute capture of a market-data feed (6,054,668 messages, 3,364 msg/s average, 5,508 msg/s peak, 8,664 unique channels, 93 MB of metadata) replayed against the local stack with 200 ms conflation, 5 s TTL and the recommended window 1024/batch 64:
+
+| Replay | Input | Published | Pending | Queue wait avg/max | Publish RTT avg/max |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1× (30 min) | 6,053,786 | 2,292,837 (37.9%) | 0 | 0.071/13.5 ms | 0.492/11.7 ms |
+| 4× | 6,053,786 | 1,371,471 (22.7%) | 0 | 0.080/5.1 ms | 0.443/6.9 ms |
+| 8× | 6,053,786 | 1,127,642 (18.6%) | 0 | 0.095/8.2 ms | 0.462/8.2 ms |
+| 4×, window/batch 256/256 | 6,053,786 | 1,357,014 (22.4%) | 0 | 0.104/11.6 ms | 0.975/8.0 ms |
+| 4×, repeated payloads | 6,053,786 | 979,805 (16.2%) | 0 | 0.090/9.2 ms | 0.448/8.0 ms |
+
+Input excludes 882 Sentinel `__sentinel__:hello` messages per run; the repeated-payload variant reuses each channel's previous payload on three of every four messages to exercise TTL suppression. Conflation reduced publishing to 16–38% of the input depending on rate, with zero pending backlog and sub-millisecond average queue wait and publish RTT at every rate; the default 256/256 window/batch pair showed a similar published volume with roughly twice the average publish RTT. This replay harness also surfaced the intake starvation that 0.2.0 fixed (intake is now serviced every turn and the worker yields through pending buckets instead of draining one chunk per timer tick).
 
 ### Loopback (no Redis/Valkey)
 

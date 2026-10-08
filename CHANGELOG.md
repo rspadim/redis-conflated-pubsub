@@ -27,6 +27,7 @@
 - Added `deduplication.in_flight_suppression` (treat a sent-but-unacknowledged value as published for suppression, rolling back on a definitive pre-send failure) and optional per-channel TTL caps `deduplication.max_entries`/`max_cache_bytes` with LRU eviction counted in `deduplication_evictions_total`.
 - Added per-output intake queue limits: `queue_max_messages`, `queue_max_bytes`, `queue_overflow_policy` (`drop_newest`/`drop_oldest`/`drop_by_age`) and `queue_max_age_ms`, with shedding counters and the `pending_queue_bytes`/`oldest_pending_age_ms` gauges. The default stays unbounded.
 - `SIGHUP` reload can now change `instance_lock.path` in-process: the new lock is acquired before the old one is released, and the reload is rejected when the new lock is unavailable.
+- Added `client_name` (default `ConflatedPS-{version}`; empty disables): every connection reports `lib-name`/`lib-ver` through `CLIENT SETINFO` and outputs additionally set `CLIENT SETNAME` (resolved names append `-input` or `-output-<output>`) so `CLIENT LIST` shows which role and version is connected.
 
 ## 0.1.4 — 2026-10-06
 

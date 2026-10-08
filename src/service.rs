@@ -206,6 +206,7 @@ struct OutputRuntimeSetup {
     oversized_policy: OversizedMessagePolicy,
     filters_endpoint_enabled: bool,
     channel_policy_cache_max_entries: usize,
+    client_name: Option<String>,
 }
 
 #[derive(Clone)]
@@ -255,7 +256,10 @@ pub async fn run(
     #[cfg(not(unix))]
     let _ = config_path;
     metrics.clear_channel_cache_inspectors();
-    let input_client = config.input.redis.client()?;
+    let input_client = match config.client_name_for("input") {
+        Some(lib_name) => config.input.redis.client_with_lib_name(&lib_name)?,
+        None => config.input.redis.client()?,
+    };
     let filters_endpoint_enabled = config
         .status
         .http
@@ -274,10 +278,16 @@ pub async fn run(
     let http_listener = bind_status_http(config.status.http.as_ref()).await?;
     let global_max_bytes_per_exec = config.max_bytes_per_exec;
     let global_oversized_message_policy = config.oversized_message_policy;
+    let output_client_names = config
+        .outputs
+        .keys()
+        .map(|name| config.client_name_for(&format!("output-{name}")))
+        .collect::<Vec<_>>();
     let output_setups = config
         .outputs
         .iter_mut()
-        .map(|(name, output_config)| {
+        .zip(output_client_names)
+        .map(|((name, output_config), client_name)| {
             // Each output gets its own filter instance and decision cache.
             let channel_filter = ChannelFilterSet::compile_with_inspector(
                 &output_config.filters,
@@ -286,6 +296,10 @@ pub async fn run(
                 filters_endpoint_enabled.then(|| (&*metrics, format!("outputs.{name}.filters"))),
             )?;
             output_config.filters = Vec::new();
+            let client = match &client_name {
+                Some(lib_name) => output_config.redis.client_with_lib_name(lib_name)?,
+                None => output_config.redis.client()?,
+            };
             Ok((
                 name.clone(),
                 output_config.clone(),
@@ -297,10 +311,11 @@ pub async fn run(
                     .conflation
                     .oversized_message_policy
                     .unwrap_or(global_oversized_message_policy),
-                output_config.redis.client()?,
+                client,
                 metrics.register_output(name),
                 channel_filter,
                 output_config.channel_policy_cache_max_entries,
+                client_name,
             ))
         })
         .collect::<Result<Vec<_>>>()?;
@@ -333,6 +348,7 @@ pub async fn run(
                 output_metrics,
                 channel_filter,
                 channel_policy_cache_max_entries,
+                client_name,
             )| {
                 let queue_limits = QueueLimits::new(
                     output_config.queue_max_messages,
@@ -378,6 +394,7 @@ pub async fn run(
                     oversized_policy,
                     filters_endpoint_enabled,
                     channel_policy_cache_max_entries,
+                    client_name,
                 };
                 let task = tokio::spawn(async move {
                     publish_output(

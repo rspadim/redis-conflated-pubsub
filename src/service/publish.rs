@@ -73,6 +73,7 @@ pub(super) struct RedisBatchPublisher<'a> {
     pub(super) config: &'a OutputConfig,
     pub(super) client: &'a redis::Client,
     pub(super) connection: &'a mut Option<MultiplexedConnection>,
+    pub(super) client_name: Option<&'a str>,
 }
 
 impl BatchPublisher for RedisBatchPublisher<'_> {
@@ -81,7 +82,15 @@ impl BatchPublisher for RedisBatchPublisher<'_> {
         messages: &[PendingMessage],
         atomic: bool,
     ) -> std::result::Result<i64, PublishFailure> {
-        publish_batch(self.config, self.client, self.connection, messages, atomic).await
+        publish_batch(
+            self.config,
+            self.client,
+            self.connection,
+            messages,
+            atomic,
+            self.client_name,
+        )
+        .await
     }
 }
 
@@ -153,13 +162,14 @@ async fn publish_batch(
     connection: &mut Option<MultiplexedConnection>,
     messages: &[PendingMessage],
     atomic: bool,
+    client_name: Option<&str>,
 ) -> std::result::Result<i64, PublishFailure> {
     if messages.is_empty() {
         return Err(PublishFailure::NotSent(
             "output publish batch is empty".to_owned(),
         ));
     }
-    ensure_output_connection(config, client, connection).await?;
+    ensure_output_connection(config, client, connection, client_name).await?;
     let mut publish_connection = connection
         .as_ref()
         .expect("output connection was initialized")
@@ -175,11 +185,12 @@ pub(super) async fn ensure_output_connection(
     config: &OutputConfig,
     client: &redis::Client,
     connection: &mut Option<MultiplexedConnection>,
+    client_name: Option<&str>,
 ) -> std::result::Result<(), PublishFailure> {
     if connection.is_some() {
         return Ok(());
     }
-    let connected = match time::timeout(
+    let mut connected = match time::timeout(
         config.redis.connect_timeout(),
         client.get_multiplexed_async_connection(),
     )
@@ -193,6 +204,17 @@ pub(super) async fn ensure_output_connection(
             ));
         }
     };
+    if let Some(name) = client_name {
+        // Naming is best-effort: an ACL may forbid CLIENT SETNAME.
+        let result: redis::RedisResult<()> = redis::cmd("CLIENT")
+            .arg("SETNAME")
+            .arg(name)
+            .query_async(&mut connected)
+            .await;
+        if let Err(error) = result {
+            warn!(client_name = name, error = %error, "output_client_setname_failed");
+        }
+    }
     *connection = Some(connected);
     Ok(())
 }

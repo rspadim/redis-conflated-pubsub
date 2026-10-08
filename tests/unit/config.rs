@@ -1,5 +1,7 @@
 use super::*;
 
+#[path = "config/client_name.rs"]
+mod client_name;
 #[path = "config/defaults_schema.rs"]
 mod defaults_schema;
 #[path = "config/policies_groups.rs"]

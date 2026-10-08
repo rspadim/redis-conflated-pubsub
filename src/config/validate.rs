@@ -2,13 +2,14 @@ use anyhow::{Result, bail};
 
 use super::{
     AppConfig, ChannelFilterRule, ChannelOverrides, MAX_CHANNEL_CACHE_MAX_ENTRIES,
-    MAX_DEDUPLICATION_CACHE_BYTES, MAX_DEDUPLICATION_CACHE_ENTRIES,
+    MAX_CLIENT_NAME_TEMPLATE_LEN, MAX_DEDUPLICATION_CACHE_BYTES, MAX_DEDUPLICATION_CACHE_ENTRIES,
     MAX_DEDUPLICATION_GROUP_CACHE_BYTES, MAX_DEDUPLICATION_GROUP_MEMBERS, MAX_RUNTIME_DURATION_MS,
     OutputConfig, QueueOverflowPolicy, RedisConfig, Subscription, same_pubsub_server,
 };
 
 pub(super) fn validate(config: &AppConfig) -> Result<()> {
     validate_status_and_input(config)?;
+    validate_client_name(config)?;
     validate_redis_and_outputs(config)?;
     if config.logging.retention_days == 0 || config.logging.max_total_size_mb == 0 {
         bail!("logging retention and size limits must be greater than zero");
@@ -20,6 +21,25 @@ pub(super) fn validate(config: &AppConfig) -> Result<()> {
         bail!("logging.prefix must not contain path separators");
     }
     validate_echo_loop_guard(config)?;
+    Ok(())
+}
+
+fn validate_client_name(config: &AppConfig) -> Result<()> {
+    let Some(template) = config.client_name.as_deref() else {
+        return Ok(());
+    };
+    if template.is_empty() {
+        return Ok(());
+    }
+    if template.chars().count() > MAX_CLIENT_NAME_TEMPLATE_LEN {
+        bail!("client_name must not exceed {MAX_CLIENT_NAME_TEMPLATE_LEN} characters");
+    }
+    if template
+        .chars()
+        .any(|character| character.is_whitespace() || character.is_control())
+    {
+        bail!("client_name must not contain whitespace or control characters");
+    }
     Ok(())
 }
 

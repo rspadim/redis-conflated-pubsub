@@ -185,6 +185,7 @@ pub(super) async fn publish_output(
         oversized_policy,
         filters_endpoint_enabled,
         channel_policy_cache_max_entries,
+        client_name,
     } = setup;
     let max_commands_per_exec = config.conflation.max_commands_per_exec;
     let compiled_channel_policies = CompiledChannelPolicies::new_with_cache(
@@ -367,6 +368,7 @@ pub(super) async fn publish_output(
                     config: &config,
                     client: &client,
                     connection: &mut connection,
+                    client_name: client_name.as_deref(),
                 };
                 let mut publish_context = OutputPublishContext {
                     name: &name,
@@ -431,8 +433,13 @@ pub(super) async fn publish_output(
 
             if connection.is_none() {
                 metrics.set_output_state(&output_metrics, "connecting");
-                if let Err(failure) =
-                    ensure_output_connection(&config, &client, &mut connection).await
+                if let Err(failure) = ensure_output_connection(
+                    &config,
+                    &client,
+                    &mut connection,
+                    client_name.as_deref(),
+                )
+                .await
                 {
                     let mut publish_context = OutputPublishContext {
                         name: &name,

@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::{env, fs, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result};
-use redis::Client;
+use redis::{Client, ConnectionInfo};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -17,6 +17,8 @@ pub const MAX_DEDUPLICATION_CACHE_ENTRIES: usize = 100_000;
 pub const MAX_DEDUPLICATION_CACHE_BYTES: usize = 256 * 1024 * 1024;
 pub const DEFAULT_CHANNEL_CACHE_MAX_ENTRIES: usize = 16_384;
 pub const MAX_CHANNEL_CACHE_MAX_ENTRIES: usize = 100_000;
+pub const DEFAULT_CLIENT_NAME_TEMPLATE: &str = "ConflatedPS-{version}";
+pub const MAX_CLIENT_NAME_TEMPLATE_LEN: usize = 128;
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -28,6 +30,13 @@ pub struct AppConfig {
     /// Policy for single PUBLISH requests that exceed their output byte target.
     #[serde(default)]
     pub oversized_message_policy: OversizedMessagePolicy,
+    /// Template for the connection names reported in `CLIENT LIST` (`CLIENT SETNAME`
+    /// and `CLIENT SETINFO`). `{version}` expands to the program version and the
+    /// connection role is appended: `-input` or `-output-<name>`. An empty string
+    /// disables naming.
+    #[serde(default)]
+    #[schemars(length(max = 128))]
+    pub client_name: Option<String>,
     pub input: InputConfig,
     #[schemars(length(min = 1))]
     pub outputs: BTreeMap<String, OutputConfig>,
@@ -51,6 +60,24 @@ impl AppConfig {
     pub fn validate(&self) -> Result<()> {
         validate::validate(self)
     }
+
+    /// Resolves this config's `CLIENT LIST` name for a connection role, or
+    /// `None` when naming is disabled.
+    pub fn client_name_for(&self, role: &str) -> Option<String> {
+        resolve_client_name(self.client_name.as_deref(), role)
+    }
+}
+
+/// Expands a client-name template for a connection role, or `None` when
+/// disabled. `{version}` is replaced by the program version and the role is
+/// appended (for example `-input` or `-output-out-a`).
+pub fn resolve_client_name(template: Option<&str>, role: &str) -> Option<String> {
+    let template = template.unwrap_or(DEFAULT_CLIENT_NAME_TEMPLATE);
+    if template.is_empty() {
+        return None;
+    }
+    let base = template.replace("{version}", env!("CARGO_PKG_VERSION"));
+    Some(format!("{base}-{role}"))
 }
 
 pub fn same_pubsub_server(left: &RedisConfig, right: &RedisConfig) -> bool {
@@ -419,7 +446,7 @@ pub struct RedisConfig {
 }
 
 impl RedisConfig {
-    pub fn client(&self) -> Result<Client> {
+    fn connection_url(&self) -> Result<Url> {
         let host = if self.host.contains(':') && !self.host.starts_with('[') {
             format!("[{}]", self.host)
         } else {
@@ -441,7 +468,27 @@ impl RedisConfig {
             url.set_password(Some(&password))
                 .map_err(|()| anyhow::anyhow!("invalid Redis password"))?;
         }
-        Client::open(url.as_str()).context("invalid Redis connection settings")
+        Ok(url)
+    }
+
+    pub fn client(&self) -> Result<Client> {
+        Client::open(self.connection_url()?.as_str()).context("invalid Redis connection settings")
+    }
+
+    /// Builds a client that identifies itself in `CLIENT LIST` through
+    /// `CLIENT SETINFO` (`lib-name`/`lib-ver`). `RedisConfig::client` connections
+    /// keep the redis-rs defaults.
+    pub fn client_with_lib_name(&self, lib_name: &str) -> Result<Client> {
+        let url = self.connection_url()?;
+        let info: ConnectionInfo = url
+            .as_str()
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid Redis connection settings"))?;
+        let redis = info
+            .redis_settings()
+            .clone()
+            .set_lib_name(lib_name, env!("CARGO_PKG_VERSION"));
+        Client::open(info.set_redis_settings(redis)).context("invalid Redis connection settings")
     }
 
     pub fn connect_timeout(&self) -> Duration {
