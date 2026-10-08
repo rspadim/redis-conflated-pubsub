@@ -243,8 +243,10 @@ pub(super) async fn publish_output(
         let input_command_capacity =
             max_in_flight_commands.saturating_sub(in_flight_direct_messages);
         let input_byte_capacity = max_in_flight_bytes.saturating_sub(in_flight_direct_bytes);
-        if due_intervals.is_empty()
-            && passthrough.len() == in_flight_direct_messages
+        // Intake is always serviced (bounded by the in-flight window), even while
+        // conflated buckets are due: the flush below is budgeted per turn, so
+        // blocking intake here would starve it for the whole bucket drain.
+        if passthrough.len() == in_flight_direct_messages
             && input_command_capacity > 0
             && (input_byte_capacity > 0 || in_flight_direct_messages == 0)
             && (!input_closed || deferred_input.is_some())
@@ -558,6 +560,7 @@ pub(super) async fn publish_output(
                     }
                 }
             }
+            _ = tokio::task::yield_now(), if !due_intervals.is_empty() => {}
             _ = async {
                 if let Some(next_tick) = next_flush_tick {
                     time::sleep_until(next_tick).await;
@@ -576,7 +579,6 @@ pub(super) async fn publish_output(
             }
             message = receiver.recv(), if !input_closed
                 && deferred_input.is_none()
-                && due_intervals.is_empty()
                 && passthrough.len() == in_flight_direct_messages
                 && in_flight_direct_messages < max_in_flight_commands
                 && in_flight_direct_bytes < max_in_flight_bytes => {
