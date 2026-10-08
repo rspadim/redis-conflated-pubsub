@@ -88,7 +88,7 @@ fn each_output_conflates_by_mapped_channel_and_preserves_binary_payloads() {
         ("replica:sensor:a", b"latest".to_vec()),
         ("replica:sensor:b", b"other".to_vec()),
     ] {
-        metrics.record_output_input(&output_metrics, payload.len());
+        metrics.record_output_input(&output_metrics, payload.len(), payload.len());
         enqueue_for_test(
             25,
             InboundMessage {
@@ -139,7 +139,10 @@ fn fan_out_counts_inputs_per_output_without_multiplying_global_input() {
             channel_suffix: String::new(),
             combined_channel_mapping: None,
             channel_filter: ChannelFilterSet::default(),
-            sender: first_sender,
+            sender: OutputQueueSender::Unbounded(first_sender),
+            queue_limits: QueueLimits::default(),
+            queue_policy: QueueOverflowPolicy::DropNewest,
+            queue_shed_log: QueueShedLog::default(),
             output_metrics: Arc::clone(&first_metrics),
         },
         OutputSender {
@@ -148,7 +151,10 @@ fn fan_out_counts_inputs_per_output_without_multiplying_global_input() {
             channel_suffix: String::new(),
             combined_channel_mapping: None,
             channel_filter: ChannelFilterSet::default(),
-            sender: second_sender,
+            sender: OutputQueueSender::Unbounded(second_sender),
+            queue_limits: QueueLimits::default(),
+            queue_policy: QueueOverflowPolicy::DropNewest,
+            queue_shed_log: QueueShedLog::default(),
             output_metrics: Arc::clone(&second_metrics),
         },
         OutputSender {
@@ -157,7 +163,10 @@ fn fan_out_counts_inputs_per_output_without_multiplying_global_input() {
             channel_suffix: String::new(),
             combined_channel_mapping: None,
             channel_filter: ChannelFilterSet::default(),
-            sender: unavailable_sender,
+            sender: OutputQueueSender::Unbounded(unavailable_sender),
+            queue_limits: QueueLimits::default(),
+            queue_policy: QueueOverflowPolicy::DropNewest,
+            queue_shed_log: QueueShedLog::default(),
             output_metrics: Arc::clone(&unavailable_metrics),
         },
     ];
@@ -197,7 +206,10 @@ fn fan_out_uses_precomputed_single_subscription_mapping() {
         channel_suffix: ":dest".to_owned(),
         combined_channel_mapping: Some(("out:sub:".to_owned(), ":source:dest".to_owned())),
         channel_filter: ChannelFilterSet::default(),
-        sender,
+        sender: OutputQueueSender::Unbounded(sender),
+        queue_limits: QueueLimits::default(),
+        queue_policy: QueueOverflowPolicy::DropNewest,
+        queue_shed_log: QueueShedLog::default(),
         output_metrics: Arc::clone(&output_metrics),
     }];
 
@@ -470,7 +482,10 @@ fn output_filter_sees_input_mapping_but_not_output_namespace() {
                 FilterAction::Accept,
             )
             .unwrap(),
-            sender: filtered_sender,
+            sender: OutputQueueSender::Unbounded(filtered_sender),
+            queue_limits: QueueLimits::default(),
+            queue_policy: QueueOverflowPolicy::DropNewest,
+            queue_shed_log: QueueShedLog::default(),
             output_metrics: Arc::clone(&filtered_metrics),
         },
         OutputSender {
@@ -488,7 +503,10 @@ fn output_filter_sees_input_mapping_but_not_output_namespace() {
                 FilterAction::Accept,
             )
             .unwrap(),
-            sender: accepted_sender,
+            sender: OutputQueueSender::Unbounded(accepted_sender),
+            queue_limits: QueueLimits::default(),
+            queue_policy: QueueOverflowPolicy::DropNewest,
+            queue_shed_log: QueueShedLog::default(),
             output_metrics: Arc::clone(&accepted_metrics),
         },
     ];

@@ -284,6 +284,7 @@ pub(super) fn prepare_output_message(
                 context.output_metrics,
                 1,
                 pending_message.payload.len(),
+                super::pending_message_queue_bytes(&pending_message),
             );
             context.policy_log.report(context.name, 1, 0, 0);
             None
@@ -299,6 +300,7 @@ pub(super) fn prepare_output_message(
                     context.output_metrics,
                     1,
                     pending_message.payload.len(),
+                    super::pending_message_queue_bytes(&pending_message),
                 );
                 context.policy_log.report(context.name, 1, 0, 0);
                 return None;

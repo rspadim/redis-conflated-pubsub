@@ -8,10 +8,7 @@ use std::{
 
 use futures_util::{StreamExt, stream::FuturesOrdered};
 use redis::aio::MultiplexedConnection;
-use tokio::{
-    sync::mpsc,
-    time::{self, MissedTickBehavior},
-};
+use tokio::time::{self, MissedTickBehavior};
 use tracing::{debug, error};
 
 use crate::status::{self, Metrics, OutputMetrics};
@@ -24,11 +21,12 @@ use super::publish::{
     OutputFailureLog, PublishFailure, RedisBatchPublisher, ensure_output_connection,
     publish_batch_on_connection, settle_publish_result,
 };
+use super::queue::{QueueShedLog, TryRecv};
 use super::{
     DeduplicationCache, InboundMessage, OutputMessageContext, OutputMessagePolicy,
-    OutputPublishContext, OutputRuntimeSetup, PendingByInterval, PendingMessage,
-    QueuedInboundMessage, ResolvedChannelPolicy, deduplication_prune_interval,
-    pending_message_count,
+    OutputPublishContext, OutputQueueReceiver, OutputRuntimeSetup, PendingByInterval,
+    PendingMessage, QueuedInboundMessage, ResolvedChannelPolicy, deduplication_prune_interval,
+    pending_message_count, pending_message_queue_bytes,
 };
 
 mod flush;
@@ -141,10 +139,40 @@ pub(super) fn settle_dispatched_batch(
     settle_publish_result(batch, result, context)
 }
 
+/// Returns true when the intake message exceeded `queue_max_age_ms` and was
+/// shed. Extracted so the drop_by_age decision and its metrics are testable
+/// without a Redis connection.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn shed_expired_message(
+    name: &str,
+    queued_message: &QueuedInboundMessage,
+    queue_max_age_ms: Option<u64>,
+    now: time::Instant,
+    metrics: &Metrics,
+    output_metrics: &OutputMetrics,
+    shed_log: &mut QueueShedLog,
+) -> bool {
+    let Some(max_age_ms) = queue_max_age_ms else {
+        return false;
+    };
+    if now
+        .saturating_duration_since(queued_message.enqueued_at)
+        .as_millis()
+        <= u128::from(max_age_ms)
+    {
+        return false;
+    }
+    let payload_bytes = queued_message.message.payload.len();
+    let queue_bytes = queued_message.message.output_channel.len() + payload_bytes;
+    metrics.record_output_shed_pending(output_metrics, 1, payload_bytes, queue_bytes);
+    shed_log.report(name, 1, payload_bytes);
+    true
+}
+
 pub(super) async fn publish_output(
     setup: OutputRuntimeSetup,
     client: redis::Client,
-    mut receiver: mpsc::UnboundedReceiver<QueuedInboundMessage>,
+    mut receiver: OutputQueueReceiver,
     metrics: Arc<Metrics>,
     output_metrics: Arc<OutputMetrics>,
 ) {
@@ -196,6 +224,7 @@ pub(super) async fn publish_output(
     let mut passthrough = VecDeque::<PendingMessage>::new();
     let mut failure_log = OutputFailureLog::default();
     let mut policy_log = OversizedPolicyLog::default();
+    let mut shed_log = QueueShedLog::default();
     let mut connection: Option<MultiplexedConnection> = None;
     let mut input_closed = false;
     let mut due_intervals = Vec::<i64>::new();
@@ -249,9 +278,9 @@ pub(super) async fn publish_output(
                     message
                 } else {
                     match receiver.try_recv() {
-                        Ok(message) => message,
-                        Err(mpsc::error::TryRecvError::Empty) => break,
-                        Err(mpsc::error::TryRecvError::Disconnected) => {
+                        TryRecv::Message(message) => message,
+                        TryRecv::Empty => break,
+                        TryRecv::Disconnected => {
                             input_closed = true;
                             for (&interval_ms, messages) in enqueue_context.pending.iter() {
                                 if !messages.is_empty() && !due_intervals.contains(&interval_ms) {
@@ -262,6 +291,19 @@ pub(super) async fn publish_output(
                         }
                     }
                 };
+                // drop_by_age sheds at intake; the message was already admitted
+                // by the fan-out, so its pending gauges are released here.
+                if shed_expired_message(
+                    &name,
+                    &queued_message,
+                    config.queue_max_age_ms,
+                    time::Instant::now(),
+                    &metrics,
+                    &output_metrics,
+                    &mut shed_log,
+                ) {
+                    continue;
+                }
                 let policy = enqueue_context.resolve(&queued_message.message);
                 if direct_batch_boundary_required(
                     enqueue_context.passthrough,
@@ -479,12 +521,14 @@ pub(super) async fn publish_output(
                         Ok(subscribers) => {
                             let payload_bytes =
                                 batch.iter().map(|message| message.payload.len()).sum();
+                            let queue_bytes = batch.iter().map(pending_message_queue_bytes).sum();
                             let pending_keys =
                                 clear_published_batch(0, &mut pending, &mut passthrough, &batch);
                             metrics.record_output_flush(
                                 &output_metrics,
                                 batch.len(),
                                 payload_bytes,
+                                queue_bytes,
                             );
                             debug!(
                                 output = name,
@@ -554,6 +598,7 @@ pub(super) async fn publish_output(
     }
     failure_log.flush_suppressed(&name);
     policy_log.flush_suppressed(&name);
+    shed_log.flush_suppressed(&name);
     metrics.set_output_state(&output_metrics, "stopped");
 }
 

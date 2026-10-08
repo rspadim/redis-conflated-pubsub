@@ -10,7 +10,7 @@ async fn conflation_publishes_only_the_final_changed_value_in_a_window() {
     cache.remember(std::slice::from_ref(&last_published), time::Instant::now());
 
     for payload in [b"B".to_vec(), b"C".to_vec()] {
-        metrics.record_output_input(&output_metrics, payload.len());
+        metrics.record_output_input(&output_metrics, payload.len(), payload.len());
         enqueue_for_test_with_cache(
             100,
             InboundMessage {
@@ -56,7 +56,7 @@ fn nonpositive_interval_keeps_every_incoming_message_in_order() {
     let mut passthrough = VecDeque::new();
 
     for payload in [b"first".to_vec(), b"second".to_vec()] {
-        metrics.record_output_input(&output_metrics, payload.len());
+        metrics.record_output_input(&output_metrics, payload.len(), payload.len());
         enqueue_for_test(
             0,
             InboundMessage {
@@ -91,7 +91,7 @@ async fn passthrough_batches_ready_items_in_fifo_order_and_respects_command_cap(
     let mut passthrough = VecDeque::new();
     let mut cache = DeduplicationCache::new(0);
     for payload in [b"first".to_vec(), b"second".to_vec(), b"third".to_vec()] {
-        metrics.record_output_input(&output_metrics, payload.len());
+        metrics.record_output_input(&output_metrics, payload.len(), payload.len());
         enqueue_for_test_with_cache(
             0,
             InboundMessage {
@@ -355,7 +355,7 @@ async fn failed_transaction_is_not_replayed_and_later_chunks_continue() {
 
     for channel in ["events:d", "events:a", "events:e", "events:b", "events:c"] {
         let payload = vec![0, channel.as_bytes()[7]];
-        metrics.record_output_input(&output_metrics, payload.len());
+        metrics.record_output_input(&output_metrics, payload.len(), payload.len());
         enqueue_for_test(
             10,
             InboundMessage {
@@ -464,7 +464,7 @@ async fn definitive_pre_send_chunk_failure_is_counted_as_dropped_and_continues()
     let mut passthrough = VecDeque::new();
     for suffix in ["a", "b", "c"] {
         let payload = suffix.as_bytes().to_vec();
-        metrics.record_output_input(&output_metrics, payload.len());
+        metrics.record_output_input(&output_metrics, payload.len(), payload.len());
         enqueue_for_test(
             10,
             InboundMessage {
@@ -523,7 +523,7 @@ async fn direct_publish_failure_is_not_retried_and_next_item_continues() {
     let mut pending = HashMap::new();
     let mut passthrough = VecDeque::new();
     for payload in [vec![0, 255], b"later".to_vec()] {
-        metrics.record_output_input(&output_metrics, payload.len());
+        metrics.record_output_input(&output_metrics, payload.len(), payload.len());
         enqueue_for_test(
             0,
             InboundMessage {
@@ -590,7 +590,7 @@ async fn uncertain_direct_exec_marks_whole_bounded_batch_and_continues() {
     let mut passthrough = VecDeque::new();
     let mut cache = DeduplicationCache::new(0);
     for payload in [b"first".to_vec(), b"second".to_vec(), b"third".to_vec()] {
-        metrics.record_output_input(&output_metrics, payload.len());
+        metrics.record_output_input(&output_metrics, payload.len(), payload.len());
         enqueue_for_test_with_cache(
             0,
             InboundMessage {
@@ -773,7 +773,7 @@ fn truncate_preserves_payload_prefix_and_exact_exec_byte_target() {
     let metrics = Metrics::new();
     let output_metrics = metrics.register_output("truncate-output");
     let payload = vec![0, 255, 1, 254, 2, 253];
-    metrics.record_output_input(&output_metrics, payload.len());
+    metrics.record_output_input(&output_metrics, payload.len(), payload.len());
     let mut expected_message =
         pending_message_with_raw("events:binary", payload[..3].to_vec(), payload.clone());
     expected_message.conflation_interval_ms = 10;
@@ -812,7 +812,7 @@ fn truncate_preserves_payload_prefix_and_exact_exec_byte_target() {
 fn truncate_drops_when_even_an_empty_publish_frame_exceeds_the_target() {
     let metrics = Metrics::new();
     let output_metrics = metrics.register_output("too-small-output");
-    metrics.record_output_input(&output_metrics, 3);
+    metrics.record_output_input(&output_metrics, 3, 3);
     let channel = "events:long-channel";
     let max_bytes = publish_operation_frame_bytes(&pending_message(channel, Vec::new()), true) - 1;
     let mut policy_log = OversizedPolicyLog::default();
@@ -849,7 +849,7 @@ fn direct_truncation_uses_publishes_frame_without_transaction_wrappers() {
     let output_metrics = metrics.register_output("direct-truncate-output");
     let channel = "events:direct";
     let payload = vec![0, 255, 1, 254, 2, 253];
-    metrics.record_output_input(&output_metrics, payload.len());
+    metrics.record_output_input(&output_metrics, payload.len(), payload.len());
     let max_bytes = publish_command_frame_bytes_for_lengths(channel.len(), 2);
     let mut policy_log = OversizedPolicyLog::default();
 
@@ -885,7 +885,7 @@ fn drop_policy_skips_one_oversized_message_and_counts_it() {
     let metrics = Metrics::new();
     let output_metrics = metrics.register_output("drop-output");
     let payload = vec![0xff; 10];
-    metrics.record_output_input(&output_metrics, payload.len());
+    metrics.record_output_input(&output_metrics, payload.len(), payload.len());
     let mut policy_log = OversizedPolicyLog::default();
 
     assert!(
