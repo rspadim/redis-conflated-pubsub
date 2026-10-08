@@ -309,6 +309,8 @@ fn prepare_for_test(
 mod batching_publish;
 #[path = "service/dedup.rs"]
 mod dedup;
+#[path = "service/direct_lane_load.rs"]
+mod direct_lane_load;
 #[path = "service/filter_load.rs"]
 mod filter_load;
 #[path = "service/input_filtering.rs"]

@@ -63,7 +63,7 @@ docker compose -f compose.ttl.test.yml down --volumes --remove-orphans
 
 ### End-to-end hot-path latency
 
-The hot-path benchmark warms 64 channels, times sequential requests, then runs concurrent publishers through Redis-compatible raw input to two output subscribers. It reports p50/p95/p99 from before the input `PUBLISH` to receipt on both outputs. Outputs use direct mode (`conflation.interval_ms: 0`, dedup TTL 0), and cache inspection is disabled so the measured cache mode matches normal worker-local operation. The default image is Valkey 9.1.2.
+The hot-path benchmark (`examples/hotpath_benchmark.rs`, built into the `Dockerfile.benchmark` image) runs publishers and both output subscribers in one Rust process, so harness buffering or GIL contention cannot distort the measurement. It warms 64 channels, times sequential requests, then runs concurrent publishers through Redis-compatible raw input to two output subscribers. It reports serial percentiles, a phase decomposition (input ACK round trip, post-ACK service time, per-output end-to-end) and the peak pending backlog. Outputs use direct mode (`conflation.interval_ms: 0`, dedup TTL 0), and cache inspection is disabled so the measured cache mode matches normal worker-local operation. The default image is Valkey 9.1.2.
 
 ```sh
 docker compose -p hotpath-valkey -f compose.hotpath.test.yml up --build --abort-on-container-exit --exit-code-from hotpath-benchmark
@@ -77,27 +77,18 @@ HOTPATH_KV_IMAGE=redis:7.4-alpine HOTPATH_KV_CLI=redis-cli docker compose -p hot
 docker compose -p hotpath-redis -f compose.hotpath.test.yml down --volumes --remove-orphans
 ```
 
-Publisher concurrency and volume can be varied with `HOTPATH_PUBLISHER_COUNT`, `HOTPATH_MESSAGES_PER_PUBLISHER`, and `HOTPATH_SERIAL_MESSAGES`. The config and workload use synthetic channel names and payload IDs; they do not replay raw production names or payloads.
+Publisher concurrency and volume can be varied with `HOTPATH_PUBLISHER_COUNT`, `HOTPATH_MESSAGES_PER_PUBLISHER`, and `HOTPATH_SERIAL_MESSAGES`. `HOTPATH_MODE=closed-loop` (default) waits for each input `PUBLISH` acknowledgement; `HOTPATH_MODE=open-loop` pipelines `HOTPATH_PIPELINE` commands (default 64) per batch without waiting for individual acknowledgements. The config and workload use synthetic channel names and payload IDs; they do not replay raw production names or payloads.
 
-To measure a mixed policy set (about one-third direct, one-third 200 ms conflation, and one-third 200 ms conflation with a 5 s deduplication TTL), switch to the mixed config and driver:
+To measure a mixed policy set (about one-third direct, one-third 200 ms conflation, and one-third 200 ms conflation with a 5 s deduplication TTL), switch to the mixed config and select the Python driver through `HOTPATH_BENCHMARK_CMD`; `HOTPATH_KV_IMAGE`/`HOTPATH_KV_CLI` choose the engine as in the direct runs:
 
 ```sh
 HOTPATH_CONFIG_FILE=./tests/docker-hotpath-mix-config.json \
-HOTPATH_BENCHMARK_SCRIPT=docker_hotpath_policy_mix.py \
+HOTPATH_BENCHMARK_CMD='python /tests/docker_hotpath_policy_mix.py' \
 docker compose -p hotpath-mixed -f compose.hotpath.test.yml up --build --abort-on-container-exit --exit-code-from hotpath-benchmark
 docker compose -p hotpath-mixed -f compose.hotpath.test.yml down --volumes --remove-orphans
 ```
 
 For the TTL cohort, this workload repeats one identical payload per channel; with unique payloads, a positive TTL would not suppress those publishes.
-
-The mix run uses the same stack and the checked-in 3-policy config; it assumes the TTL cohort repeats payloads by channel:
-
-```sh
-HOTPATH_CONFIG_FILE=./tests/docker-hotpath-mix-config.json \
-HOTPATH_BENCHMARK_SCRIPT=docker_hotpath_policy_mix.py \
-docker compose -p hotpath-mix-valkey -f compose.hotpath.test.yml up --build --abort-on-container-exit --exit-code-from hotpath-benchmark
-docker compose -p hotpath-mix-valkey -f compose.hotpath.test.yml down --volumes --remove-orphans
-```
 
 ### Fault handling
 

@@ -37,8 +37,10 @@ services:
         condition: service_healthy
 
   hotpath-benchmark:
-    image: python:3.13-alpine
-    command: ["python", "/tests/${HOTPATH_BENCHMARK_SCRIPT:-docker_hotpath_benchmark.py}"]
+    build:
+      context: .
+      dockerfile: Dockerfile.benchmark
+    command: ["sh", "-c", "exec ${HOTPATH_BENCHMARK_CMD:-hotpath-benchmark}"]
     environment:
       REDIS_HOST: redis-raw
       OUTPUT_REDIS_HOST: redis-output
@@ -46,6 +48,8 @@ services:
       PUBLISHER_COUNT: ${HOTPATH_PUBLISHER_COUNT:-4}
       MESSAGES_PER_PUBLISHER: ${HOTPATH_MESSAGES_PER_PUBLISHER:-2500}
       SERIAL_MESSAGES: ${HOTPATH_SERIAL_MESSAGES:-250}
+      HOTPATH_MODE: ${HOTPATH_MODE:-closed-loop}
+      HOTPATH_PIPELINE: ${HOTPATH_PIPELINE:-64}
     volumes:
       - ./tests:/tests:ro
     networks:
