@@ -22,6 +22,7 @@ struct CompiledFilterRule {
 pub(super) struct ChannelFilterSet {
     rules: Vec<CompiledFilterRule>,
     default_filter: FilterAction,
+    can_deny: bool,
     decisions: ChannelCache<bool>,
 }
 
@@ -82,14 +83,22 @@ impl ChannelFilterSet {
                 decisions.inspector(filter_decision_json).unwrap(),
             );
         }
+        let can_deny = default_filter == FilterAction::Deny
+            || compiled_rules
+                .iter()
+                .any(|rule| rule.action == FilterAction::Deny);
         Ok(Self {
             rules: compiled_rules,
             default_filter,
+            can_deny,
             decisions,
         })
     }
 
     pub(super) fn allows(&mut self, channel: &str) -> bool {
+        if !self.can_deny {
+            return true;
+        }
         if self.rules.is_empty() {
             return self.default_filter == FilterAction::Accept;
         }
@@ -121,8 +130,8 @@ impl ChannelFilterSet {
         allowed
     }
 
-    pub(super) fn is_active(&self) -> bool {
-        !self.rules.is_empty() || self.default_filter == FilterAction::Deny
+    pub(super) fn can_deny(&self) -> bool {
+        self.can_deny
     }
 
     #[cfg(test)]
@@ -141,6 +150,7 @@ impl Default for ChannelFilterSet {
         Self {
             rules: Vec::new(),
             default_filter: FilterAction::Accept,
+            can_deny: false,
             decisions: ChannelCache::new(DEFAULT_CHANNEL_CACHE_MAX_ENTRIES, false),
         }
     }

@@ -173,7 +173,7 @@ pub(super) fn fan_out(
 ) {
     let input_mapped_channel = senders
         .iter()
-        .any(|output| output.channel_filter.is_active())
+        .any(|output| output.channel_filter.can_deny())
         .then(|| {
             map_output_channel(
                 "",

@@ -42,7 +42,7 @@ pub struct Metrics {
     pub input_reconnects_total: AtomicU64,
     pub output_reconnects_total: AtomicU64,
     pub pending_keys: AtomicU64,
-    last_input_at: Mutex<Option<String>>,
+    last_input_at: AtomicU64,
     last_flush_at: Mutex<Option<String>>,
     last_error: Mutex<Option<String>>,
     state: Mutex<String>,
@@ -220,7 +220,7 @@ impl Metrics {
             input_reconnects_total: AtomicU64::new(0),
             output_reconnects_total: AtomicU64::new(0),
             pending_keys: AtomicU64::new(0),
-            last_input_at: Mutex::new(None),
+            last_input_at: AtomicU64::new(0),
             last_flush_at: Mutex::new(None),
             last_error: Mutex::new(None),
             state: Mutex::new("starting".to_owned()),
@@ -239,7 +239,8 @@ impl Metrics {
             &self.input_latency_max_ns,
             read_latency,
         );
-        *self.last_input_at.lock().unwrap() = Some(timestamp());
+        self.last_input_at
+            .store(Utc::now().timestamp_millis() as u64, Ordering::Relaxed);
     }
 
     pub fn record_flush(&self, message_count: usize) {
@@ -565,7 +566,7 @@ impl Metrics {
             input_reconnects_total: self.input_reconnects_total.load(Ordering::Relaxed),
             output_reconnects_total: self.output_reconnects_total.load(Ordering::Relaxed),
             pending_keys: self.pending_keys.load(Ordering::Relaxed),
-            last_input_at: self.last_input_at.lock().unwrap().clone(),
+            last_input_at: format_epoch_millis(self.last_input_at.load(Ordering::Relaxed)),
             last_flush_at: self.last_flush_at.lock().unwrap().clone(),
             last_error: self.last_error.lock().unwrap().clone(),
             outputs: self
@@ -703,6 +704,14 @@ pub fn write_atomic(path: &Path, snapshot: &StatusSnapshot) -> Result<()> {
 
 fn timestamp() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+fn format_epoch_millis(epoch_millis: u64) -> Option<String> {
+    if epoch_millis == 0 {
+        return None;
+    }
+    DateTime::from_timestamp_millis(epoch_millis as i64)
+        .map(|timestamp| timestamp.to_rfc3339_opts(SecondsFormat::Millis, true))
 }
 
 #[cfg(test)]

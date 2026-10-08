@@ -76,6 +76,24 @@ impl DeduplicationCache {
         }
     }
 
+    pub(super) fn has_active_ttls(&self) -> bool {
+        self.ttl.is_some()
+            || self
+                .group_settings
+                .values()
+                .any(|settings| settings.ttl.is_some())
+    }
+
+    pub(super) fn is_active_for(&self, message: &PendingMessage) -> bool {
+        if message.deduplication_group.is_some() {
+            return true;
+        }
+        match message.deduplication_ttl_ms {
+            Some(ttl_ms) => ttl_ms > 0,
+            None => self.ttl.is_some(),
+        }
+    }
+
     pub(super) fn should_suppress(&mut self, message: &PendingMessage, now: time::Instant) -> bool {
         if let Some(group_name) = message.deduplication_group.as_deref() {
             let Some(settings) = self.group_settings.get(group_name).copied() else {
@@ -127,6 +145,17 @@ impl DeduplicationCache {
         now: time::Instant,
         now_epoch_ms: u128,
     ) {
+        if !self.has_active_ttls()
+            && messages.iter().all(|message| {
+                message.deduplication_group.is_none()
+                    && !message
+                        .deduplication_ttl_ms
+                        .is_some_and(|ttl_ms| ttl_ms > 0)
+            })
+        {
+            return;
+        }
+
         let mut grouped = HashMap::<String, Vec<&PendingMessage>>::new();
         for message in messages {
             if let Some(group_name) = message.deduplication_group.as_deref() {

@@ -26,7 +26,10 @@ pub(in crate::service) fn enqueue_message(
     let Some(pending_message) = prepare_output_message(message, context) else {
         return;
     };
-    if interval_ms <= 0 && deduplication_cache.should_suppress(&pending_message, now) {
+    if interval_ms <= 0
+        && deduplication_cache.is_active_for(&pending_message)
+        && deduplication_cache.should_suppress(&pending_message, now)
+    {
         context.metrics.record_output_deduplicated(
             context.output_metrics,
             pending_message.raw_payload().len(),
@@ -214,7 +217,9 @@ async fn publish_interval_bucket<P: BatchPublisher>(
                 .get(&interval_ms)
                 .and_then(|interval_pending| interval_pending.get(channel))
                 .expect("pending channel snapshot must remain present");
-            if context.deduplication_cache.should_suppress(message, now) {
+            if context.deduplication_cache.is_active_for(message)
+                && context.deduplication_cache.should_suppress(message, now)
+            {
                 deduplicated_channels.push(channel.clone());
             } else {
                 eligible_channels.push(channel.clone());
