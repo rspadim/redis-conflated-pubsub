@@ -7,29 +7,29 @@ use crate::config::{
 
 use super::*;
 
-fn pending_message(output_channel: &str, payload: Vec<u8>) -> PendingMessage {
+fn pending_message(output_channel: &str, payload: impl Into<Arc<[u8]>>) -> PendingMessage {
     PendingMessage {
         output_channel: output_channel.to_owned(),
         conflation_interval_ms: 0,
         deduplication_ttl_ms: None,
         deduplication_group: None,
-        payload,
+        payload: payload.into(),
         raw_payload: None,
     }
 }
 
 fn pending_message_with_raw(
     output_channel: &str,
-    payload: Vec<u8>,
-    raw_payload: Vec<u8>,
+    payload: impl Into<Arc<[u8]>>,
+    raw_payload: impl Into<Arc<[u8]>>,
 ) -> PendingMessage {
     PendingMessage {
         output_channel: output_channel.to_owned(),
         conflation_interval_ms: 0,
         deduplication_ttl_ms: None,
         deduplication_group: None,
-        payload,
-        raw_payload: Some(raw_payload),
+        payload: payload.into(),
+        raw_payload: Some(raw_payload.into()),
     }
 }
 

@@ -123,7 +123,7 @@ impl ShutdownSignals {
 #[derive(Clone, Debug)]
 struct InboundMessage {
     output_channel: String,
-    payload: Vec<u8>,
+    payload: Arc<[u8]>,
 }
 
 #[derive(Clone, Debug)]
@@ -139,14 +139,19 @@ struct PendingMessage {
     deduplication_ttl_ms: Option<i64>,
     deduplication_group: Option<String>,
     /// Payload sent to Redis after applying the oversized-message policy.
-    payload: Vec<u8>,
+    payload: Arc<[u8]>,
     /// Retained only when truncate changes `payload`.
-    raw_payload: Option<Vec<u8>>,
+    raw_payload: Option<Arc<[u8]>>,
 }
 
 impl PendingMessage {
+    /// Shared handle to the untruncated payload, avoiding a byte copy.
+    fn raw_payload_arc(&self) -> &Arc<[u8]> {
+        self.raw_payload.as_ref().unwrap_or(&self.payload)
+    }
+
     fn raw_payload(&self) -> &[u8] {
-        self.raw_payload.as_deref().unwrap_or(&self.payload)
+        self.raw_payload_arc()
     }
 }
 

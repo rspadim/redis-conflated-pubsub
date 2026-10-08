@@ -1,6 +1,6 @@
 #[cfg(test)]
 use std::collections::VecDeque;
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use tokio::time;
 use tracing::warn;
@@ -304,8 +304,8 @@ pub(super) fn prepare_output_message(
                 return None;
             };
             let truncated_bytes = pending_message.payload.len() - max_payload_len;
-            pending_message.raw_payload = Some(pending_message.payload.clone());
-            pending_message.payload.truncate(max_payload_len);
+            pending_message.raw_payload = Some(Arc::clone(&pending_message.payload));
+            pending_message.payload = Arc::from(&pending_message.payload[..max_payload_len]);
             context
                 .metrics
                 .record_output_truncated(context.output_metrics, truncated_bytes);

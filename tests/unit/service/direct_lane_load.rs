@@ -48,7 +48,7 @@ struct LatencyPublisher {
     commands_seen: usize,
     batches_published: usize,
     failed_batches: usize,
-    published_payloads: Vec<Vec<u8>>,
+    published_payloads: Vec<Arc<[u8]>>,
 }
 
 impl LatencyPublisher {
@@ -99,7 +99,7 @@ impl BatchPublisher for LatencyPublisher {
         self.commands_seen += messages.len();
         self.batches_published += 1;
         self.published_payloads
-            .extend(messages.iter().map(|message| message.payload.clone()));
+            .extend(messages.iter().map(|message| Arc::clone(&message.payload)));
         Ok(i64::try_from(messages.len()).unwrap_or(i64::MAX))
     }
 }
@@ -116,7 +116,7 @@ async fn direct_lane_failure_drops_the_batch_and_keeps_publishing_in_order() {
             0,
             InboundMessage {
                 output_channel: "bench:direct".to_owned(),
-                payload: sequence.to_be_bytes().to_vec(),
+                payload: sequence.to_be_bytes().to_vec().into(),
             },
             &mut pending,
             &mut passthrough,
@@ -190,7 +190,7 @@ async fn direct_lane_load_benchmark() {
                 0,
                 InboundMessage {
                     output_channel: "bench:direct".to_owned(),
-                    payload: sequence.to_be_bytes().to_vec(),
+                    payload: sequence.to_be_bytes().to_vec().into(),
                 },
                 &mut pending,
                 &mut passthrough,
@@ -242,7 +242,7 @@ async fn direct_lane_load_benchmark() {
     }
 }
 
-fn assert_strictly_increasing(payloads: &[Vec<u8>]) {
+fn assert_strictly_increasing(payloads: &[Arc<[u8]>]) {
     let mut previous = None;
     for (position, payload) in payloads.iter().enumerate() {
         let sequence = sequence_of(payload);

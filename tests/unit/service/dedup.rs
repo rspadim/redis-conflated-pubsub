@@ -196,7 +196,7 @@ fn channel_deduplication_disable_does_not_disable_conflation() {
         enqueue_for_test_with_policy_at(
             InboundMessage {
                 output_channel: "events:live".to_owned(),
-                payload,
+                payload: payload.into(),
             },
             &mut pending,
             &mut passthrough,
@@ -215,7 +215,7 @@ fn channel_deduplication_disable_does_not_disable_conflation() {
     }
     assert!(passthrough.is_empty());
     assert_eq!(pending_message_count(&pending), 1);
-    assert_eq!(pending[&100]["events:live"].payload, b"latest");
+    assert_eq!(pending[&100]["events:live"].payload.as_ref(), b"latest");
     assert!(cache.entries.is_empty());
     assert_eq!(metrics.conflated_messages_total.load(Ordering::Relaxed), 1);
 }
@@ -234,7 +234,7 @@ async fn nonpositive_group_ttl_disables_deduplication_but_keeps_conflation() {
         enqueue_for_test_with_policy_at(
             InboundMessage {
                 output_channel: "events:live".to_owned(),
-                payload,
+                payload: payload.into(),
             },
             &mut pending,
             &mut passthrough,
@@ -253,7 +253,7 @@ async fn nonpositive_group_ttl_disables_deduplication_but_keeps_conflation() {
     }
 
     assert_eq!(pending_message_count(&pending), 1);
-    assert_eq!(pending[&100]["events:live"].payload, b"latest");
+    assert_eq!(pending[&100]["events:live"].payload.as_ref(), b"latest");
     assert_eq!(metrics.conflated_messages_total.load(Ordering::Relaxed), 1);
 
     let mut publisher = RecordingPublisher::default();
@@ -268,7 +268,10 @@ async fn nonpositive_group_ttl_disables_deduplication_but_keeps_conflation() {
     .await;
 
     assert_eq!(publisher.successful_batches.len(), 1);
-    assert_eq!(publisher.successful_batches[0][0].payload, b"latest");
+    assert_eq!(
+        publisher.successful_batches[0][0].payload.as_ref(),
+        b"latest"
+    );
     assert!(cache.groups.is_empty());
     let output = &metrics.snapshot().outputs["disabled-group-output"];
     assert_eq!(output.deduplicated_messages_total, 0);
@@ -349,7 +352,7 @@ async fn conflated_value_returning_to_cached_value_is_suppressed_at_flush() {
         100,
         InboundMessage {
             output_channel: "events".to_owned(),
-            payload: changed,
+            payload: changed.into(),
         },
         &mut pending,
         &mut passthrough,
@@ -365,7 +368,7 @@ async fn conflated_value_returning_to_cached_value_is_suppressed_at_flush() {
         100,
         InboundMessage {
             output_channel: "events".to_owned(),
-            payload: returned,
+            payload: returned.into(),
         },
         &mut pending,
         &mut passthrough,
@@ -442,7 +445,7 @@ async fn conflated_deduplication_skips_removed_channels_across_exec_chunks() {
             100,
             InboundMessage {
                 output_channel: channel.to_owned(),
-                payload,
+                payload: payload.into(),
             },
             &mut pending,
             &mut passthrough,
@@ -499,7 +502,7 @@ async fn nonpositive_ttl_keeps_normal_conflation_enabled() {
                 100,
                 InboundMessage {
                     output_channel: "events".to_owned(),
-                    payload,
+                    payload: payload.into(),
                 },
                 &mut pending,
                 &mut VecDeque::new(),
@@ -508,7 +511,7 @@ async fn nonpositive_ttl_keeps_normal_conflation_enabled() {
                 &mut cache,
             );
         }
-        assert_eq!(pending[&100]["events"].payload, b"latest");
+        assert_eq!(pending[&100]["events"].payload.as_ref(), b"latest");
 
         let mut publisher = RecordingPublisher::default();
         flush_conflated_for_test(
@@ -522,7 +525,10 @@ async fn nonpositive_ttl_keeps_normal_conflation_enabled() {
         .await;
 
         assert_eq!(publisher.successful_batches.len(), 1);
-        assert_eq!(publisher.successful_batches[0][0].payload, b"latest");
+        assert_eq!(
+            publisher.successful_batches[0][0].payload.as_ref(),
+            b"latest"
+        );
         let output = &metrics.snapshot().outputs["disabled-dedup-output"];
         assert_eq!(output.deduplicated_messages_total, 0);
         assert_eq!(output.conflated_messages_total, 1);
@@ -546,7 +552,7 @@ async fn direct_mode_publishes_changed_values_and_suppresses_repeats() {
             0,
             InboundMessage {
                 output_channel: "events".to_owned(),
-                payload,
+                payload: payload.into(),
             },
             &mut pending,
             &mut passthrough,
@@ -567,8 +573,8 @@ async fn direct_mode_publishes_changed_values_and_suppresses_repeats() {
     }
 
     assert_eq!(publisher.successful_batches.len(), 2);
-    assert_eq!(publisher.successful_batches[0][0].payload, b"A");
-    assert_eq!(publisher.successful_batches[1][0].payload, b"B");
+    assert_eq!(publisher.successful_batches[0][0].payload.as_ref(), b"A");
+    assert_eq!(publisher.successful_batches[1][0].payload.as_ref(), b"B");
     let output = &metrics.snapshot().outputs["direct-changes-output"];
     assert_eq!(output.deduplicated_messages_total, 1);
     assert_eq!(output.deduplicated_payload_bytes_total, 1);
@@ -599,7 +605,7 @@ async fn truncate_deduplication_compares_the_raw_input_payload() {
         enqueue_for_test_with_policy_at(
             InboundMessage {
                 output_channel: channel.to_owned(),
-                payload,
+                payload: payload.into(),
             },
             &mut pending,
             &mut passthrough,
@@ -622,10 +628,10 @@ async fn truncate_deduplication_compares_the_raw_input_payload() {
     }
 
     assert_eq!(publisher.successful_batches.len(), 2);
-    assert_eq!(publisher.successful_batches[0][0].payload, [0, 1]);
-    assert_eq!(publisher.successful_batches[1][0].payload, [0, 1]);
+    assert_eq!(publisher.successful_batches[0][0].payload.as_ref(), [0, 1]);
+    assert_eq!(publisher.successful_batches[1][0].payload.as_ref(), [0, 1]);
     assert_eq!(
-        cache.entries["events"].raw_payload,
+        cache.entries["events"].raw_payload.as_ref(),
         [0, 1, 3],
         "the TTL cache must retain the untruncated input"
     );
@@ -635,7 +641,7 @@ async fn truncate_deduplication_compares_the_raw_input_payload() {
     enqueue_for_test_with_policy_at(
         InboundMessage {
             output_channel: channel.to_owned(),
-            payload: repeated,
+            payload: repeated.into(),
         },
         &mut pending,
         &mut passthrough,

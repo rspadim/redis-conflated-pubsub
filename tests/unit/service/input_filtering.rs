@@ -93,7 +93,7 @@ fn each_output_conflates_by_mapped_channel_and_preserves_binary_payloads() {
             25,
             InboundMessage {
                 output_channel: channel.to_owned(),
-                payload,
+                payload: payload.into(),
             },
             &mut pending,
             &mut passthrough,
@@ -103,8 +103,8 @@ fn each_output_conflates_by_mapped_channel_and_preserves_binary_payloads() {
     }
 
     assert_eq!(pending_message_count(&pending), 2);
-    assert_eq!(pending[&25]["replica:sensor:a"].payload, b"latest");
-    assert_eq!(pending[&25]["replica:sensor:b"].payload, b"other");
+    assert_eq!(pending[&25]["replica:sensor:a"].payload.as_ref(), b"latest");
+    assert_eq!(pending[&25]["replica:sensor:b"].payload.as_ref(), b"other");
     assert_eq!(metrics.conflated_messages_total.load(Ordering::Relaxed), 1);
     assert_eq!(
         metrics
@@ -173,8 +173,14 @@ fn fan_out_counts_inputs_per_output_without_multiplying_global_input() {
     assert_eq!(snapshot.outputs["unavailable"].input_messages_total, 0);
     assert_eq!(snapshot.outputs["unavailable"].pending_messages, 0);
     assert_eq!(snapshot.outputs["unavailable"].pending_payload_bytes, 0);
-    assert_eq!(first_receiver.try_recv().unwrap().message.payload, b"abc");
-    assert_eq!(second_receiver.try_recv().unwrap().message.payload, b"abc");
+    assert_eq!(
+        first_receiver.try_recv().unwrap().message.payload.as_ref(),
+        b"abc"
+    );
+    assert_eq!(
+        second_receiver.try_recv().unwrap().message.payload.as_ref(),
+        b"abc"
+    );
 }
 
 #[test]

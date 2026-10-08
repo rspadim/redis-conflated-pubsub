@@ -72,7 +72,7 @@ fn channel_policy_resolution_uses_first_match_and_output_fallbacks() {
     enqueue_for_test_with_policy_at(
         InboundMessage {
             output_channel: "mapped:direct:now".to_owned(),
-            payload: b"direct".to_vec(),
+            payload: b"direct".to_vec().into(),
         },
         &mut pending,
         &mut passthrough,

@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap},
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -11,7 +12,7 @@ use crate::config::{DeduplicationGroup, OutputConfig};
 use super::PendingMessage;
 
 pub(super) struct CachedPublishedValue {
-    pub(super) raw_payload: Vec<u8>,
+    pub(super) raw_payload: Arc<[u8]>,
     published_at: time::Instant,
     ttl: Duration,
 }
@@ -26,7 +27,7 @@ struct DeduplicationGroupSettings {
 }
 
 pub(super) struct CachedGroupEntry {
-    raw_payload: Vec<u8>,
+    raw_payload: Arc<[u8]>,
     last_used: time::Instant,
 }
 
@@ -117,7 +118,7 @@ impl DeduplicationCache {
                 .and_then(|group| group.entries.get_mut(&message.output_channel))
                 .is_some_and(|entry| {
                     entry.last_used = now;
-                    entry.raw_payload.as_slice() == message.raw_payload()
+                    entry.raw_payload.as_ref() == message.raw_payload()
                 });
         }
 
@@ -132,7 +133,7 @@ impl DeduplicationCache {
             self.entries.remove(&message.output_channel);
             return false;
         }
-        cached.raw_payload.as_slice() == message.raw_payload()
+        cached.raw_payload.as_ref() == message.raw_payload()
     }
 
     pub(super) fn remember(&mut self, messages: &[PendingMessage], now: time::Instant) {
@@ -177,7 +178,7 @@ impl DeduplicationCache {
             self.entries.insert(
                 message.output_channel.clone(),
                 CachedPublishedValue {
-                    raw_payload: message.raw_payload().to_vec(),
+                    raw_payload: Arc::clone(message.raw_payload_arc()),
                     published_at: now,
                     ttl,
                 },
@@ -207,7 +208,7 @@ impl DeduplicationCache {
                             .entries
                             .get(&message.output_channel)
                             .is_none_or(|previous| {
-                                previous.raw_payload.as_slice() != message.raw_payload()
+                                previous.raw_payload.as_ref() != message.raw_payload()
                             })
                     })
                 });
@@ -225,7 +226,7 @@ impl DeduplicationCache {
             }
             for message in messages {
                 let channel = &message.output_channel;
-                let payload = message.raw_payload();
+                let payload = message.raw_payload_arc();
                 if let Some(previous) = group.entries.remove(channel) {
                     group.cache_bytes = group
                         .cache_bytes
@@ -260,7 +261,7 @@ impl DeduplicationCache {
                     group.entries.insert(
                         channel.clone(),
                         CachedGroupEntry {
-                            raw_payload: payload.to_vec(),
+                            raw_payload: Arc::clone(payload),
                             last_used: now,
                         },
                     );

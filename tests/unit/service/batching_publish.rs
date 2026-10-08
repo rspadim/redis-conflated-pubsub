@@ -15,7 +15,7 @@ async fn conflation_publishes_only_the_final_changed_value_in_a_window() {
             100,
             InboundMessage {
                 output_channel: "events".to_owned(),
-                payload,
+                payload: payload.into(),
             },
             &mut pending,
             &mut VecDeque::new(),
@@ -38,7 +38,7 @@ async fn conflation_publishes_only_the_final_changed_value_in_a_window() {
     .await;
 
     assert_eq!(publisher.successful_batches.len(), 1);
-    assert_eq!(publisher.successful_batches[0][0].payload, b"C");
+    assert_eq!(publisher.successful_batches[0][0].payload.as_ref(), b"C");
     assert_eq!(publisher.attempts.len(), 1);
     let output = &metrics.snapshot().outputs["conflate-final-output"];
     assert_eq!(output.deduplicated_messages_total, 0);
@@ -61,7 +61,7 @@ fn nonpositive_interval_keeps_every_incoming_message_in_order() {
             0,
             InboundMessage {
                 output_channel: "events".to_owned(),
-                payload,
+                payload: payload.into(),
             },
             &mut pending,
             &mut passthrough,
@@ -73,7 +73,7 @@ fn nonpositive_interval_keeps_every_incoming_message_in_order() {
     assert_eq!(passthrough.len(), 2);
     let no_conflated_pending = HashMap::new();
     let batch = pending_batch(0, 256, usize::MAX, &no_conflated_pending, &passthrough);
-    assert_eq!(batch[0].payload, b"first");
+    assert_eq!(batch[0].payload.as_ref(), b"first");
     clear_published_batch(
         0,
         &mut pending,
@@ -83,7 +83,9 @@ fn nonpositive_interval_keeps_every_incoming_message_in_order() {
         &output_metrics,
     );
     assert_eq!(
-        pending_batch(0, 256, usize::MAX, &no_conflated_pending, &passthrough,)[0].payload,
+        pending_batch(0, 256, usize::MAX, &no_conflated_pending, &passthrough,)[0]
+            .payload
+            .as_ref(),
         b"second"
     );
 }
@@ -101,7 +103,7 @@ async fn passthrough_batches_ready_items_in_fifo_order_and_respects_command_cap(
             0,
             InboundMessage {
                 output_channel: "events".to_owned(),
-                payload,
+                payload: payload.into(),
             },
             &mut pending,
             &mut passthrough,
@@ -136,12 +138,12 @@ async fn passthrough_batches_ready_items_in_fifo_order_and_respects_command_cap(
     assert_eq!(
         publisher.successful_batches[0]
             .iter()
-            .map(|message| message.payload.as_slice())
+            .map(|message| message.payload.as_ref())
             .collect::<Vec<_>>(),
         [b"first".as_slice(), b"second".as_slice()]
     );
     assert_eq!(passthrough.len(), 1);
-    assert_eq!(passthrough.front().unwrap().payload, b"third");
+    assert_eq!(passthrough.front().unwrap().payload.as_ref(), b"third");
 
     assert!(
         publish_passthrough_batch(
@@ -156,7 +158,10 @@ async fn passthrough_batches_ready_items_in_fifo_order_and_respects_command_cap(
     );
     assert_eq!(publisher.successful_batches.len(), 2);
     assert!(!publisher.attempts[1].0);
-    assert_eq!(publisher.successful_batches[1][0].payload, b"third");
+    assert_eq!(
+        publisher.successful_batches[1][0].payload.as_ref(),
+        b"third"
+    );
     assert!(passthrough.is_empty());
     assert!(
         !publish_passthrough_batch(
@@ -198,7 +203,7 @@ fn direct_batch_boundary_preserves_per_channel_and_group_ttl_order() {
     let mut passthrough = VecDeque::from([queued]);
     let same_channel = InboundMessage {
         output_channel: "events:a".to_owned(),
-        payload: b"second".to_vec(),
+        payload: b"second".to_vec().into(),
     };
     let per_channel_policy = ResolvedChannelPolicy {
         interval_ms: 0,
@@ -212,7 +217,7 @@ fn direct_batch_boundary_preserves_per_channel_and_group_ttl_order() {
     ));
     let different_channel = InboundMessage {
         output_channel: "events:b".to_owned(),
-        payload: b"other".to_vec(),
+        payload: b"other".to_vec().into(),
     };
     assert!(!direct_batch_boundary_required(
         &passthrough,
@@ -247,7 +252,7 @@ async fn failed_transaction_is_not_replayed_and_later_chunks_continue() {
             10,
             InboundMessage {
                 output_channel: channel.to_owned(),
-                payload,
+                payload: payload.into(),
             },
             &mut pending,
             &mut passthrough,
@@ -301,11 +306,11 @@ async fn failed_transaction_is_not_replayed_and_later_chunks_continue() {
     assert_eq!(publisher.possible_executions.len(), 1);
     assert_eq!(publisher.possible_executions[0].len(), 2);
     assert_eq!(
-        deduplication_cache.entries["events:a"].raw_payload,
+        deduplication_cache.entries["events:a"].raw_payload.as_ref(),
         [0, b'a']
     );
     assert_eq!(
-        deduplication_cache.entries["events:b"].raw_payload,
+        deduplication_cache.entries["events:b"].raw_payload.as_ref(),
         [0, b'b']
     );
 
@@ -313,7 +318,7 @@ async fn failed_transaction_is_not_replayed_and_later_chunks_continue() {
         .successful_batches
         .iter()
         .flatten()
-        .map(|message| (message.output_channel.as_str(), message.payload.clone()))
+        .map(|message| (message.output_channel.as_str(), message.payload.as_ref()))
         .collect::<Vec<_>>();
     let expected = ["a", "b", "c", "d", "e"]
         .into_iter()
@@ -324,7 +329,7 @@ async fn failed_transaction_is_not_replayed_and_later_chunks_continue() {
         expected
             .iter()
             .skip(2)
-            .map(|(channel, payload)| (channel.as_str(), payload.clone()))
+            .map(|(channel, payload)| (channel.as_str(), payload.as_slice()))
             .collect::<Vec<_>>()
     );
     assert!(pending.is_empty());
@@ -356,7 +361,7 @@ async fn definitive_pre_send_chunk_failure_is_counted_as_dropped_and_continues()
             10,
             InboundMessage {
                 output_channel: format!("events:{suffix}"),
-                payload,
+                payload: payload.into(),
             },
             &mut pending,
             &mut passthrough,
@@ -415,7 +420,7 @@ async fn direct_publish_failure_is_not_retried_and_next_item_continues() {
             0,
             InboundMessage {
                 output_channel: "events".to_owned(),
-                payload,
+                payload: payload.into(),
             },
             &mut pending,
             &mut passthrough,
@@ -447,10 +452,19 @@ async fn direct_publish_failure_is_not_retried_and_next_item_continues() {
     assert_eq!(publisher.attempts.len(), 2);
     assert!(publisher.attempts.iter().all(|(atomic, _)| !atomic));
     assert_eq!(publisher.possible_executions.len(), 1);
-    assert_eq!(publisher.possible_executions[0][0].payload, [0, 255]);
+    assert_eq!(
+        publisher.possible_executions[0][0].payload.as_ref(),
+        [0, 255]
+    );
     assert_eq!(publisher.successful_batches.len(), 1);
-    assert_eq!(deduplication_cache.entries["events"].raw_payload, b"later");
-    assert_eq!(publisher.successful_batches[0][0].payload, b"later");
+    assert_eq!(
+        deduplication_cache.entries["events"].raw_payload.as_ref(),
+        b"later"
+    );
+    assert_eq!(
+        publisher.successful_batches[0][0].payload.as_ref(),
+        b"later"
+    );
     let output = &metrics.snapshot().outputs["immediate-output"];
     assert_eq!(output.uncertain_transactions_total, 1);
     assert_eq!(output.uncertain_messages_total, 1);
@@ -473,7 +487,7 @@ async fn uncertain_direct_exec_marks_whole_bounded_batch_and_continues() {
             0,
             InboundMessage {
                 output_channel: "events".to_owned(),
-                payload,
+                payload: payload.into(),
             },
             &mut pending,
             &mut passthrough,
@@ -523,7 +537,10 @@ async fn uncertain_direct_exec_marks_whole_bounded_batch_and_continues() {
         .await
     );
     assert!(!publisher.attempts[1].0);
-    assert_eq!(publisher.successful_batches[0][0].payload, b"third");
+    assert_eq!(
+        publisher.successful_batches[0][0].payload.as_ref(),
+        b"third"
+    );
     assert!(passthrough.is_empty());
     let output = &metrics.snapshot().outputs["direct-exec-failure-output"];
     assert_eq!(output.uncertain_transactions_total, 1);
@@ -666,7 +683,7 @@ fn truncate_preserves_payload_prefix_and_exact_exec_byte_target() {
         },
         InboundMessage {
             output_channel: "events:binary".to_owned(),
-            payload,
+            payload: payload.into(),
         },
         &metrics,
         &output_metrics,
@@ -704,7 +721,7 @@ fn truncate_drops_when_even_an_empty_publish_frame_exceeds_the_target() {
             },
             InboundMessage {
                 output_channel: channel.to_owned(),
-                payload: b"abc".to_vec(),
+                payload: b"abc".to_vec().into(),
             },
             &metrics,
             &output_metrics,
@@ -739,7 +756,7 @@ fn direct_truncation_uses_publishes_frame_without_transaction_wrappers() {
         },
         InboundMessage {
             output_channel: channel.to_owned(),
-            payload,
+            payload: payload.into(),
         },
         &metrics,
         &output_metrics,
@@ -747,7 +764,7 @@ fn direct_truncation_uses_publishes_frame_without_transaction_wrappers() {
     )
     .unwrap();
 
-    assert_eq!(prepared.payload, [0, 255]);
+    assert_eq!(prepared.payload.as_ref(), [0, 255]);
     assert_eq!(publish_command_frame_bytes(&prepared), max_bytes);
     assert_eq!(
         publish_operation_frame_bytes(&prepared, true),
@@ -775,7 +792,7 @@ fn drop_policy_skips_one_oversized_message_and_counts_it() {
             },
             InboundMessage {
                 output_channel: "events:too-large".to_owned(),
-                payload,
+                payload: payload.into(),
             },
             &metrics,
             &output_metrics,
@@ -805,5 +822,5 @@ fn output_batch_is_deterministic_and_retains_one_payload_per_channel() {
 
     assert_eq!(batch.len(), 2);
     assert_eq!(batch[0].output_channel, "replica:a");
-    assert_eq!(batch[1].payload, [0, 255]);
+    assert_eq!(batch[1].payload.as_ref(), [0, 255]);
 }

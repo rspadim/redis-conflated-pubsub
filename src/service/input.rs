@@ -171,6 +171,8 @@ pub(super) fn fan_out(
     payload: &[u8],
     metrics: &Metrics,
 ) {
+    // One shared allocation per inbound message; every output clones the Arc.
+    let payload: Arc<[u8]> = Arc::from(payload);
     let input_mapped_channel = senders
         .iter()
         .any(|output| output.channel_filter.can_deny())
@@ -204,7 +206,7 @@ pub(super) fn fan_out(
             .send(QueuedInboundMessage {
                 message: InboundMessage {
                     output_channel,
-                    payload: payload.to_vec(),
+                    payload: Arc::clone(&payload),
                 },
                 enqueued_at: time::Instant::now(),
             })
