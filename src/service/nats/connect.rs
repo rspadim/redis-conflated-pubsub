@@ -24,9 +24,10 @@ use super::super::publish::PublishFailure;
 
 /// Auth variant resolved from the configuration without reading the secret.
 ///
-/// Only the reference (environment variable name or file path) is stored, so a
-/// `ConnectionPlan` is safe to log and to assert on in tests.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Only a reference (environment variable name, file path, or an inline value
+/// from the server URL) is stored. The inline variants carry a secret, so
+/// `NatsAuthPlan`'s `Debug` is hand-written to redact it.
+#[derive(Clone, PartialEq, Eq)]
 pub(in crate::service) enum NatsAuthPlan {
     None,
     UserPassword {
@@ -42,6 +43,50 @@ pub(in crate::service) enum NatsAuthPlan {
     CredentialsFile {
         path: PathBuf,
     },
+    /// Credentials embedded in a server URL (`nats://user:pass@host`).
+    InlineUserPassword {
+        username: String,
+        password: String,
+    },
+    /// A lone token embedded in a server URL (`nats://token@host`).
+    InlineToken {
+        token: String,
+    },
+}
+
+impl std::fmt::Debug for NatsAuthPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::None => f.write_str("None"),
+            Self::UserPassword {
+                username,
+                password_env,
+            } => f
+                .debug_struct("UserPassword")
+                .field("username", username)
+                .field("password_env", password_env)
+                .finish(),
+            Self::Token { token_env } => f
+                .debug_struct("Token")
+                .field("token_env", token_env)
+                .finish(),
+            Self::Nkey { seed_file } => f
+                .debug_struct("Nkey")
+                .field("seed_file", seed_file)
+                .finish(),
+            Self::CredentialsFile { path } => f
+                .debug_struct("CredentialsFile")
+                .field("path", path)
+                .finish(),
+            // Inline variants: redact the secret.
+            Self::InlineUserPassword { username, .. } => f
+                .debug_struct("InlineUserPassword")
+                .field("username", username)
+                .field("password", &"***")
+                .finish(),
+            Self::InlineToken { .. } => f.write_str("InlineToken(***)"),
+        }
+    }
 }
 
 impl From<&NatsAuth> for NatsAuthPlan {
@@ -94,27 +139,52 @@ pub(in crate::service) struct ConnectionPlan {
 /// Resolves a [`NatsConfig`] into a [`ConnectionPlan`] without touching the
 /// network, the environment, or the filesystem.
 ///
-/// `servers` is re-validated here (single transport family, no embedded
-/// credentials) so the adapter cannot be pointed at an unsupported list even
-/// when it is constructed directly rather than through `--check-config`.
+/// `servers` is normalized here (single transport family, inline credentials
+/// extracted) so the adapter cannot be pointed at an unsupported list, and the
+/// stored server URLs never carry a secret even when constructed directly
+/// rather than through `--check-config`.
 pub(in crate::service) fn connection_plan(config: &NatsConfig) -> Result<ConnectionPlan> {
     // Runtime validation already ran with a path-qualified message; the
     // "nats" path here is the adapter's belt-and-braces re-check.
-    let (transport, websocket) = crate::config::validate_nats_servers("nats", &config.servers)?;
+    let normalized = crate::config::normalize_nats_servers("nats", &config.servers)?;
     let tls = config.tls.as_ref();
     let client_cert_file = tls.and_then(|tls| tls.client_cert_file.clone());
     let client_key_file = tls.and_then(|tls| tls.client_key_file.clone());
     if client_cert_file.is_some() != client_key_file.is_some() {
         bail!("NATS mTLS requires client_cert_file and client_key_file together");
     }
+    // Inline URL credentials are a real auth method, so they cannot coexist with
+    // an explicit `auth` block: two owners of one credential is ambiguous.
+    let explicit_auth = NatsAuthPlan::from(&config.auth);
+    let auth = match &normalized.inline_auth {
+        Some(inline) => {
+            if !matches!(config.auth, NatsAuth::None) {
+                bail!(
+                    "NATS server URL embeds credentials and `auth` is also configured; use one or the other"
+                );
+            }
+            match inline {
+                crate::config::NatsInlineAuth::UserPassword { username, password } => {
+                    NatsAuthPlan::InlineUserPassword {
+                        username: username.clone(),
+                        password: password.clone(),
+                    }
+                }
+                crate::config::NatsInlineAuth::Token(token) => NatsAuthPlan::InlineToken {
+                    token: token.clone(),
+                },
+            }
+        }
+        None => explicit_auth,
+    };
     Ok(ConnectionPlan {
-        servers: config.servers.clone(),
-        transport,
-        websocket,
+        servers: normalized.servers,
+        transport: normalized.transport,
+        websocket: normalized.websocket,
         name: config.name.clone(),
         connect_timeout: config.connect_timeout(),
         ignore_discovered_servers: config.ignore_discovered_servers,
-        auth: NatsAuthPlan::from(&config.auth),
+        auth,
         root_cert_file: tls.and_then(|tls| tls.root_cert_file.clone()),
         client_cert_file,
         client_key_file,
@@ -165,6 +235,11 @@ pub(in crate::service) fn resolve_auth(auth: &NatsAuthPlan) -> Result<NatsAuthMa
             })?;
             NatsAuthMaterial::Credentials(credentials)
         }
+        NatsAuthPlan::InlineUserPassword { username, password } => NatsAuthMaterial::UserPassword {
+            username: username.clone(),
+            password: password.clone(),
+        },
+        NatsAuthPlan::InlineToken { token } => NatsAuthMaterial::Token(token.clone()),
     })
 }
 

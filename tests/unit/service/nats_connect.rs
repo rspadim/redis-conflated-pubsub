@@ -221,6 +221,79 @@ fn tls_files_and_transports_are_classified_from_the_scheme() {
     assert!(ws.websocket);
 }
 
+/// Inline URL credentials become real auth and are stripped from the stored
+/// server list, so no secret reaches `ServerAddr` (and its debug logging).
+#[test]
+fn inline_url_credentials_become_auth_and_are_stripped_from_servers() {
+    let planned = connection_plan(&config(serde_json::json!({
+        "servers": ["nats://relay:s3cr3t@one:4222", "nats://relay:s3cr3t@two:4222"],
+    })))
+    .unwrap();
+
+    assert_eq!(
+        planned.auth,
+        NatsAuthPlan::InlineUserPassword {
+            username: "relay".to_owned(),
+            password: "s3cr3t".to_owned(),
+        }
+    );
+    // The stored URLs carry no userinfo.
+    assert_eq!(planned.servers, vec!["nats://one:4222", "nats://two:4222"]);
+    for server in &planned.servers {
+        assert!(!server.contains("s3cr3t"), "{server}");
+        assert!(!server.contains('@'), "{server}");
+    }
+    // The secret never appears in the plan's Debug output.
+    let debug = format!("{planned:?}");
+    assert!(!debug.contains("s3cr3t"), "{debug}");
+    // ... nor in the built ConnectOptions Debug output.
+    let options = connect_options(&planned).unwrap();
+    assert!(!format!("{options:?}").contains("s3cr3t"));
+}
+
+/// A lone userinfo value (no colon) is a token.
+#[test]
+fn inline_url_token_auth_is_recognized() {
+    let planned = connection_plan(&config(serde_json::json!({
+        "servers": ["nats://t0k3n@one:4222"],
+    })))
+    .unwrap();
+    assert_eq!(
+        planned.auth,
+        NatsAuthPlan::InlineToken {
+            token: "t0k3n".to_owned(),
+        }
+    );
+    assert_eq!(planned.servers, vec!["nats://one:4222"]);
+    assert!(!format!("{:?}", planned.auth).contains("t0k3n"));
+}
+
+/// Inline credentials and an explicit `auth` block cannot coexist.
+#[test]
+fn inline_credentials_conflict_with_explicit_auth() {
+    let error = connection_plan(&config(serde_json::json!({
+        "servers": ["nats://relay:s3cr3t@one:4222"],
+        "auth": {"type": "token", "token_env": "RCPS_TEST_TOKEN"},
+    })))
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("use one or the other"), "{error}");
+    assert!(!error.contains("s3cr3t"), "{error}");
+}
+
+/// Every seed must carry the same inline credentials (they are one auth hand).
+#[test]
+fn inconsistent_inline_credentials_are_rejected() {
+    let error = connection_plan(&config(serde_json::json!({
+        "servers": ["nats://relay:one@a:4222", "nats://relay:two@b:4222"],
+    })))
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("inconsistent inline credentials"), "{error}");
+    assert!(!error.contains("one@"), "{error}");
+    assert!(!error.contains("two@"), "{error}");
+}
+
 #[test]
 fn mixed_websocket_and_tcp_server_lists_are_rejected_before_connecting() {
     let planned = connection_plan(&config(serde_json::json!({

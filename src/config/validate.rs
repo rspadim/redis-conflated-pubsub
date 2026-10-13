@@ -489,7 +489,13 @@ fn validate_redis(path: &str, redis: &RedisConfig) -> Result<()> {
 fn validate_nats(path: &str, nats: &NatsConfig) -> Result<()> {
     // Rejects empty lists, malformed URLs, unsupported schemes, and a server
     // list that mixes WebSocket and raw-TCP transports in one connection.
-    super::validate_nats_servers(path, &nats.servers)?;
+    // Also extracts inline URL credentials and checks they are consistent.
+    let normalized = super::normalize_nats_servers(path, &nats.servers)?;
+    if normalized.inline_auth.is_some() && !matches!(nats.auth, NatsAuth::None) {
+        bail!(
+            "{path} embeds credentials in a server URL and also configures `auth`; use one or the other"
+        );
+    }
     if nats.name.as_deref().is_some_and(str::is_empty) {
         bail!("{path}.name must not be empty");
     }

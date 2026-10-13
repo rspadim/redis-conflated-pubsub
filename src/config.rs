@@ -58,35 +58,135 @@ impl NatsTransport {
     }
 }
 
-/// Parses one NATS server URL into its transport and scheme. The scheme is
-/// mandatory here (unlike `async-nats`, which defaults a bare `host:port` to
-/// `nats://`) so that the transport is never guessed.
-pub fn parse_nats_transport(server: &str) -> Result<(String, NatsTransport)> {
+/// Redacts any `userinfo@` embedded in a URL so it is safe to place in an error
+/// message or a log line. Everything between `://` and the last `@` in the
+/// authority is replaced with `***`; a string without that shape is returned
+/// unchanged (it cannot contain userinfo).
+pub fn redact_url_userinfo(value: &str) -> String {
+    let Some((scheme, rest)) = value.split_once("://") else {
+        return value.to_owned();
+    };
+    // The authority ends at the first `/`, `?`, or `#` after the scheme.
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(authority_end);
+    match authority.rsplit_once('@') {
+        Some((_, host)) => format!("{scheme}://***@{host}{tail}"),
+        None => value.to_owned(),
+    }
+}
+
+/// Credentials embedded directly in a NATS server URL (`nats://user:pass@host`).
+///
+/// Extracted so the URL stored in the connection plan can be credential-free:
+/// `async-nats` does not consume URL userinfo, and its debug logging prints the
+/// `ServerAddr` (including any password) verbatim.
+#[derive(Clone, PartialEq, Eq)]
+pub enum NatsInlineAuth {
+    /// `nats://user:password@host`.
+    UserPassword { username: String, password: String },
+    /// `nats://token@host` (a lone userinfo value, no colon).
+    Token(String),
+}
+
+// Manual `Debug` so the secret never reaches a log line even if a containing
+// struct derives `Debug`.
+impl std::fmt::Debug for NatsInlineAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UserPassword { username, .. } => f
+                .debug_struct("NatsInlineAuth::UserPassword")
+                .field("username", username)
+                .field("password", &"***")
+                .finish(),
+            Self::Token(_) => f.write_str("NatsInlineAuth::Token(***)"),
+        }
+    }
+}
+
+/// Parses one NATS server URL into its credential-free form, transport, and any
+/// inline credentials. The scheme is mandatory here (unlike `async-nats`, which
+/// defaults a bare `host:port` to `nats://`) so the transport is never guessed.
+///
+/// Error text is redacted, so a malformed URL carrying a password never echoes
+/// it through `--check-config`.
+pub fn parse_nats_server(server: &str) -> Result<(String, NatsTransport, Option<NatsInlineAuth>)> {
     let url = Url::parse(server).with_context(|| {
-        format!("invalid NATS server URL {server:?}: expected nats://, tls://, ws://, or wss://")
+        format!(
+            "invalid NATS server URL {:?}: expected nats://, tls://, ws://, or wss://",
+            redact_url_userinfo(server)
+        )
     })?;
     let transport = NatsTransport::from_scheme(url.scheme()).ok_or_else(|| {
         anyhow::anyhow!(
-            "invalid NATS server URL {server:?}: unsupported scheme {:?}; use nats://, tls://, ws://, or wss://",
+            "invalid NATS server URL {:?}: unsupported scheme {:?}; use nats://, tls://, ws://, or wss://",
+            redact_url_userinfo(server),
             url.scheme()
         )
     })?;
-    Ok((url.scheme().to_owned(), transport))
+    let inline = if !url.username().is_empty() {
+        if let Some(password) = url.password() {
+            Some(NatsInlineAuth::UserPassword {
+                username: url.username().to_owned(),
+                password: password.to_owned(),
+            })
+        } else {
+            // A lone userinfo value with no colon is a token, matching the
+            // common NATS convention.
+            Some(NatsInlineAuth::Token(url.username().to_owned()))
+        }
+    } else {
+        None
+    };
+    // Store a credential-free URL. `async-nats` does not consume URL userinfo,
+    // and its debug logging would print any password in the `ServerAddr`.
+    let clean = if inline.is_some() {
+        let mut stripped = url.clone();
+        stripped
+            .set_username("")
+            .expect("a host-backed URL accepts an empty username");
+        stripped
+            .set_password(None)
+            .expect("a host-backed URL accepts a cleared password");
+        stripped.to_string()
+    } else {
+        server.to_owned()
+    };
+    Ok((clean, transport, inline))
 }
 
-/// Validates that every URL parses, uses a supported scheme, and shares a
-/// single transport family. Returns the transport's `(name, is_websocket)`
-/// classification used for connection reporting.
-pub fn validate_nats_servers(path: &str, servers: &[String]) -> Result<(String, bool)> {
+/// Result of normalizing a NATS `servers` list: credential-free URLs, the
+/// transport family, and any credentials that were embedded in the URLs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NormalizedNatsServers {
+    /// Server URLs with any inline credentials stripped.
+    pub servers: Vec<String>,
+    /// Transport scheme (`nats`, `tls`, `ws`, `wss`) shared by the whole list.
+    pub transport: String,
+    /// `true` for the WebSocket transports.
+    pub websocket: bool,
+    /// Credentials found inline in the URLs, if any. All entries must agree.
+    pub inline_auth: Option<NatsInlineAuth>,
+}
+
+/// Validates and normalizes a NATS `servers` list.
+///
+/// Every URL must parse, use a supported scheme, and share a single transport
+/// family (one connection cannot mix `ws`/`wss` with `nats`/`tls`). Credentials
+/// embedded in the URL are extracted and returned; all entries in one list must
+/// carry the same credentials (or none), because they form a single auth hand.
+/// Error text is redacted so a password never leaks through `--check-config`.
+pub fn normalize_nats_servers(path: &str, servers: &[String]) -> Result<NormalizedNatsServers> {
     if servers.is_empty() {
         bail!("{path}.servers must contain at least one NATS server URL");
     }
     let mut transport: Option<NatsTransport> = None;
+    let mut inline_auth: Option<NatsInlineAuth> = None;
+    let mut cleaned = Vec::with_capacity(servers.len());
     for (index, server) in servers.iter().enumerate() {
         if server.trim().is_empty() {
             bail!("{path}.servers[{index}] must not be empty");
         }
-        let (_, parsed) = parse_nats_transport(server)
+        let (clean, parsed, inline) = parse_nats_server(server)
             .map_err(|error| anyhow::anyhow!("{path}.servers[{index}]: {error}"))?;
         match transport {
             None => transport = Some(parsed),
@@ -101,9 +201,24 @@ pub fn validate_nats_servers(path: &str, servers: &[String]) -> Result<(String, 
                 );
             }
         }
+        if let Some(inline) = inline {
+            match &inline_auth {
+                None => inline_auth = Some(inline),
+                Some(existing) if *existing == inline => {}
+                Some(_) => bail!(
+                    "{path}.servers has inconsistent inline credentials; every seed must use the same credentials or none"
+                ),
+            }
+        }
+        cleaned.push(clean);
     }
     let transport = transport.expect("a non-empty server list has a transport");
-    Ok((transport.scheme().to_owned(), transport.is_websocket()))
+    Ok(NormalizedNatsServers {
+        servers: cleaned,
+        transport: transport.scheme().to_owned(),
+        websocket: transport.is_websocket(),
+        inline_auth,
+    })
 }
 
 pub const MAX_RUNTIME_DURATION_MS: i64 = 31_536_000_000;
