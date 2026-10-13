@@ -413,26 +413,46 @@ fn validate_subscriptions(config: &AppConfig) -> Result<()> {
 /// Validates a NATS subject filter. Prefer importing `validate_nats_subject`
 /// directly in the adapter workstreams; it is `pub(crate)` for that reason.
 pub(crate) fn validate_nats_subject(path: &str, subject: &str) -> Result<()> {
+    validate_nats_subject_tokens(path, subject, true)
+}
+
+/// Validates a concrete NATS subject used as a publish target. Wildcards are
+/// rejected because Core NATS only accepts concrete subjects for `PUBLISH`; the
+/// full mapping rule set (no whitespace or empty tokens) still applies.
+pub(crate) fn validate_nats_publish_subject(path: &str, subject: &str) -> Result<()> {
+    validate_nats_subject_tokens(path, subject, false)
+}
+
+/// Shared token validation. `allow_wildcards` is `true` for subscription
+/// filters (`*` one token, `>` trailing only) and `false` for publish targets.
+/// Iterates the tokens without allocating so it is safe to call per message.
+pub(crate) fn validate_nats_subject_tokens(
+    path: &str,
+    subject: &str,
+    allow_wildcards: bool,
+) -> Result<()> {
     if subject.is_empty() {
         bail!("{path} must not be empty");
     }
     if subject.chars().any(char::is_whitespace) {
         bail!("{path} must not contain whitespace");
     }
-    let tokens = subject.split('.').collect::<Vec<_>>();
-    for (index, token) in tokens.iter().enumerate() {
-        let is_last = index + 1 == tokens.len();
+    let mut tokens = subject.split('.').peekable();
+    while let Some(token) = tokens.next() {
         if token.is_empty() {
             bail!("{path} must not contain empty tokens");
         }
-        if token.contains('*') && *token != "*" {
+        if !allow_wildcards && (token == "*" || token == ">") {
+            bail!("{path} must be a concrete subject without `*` or `>` wildcards");
+        }
+        if token.contains('*') && token != "*" {
             bail!("{path} may only use `*` as a full token");
         }
         if token.contains('>') {
-            if *token != ">" {
+            if token != ">" {
                 bail!("{path} may only use `>` as a full token");
             }
-            if !is_last {
+            if tokens.peek().is_some() {
                 bail!("{path} `>` must be the final token");
             }
         }
@@ -467,14 +487,9 @@ fn validate_redis(path: &str, redis: &RedisConfig) -> Result<()> {
 }
 
 fn validate_nats(path: &str, nats: &NatsConfig) -> Result<()> {
-    if nats.servers.is_empty() {
-        bail!("{path}.servers must contain at least one NATS server URL");
-    }
-    for (index, server) in nats.servers.iter().enumerate() {
-        if server.trim().is_empty() {
-            bail!("{path}.servers[{index}] must not be empty");
-        }
-    }
+    // Rejects empty lists, malformed URLs, unsupported schemes, and a server
+    // list that mixes WebSocket and raw-TCP transports in one connection.
+    super::validate_nats_servers(path, &nats.servers)?;
     if nats.name.as_deref().is_some_and(str::is_empty) {
         bail!("{path}.name must not be empty");
     }

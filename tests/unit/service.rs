@@ -120,7 +120,7 @@ struct RecordingPublisher {
     successful_batches: Vec<Vec<PendingMessage>>,
 }
 
-impl BatchPublisher for RecordingPublisher {
+impl OutputSink for RecordingPublisher {
     async fn publish(
         &mut self,
         messages: &[PendingMessage],
@@ -142,6 +142,12 @@ impl BatchPublisher for RecordingPublisher {
         }
         self.successful_batches.push(messages.to_vec());
         Ok(messages.len() as i64)
+    }
+
+    /// In-memory publishers settle in `publish`, so `flush` is a no-op that
+    /// keeps the shared `OutputSink` contract satisfied.
+    async fn flush(&mut self) -> std::result::Result<(), PublishFailure> {
+        Ok(())
     }
 }
 
@@ -322,6 +328,12 @@ mod filter_load;
 mod input_client_name;
 #[path = "service/input_filtering.rs"]
 mod input_filtering;
+#[path = "service/nats_input.rs"]
+mod nats_input;
+#[path = "service/nats_output.rs"]
+mod nats_output;
+#[path = "service/nats_subjects.rs"]
+mod nats_subjects;
 #[path = "service/policy_schedules.rs"]
 mod policy_schedules;
 #[path = "service/queue_limits.rs"]

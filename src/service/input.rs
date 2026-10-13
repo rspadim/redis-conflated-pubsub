@@ -406,7 +406,9 @@ pub(super) async fn connect_input(
                 .context("timed out subscribing to input pattern")??;
             }
             Subscription::NatsSubject { .. } => {
-                anyhow::bail!("NATS backend not implemented yet for an input subscription");
+                anyhow::bail!(
+                    "a `nats_subject` subscription cannot be handled by the Redis input reader"
+                );
             }
         }
     }

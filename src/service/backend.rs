@@ -1,10 +1,9 @@
 //! Backend boundary for the 0.3 input/output abstraction.
 //!
-//! This module is the frozen keystone for the NATS workstreams: it defines the
-//! normalized message envelope and the two internal traits that concrete Redis
-//! and Core NATS adapters will implement. No backend I/O lives here, and the
-//! running Redis path is intentionally not rewired onto these traits yet, so the
-//! items are allowed to be unused until the adapters land.
+//! This module defines the normalized message envelope and the two internal
+//! traits that concrete Redis and Core NATS adapters implement. No backend I/O
+//! lives here. The Redis input/output path predates this boundary and still
+//! does not route through it, so the items are allowed to be unused by Redis.
 #![allow(dead_code)]
 
 use std::sync::Arc;
@@ -15,15 +14,20 @@ use super::publish::PublishFailure;
 /// Normalized inbound message envelope shared by every input backend.
 ///
 /// The relay's filtering/conflation/deduplication path consumes this envelope
-/// and stays backend-agnostic. `subscription_identity` is required so that
-/// per-subscription output mappings survive overlapping filters: Redis reports
-/// the matching channel (SUBSCRIBE) or pattern (PSUBSCRIBE), while a NATS
-/// subscription reports the subject filter that produced the message.
+/// and stays backend-agnostic. `source_subject` is the concrete address the
+/// message arrived on (Redis channel or NATS subject) and `subscription_identity`
+/// is the identity of the subscription that matched: Redis reports the matching
+/// channel (SUBSCRIBE) or pattern (PSUBSCRIBE), while a NATS subscription
+/// reports the subject filter that produced the message. Keeping both is what
+/// lets per-subscription output mappings survive overlapping filters, because a
+/// wildcard filter (`prices.>`) matches many concrete subjects.
 #[derive(Clone, Debug)]
 pub(super) struct InputEnvelope {
     /// Backend address the message arrived from, for logs and metrics
     /// (for example `redis://host:6379` or `nats://host:4222`).
     pub(super) source_address: String,
+    /// Concrete source address of the message (Redis channel or NATS subject).
+    pub(super) source_subject: String,
     /// Raw payload bytes, shared through `Arc` where the backend allows it.
     pub(super) payload: Arc<[u8]>,
     /// Identity of the subscription that matched this message.
@@ -33,9 +37,10 @@ pub(super) struct InputEnvelope {
 /// An input backend: connect/reconnect, install the configured subscriptions,
 /// and yield normalized envelopes in arrival order.
 ///
-/// Implemented later by the Redis and NATS input adapters. `connect` must be
-/// idempotent enough to be called again after a dropped stream establishes a
-/// fresh connection and re-installs the same subscriptions.
+/// Implemented by the NATS input adapter (`service::nats::NatsInput`). The
+/// Redis input path predates this boundary. `connect` must be idempotent enough
+/// to be called again after a dropped stream establishes a fresh connection and
+/// re-installs the same subscriptions.
 pub(super) trait InputSource {
     /// Connects (or reconnects) and installs every configured subscription.
     async fn connect(&mut self) -> anyhow::Result<()>;
@@ -54,7 +59,9 @@ pub(super) trait InputSource {
 /// pipeline replies, while NATS flushes its client buffer to the server.
 pub(super) trait OutputSink {
     /// Publishes one ordered chunk. Returns the backend-specific completion
-    /// signal where one exists (Redis subscriber count; Core NATS has none).
+    /// signal where one exists. Redis returns the summed `PUBLISH` subscriber
+    /// count; Core NATS has no acknowledgement or subscriber count, so the NATS
+    /// sink returns `0` and `flush` carries the completion meaning.
     async fn publish(
         &mut self,
         chunk: &[PendingMessage],

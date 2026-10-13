@@ -71,7 +71,7 @@ impl LatencyPublisher {
     }
 }
 
-impl BatchPublisher for LatencyPublisher {
+impl OutputSink for LatencyPublisher {
     async fn publish(
         &mut self,
         messages: &[PendingMessage],
@@ -101,6 +101,10 @@ impl BatchPublisher for LatencyPublisher {
         self.published_payloads
             .extend(messages.iter().map(|message| Arc::clone(&message.payload)));
         Ok(i64::try_from(messages.len()).unwrap_or(i64::MAX))
+    }
+
+    async fn flush(&mut self) -> std::result::Result<(), PublishFailure> {
+        Ok(())
     }
 }
 

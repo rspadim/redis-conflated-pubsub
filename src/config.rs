@@ -10,10 +10,101 @@ use url::Url;
 mod schema;
 mod validate;
 
-// Frozen validation helper for the NATS adapter workstreams; not yet called
-// outside `--check-config`.
-#[allow(unused_imports)]
+// NATS subject helpers used by `--check-config` and by the NATS adapter.
+pub(crate) use validate::validate_nats_publish_subject;
+#[cfg(test)]
 pub(crate) use validate::validate_nats_subject;
+
+/// The wire protocol a NATS server URL selects. `async-nats` reads these from
+/// the URL scheme; grouping the schemes lets validation reject a server list
+/// that mixes WebSocket and raw-TCP transports before any connection is made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NatsTransport {
+    /// `nats://`: plain Core NATS over TCP.
+    Tcp,
+    /// `tls://`: Core NATS over TLS.
+    Tls,
+    /// `ws://`: Core NATS over WebSocket.
+    WebSocket,
+    /// `wss://`: Core NATS over WebSocket with TLS.
+    WebSocketTls,
+}
+
+impl NatsTransport {
+    fn from_scheme(scheme: &str) -> Option<Self> {
+        match scheme {
+            "nats" => Some(Self::Tcp),
+            "tls" => Some(Self::Tls),
+            "ws" => Some(Self::WebSocket),
+            "wss" => Some(Self::WebSocketTls),
+            _ => None,
+        }
+    }
+
+    /// `true` for the WebSocket transports; `async-nats` refuses to mix these
+    /// with `nats://`/`tls://` in one connection's server pool.
+    pub fn is_websocket(self) -> bool {
+        matches!(self, Self::WebSocket | Self::WebSocketTls)
+    }
+
+    /// The URL scheme that selects this transport.
+    pub fn scheme(self) -> &'static str {
+        match self {
+            Self::Tcp => "nats",
+            Self::Tls => "tls",
+            Self::WebSocket => "ws",
+            Self::WebSocketTls => "wss",
+        }
+    }
+}
+
+/// Parses one NATS server URL into its transport and scheme. The scheme is
+/// mandatory here (unlike `async-nats`, which defaults a bare `host:port` to
+/// `nats://`) so that the transport is never guessed.
+pub fn parse_nats_transport(server: &str) -> Result<(String, NatsTransport)> {
+    let url = Url::parse(server).with_context(|| {
+        format!("invalid NATS server URL {server:?}: expected nats://, tls://, ws://, or wss://")
+    })?;
+    let transport = NatsTransport::from_scheme(url.scheme()).ok_or_else(|| {
+        anyhow::anyhow!(
+            "invalid NATS server URL {server:?}: unsupported scheme {:?}; use nats://, tls://, ws://, or wss://",
+            url.scheme()
+        )
+    })?;
+    Ok((url.scheme().to_owned(), transport))
+}
+
+/// Validates that every URL parses, uses a supported scheme, and shares a
+/// single transport family. Returns the transport's `(name, is_websocket)`
+/// classification used for connection reporting.
+pub fn validate_nats_servers(path: &str, servers: &[String]) -> Result<(String, bool)> {
+    if servers.is_empty() {
+        bail!("{path}.servers must contain at least one NATS server URL");
+    }
+    let mut transport: Option<NatsTransport> = None;
+    for (index, server) in servers.iter().enumerate() {
+        if server.trim().is_empty() {
+            bail!("{path}.servers[{index}] must not be empty");
+        }
+        let (_, parsed) = parse_nats_transport(server)
+            .map_err(|error| anyhow::anyhow!("{path}.servers[{index}]: {error}"))?;
+        match transport {
+            None => transport = Some(parsed),
+            Some(first) if first == parsed => {}
+            Some(first) => {
+                bail!(
+                    "{path}.servers mixes {} and {} transports ({:?} and {:?}); one NATS connection requires a single transport family",
+                    first.scheme(),
+                    parsed.scheme(),
+                    first,
+                    parsed
+                );
+            }
+        }
+    }
+    let transport = transport.expect("a non-empty server list has a transport");
+    Ok((transport.scheme().to_owned(), transport.is_websocket()))
+}
 
 pub const MAX_RUNTIME_DURATION_MS: i64 = 31_536_000_000;
 pub const MAX_DEDUPLICATION_GROUP_MEMBERS: usize = 100_000;
@@ -681,8 +772,10 @@ impl RedisConfig {
 /// Core NATS backend settings.
 ///
 /// The `servers` list holds one or more seed URLs; the URL scheme selects the
-/// transport (`nats://`, `tls://`, `ws://`, `wss://`). No NATS I/O is wired into
-/// the runtime yet, so this type is parsed and validated but not connected.
+/// transport (`nats://`, `tls://`, `ws://`, `wss://`). Every URL in one list
+/// must use the same transport family. The runtime adapter in
+/// `src/service/nats` consumes these settings: seed pool, connection
+/// name/timeout, server discovery, authentication, and TLS.
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NatsConfig {
@@ -699,9 +792,7 @@ pub struct NatsConfig {
     pub connect_timeout_ms: u64,
     /// When true, only the configured `servers` are used and servers advertised
     /// by the cluster are ignored. Useful behind proxies or WebSocket ingress.
-    /// Consumed by the NATS adapter workstream.
     #[serde(default)]
-    #[allow(dead_code)]
     pub ignore_discovered_servers: bool,
     /// Authentication method; defaults to none.
     #[serde(default)]

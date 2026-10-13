@@ -6,11 +6,12 @@ use std::{collections::HashMap, path::Path, sync::Arc, time::Duration};
 use anyhow::bail;
 use anyhow::{Context, Result, anyhow};
 use tokio::time::{self, MissedTickBehavior};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     config::{
-        AppConfig, HttpStatusConfig, OutputConfig, OversizedMessagePolicy, QueueOverflowPolicy,
+        AppConfig, Endpoint, HttpStatusConfig, OutputConfig, OversizedMessagePolicy,
+        QueueOverflowPolicy,
     },
     http_status, logging,
     status::{self, Metrics, OutputMetrics},
@@ -22,11 +23,14 @@ mod channel_cache;
 mod dedup;
 mod filter;
 mod input;
+pub(crate) mod nats;
 mod output;
 mod policy;
 mod publish;
 mod queue;
 
+#[cfg(test)]
+use backend::OutputSink;
 use batch::OversizedPolicyLog;
 #[cfg(test)]
 use batch::{
@@ -42,6 +46,8 @@ use input::{
     matching_subscription, single_subscription_match,
 };
 use input::{output_echo_filters, read_input};
+use nats::input::read_nats_input;
+use nats::output::NatsOutputSink;
 #[cfg(test)]
 use output::{
     clear_published_batch, direct_batch_boundary_required, enqueue_message,
@@ -55,8 +61,9 @@ use policy::{CompiledChannelPolicies, glob_matches};
 #[cfg(test)]
 use policy::{advance_due_schedules, flush_schedules, resolve_channel_policy};
 use publish::OutputFailureLog;
+use publish::{OutputConnection, RedisOutputSink};
 #[cfg(test)]
-use publish::{BatchPublisher, PublishFailure, publish_once};
+use publish::{PublishFailure, publish_once};
 use queue::{OutputQueueReceiver, OutputQueueSender, QueueLimits, QueueShedLog, output_queue};
 
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
@@ -207,7 +214,6 @@ struct OutputRuntimeSetup {
     oversized_policy: OversizedMessagePolicy,
     filters_endpoint_enabled: bool,
     channel_policy_cache_max_entries: usize,
-    client_name: Option<String>,
 }
 
 #[derive(Clone)]
@@ -258,18 +264,23 @@ pub async fn run(
     let _ = config_path;
     metrics.clear_channel_cache_inspectors();
     let input_client_name = config.client_name_for("i");
-    // Redis is the only backend wired into the runtime so far; selecting NATS
-    // parses and validates but stops here with a clear message until the NATS
-    // adapter workstream lands. The relay processing below stays backend-agnostic.
-    let input_redis = config
-        .input
-        .redis
-        .as_ref()
-        .ok_or_else(|| anyhow!("NATS backend not implemented yet for `input`"))?;
-    let input_client = match &input_client_name {
-        Some(lib_name) => input_redis.client_with_lib_name(lib_name)?,
-        None => input_redis.client()?,
+    // Resolve the input backend without connecting yet. Redis builds a client
+    // handle; NATS is constructed inside its reader task so the initial connect
+    // (and its retry loop) does not block service startup.
+    let input_endpoint = config.input.endpoint("input")?;
+    let input_client = match input_endpoint {
+        Endpoint::Redis(_) => {
+            let input_redis = input_endpoint
+                .as_redis()
+                .expect("a Redis endpoint resolves to Redis settings");
+            Some(Arc::new(match &input_client_name {
+                Some(lib_name) => input_redis.client_with_lib_name(lib_name)?,
+                None => input_redis.client()?,
+            }))
+        }
+        Endpoint::Nats(_) => None,
     };
+    let nats_input = matches!(input_endpoint, Endpoint::Nats(_));
     let filters_endpoint_enabled = config
         .status
         .http
@@ -306,13 +317,25 @@ pub async fn run(
                 filters_endpoint_enabled.then(|| (&*metrics, format!("outputs.{name}.filters"))),
             )?;
             output_config.filters = Vec::new();
-            let output_redis = output_config
-                .redis
-                .as_ref()
-                .ok_or_else(|| anyhow!("NATS backend not implemented yet for `outputs.{name}`"))?;
-            let client = match &client_name {
-                Some(lib_name) => output_redis.client_with_lib_name(lib_name)?,
-                None => output_redis.client()?,
+            let path = format!("outputs.{name}");
+            let connection = match output_config.endpoint(&path)? {
+                Endpoint::Redis(output_redis) => {
+                    let client = match &client_name {
+                        Some(lib_name) => output_redis.client_with_lib_name(lib_name)?,
+                        None => output_redis.client()?,
+                    };
+                    OutputConnection::Redis(RedisOutputSink::new(
+                        output_config,
+                        client,
+                        client_name.clone(),
+                    ))
+                }
+                Endpoint::Nats(_) => {
+                    if client_name.is_some() {
+                        debug!(output = name, "nats_output_ignores_redis_client_name");
+                    }
+                    OutputConnection::Nats(NatsOutputSink::new(output_config)?)
+                }
             };
             Ok((
                 name.clone(),
@@ -325,7 +348,7 @@ pub async fn run(
                     .conflation
                     .oversized_message_policy
                     .unwrap_or(global_oversized_message_policy),
-                client,
+                connection,
                 metrics.register_output(name),
                 channel_filter,
                 output_config.channel_policy_cache_max_entries,
@@ -358,11 +381,11 @@ pub async fn run(
                 output_config,
                 max_bytes_per_exec,
                 oversized_policy,
-                client,
+                connection,
                 output_metrics,
                 channel_filter,
                 channel_policy_cache_max_entries,
-                client_name,
+                _client_name,
             )| {
                 let queue_limits = QueueLimits::new(
                     output_config.queue_max_messages,
@@ -408,12 +431,11 @@ pub async fn run(
                     oversized_policy,
                     filters_endpoint_enabled,
                     channel_policy_cache_max_entries,
-                    client_name,
                 };
                 let task = tokio::spawn(async move {
                     publish_output(
                         runtime_setup,
-                        client,
+                        connection,
                         receiver,
                         worker_metrics,
                         worker_output_metrics,
@@ -443,16 +465,30 @@ pub async fn run(
     let input_config = config.input.clone();
     let input_metrics = Arc::clone(&metrics);
     let input_task = tokio::spawn(async move {
-        read_input(
-            input_config,
-            input_client,
-            input_client_name,
-            input_senders,
-            echo_filters,
-            input_filter,
-            input_metrics,
-        )
-        .await;
+        if nats_input {
+            read_nats_input(
+                input_config,
+                input_senders,
+                echo_filters,
+                input_filter,
+                input_metrics,
+            )
+            .await;
+        } else {
+            read_input(
+                input_config,
+                input_client
+                    .expect("a Redis input resolves a client")
+                    .as_ref()
+                    .clone(),
+                input_client_name,
+                input_senders,
+                echo_filters,
+                input_filter,
+                input_metrics,
+            )
+            .await;
+        }
     });
 
     let status_task = config.status.path.clone().map(|path| {
