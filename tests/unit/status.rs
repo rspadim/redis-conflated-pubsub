@@ -215,6 +215,25 @@ fn oversized_policy_counters_and_pending_bytes_are_exposed_per_output() {
 }
 
 #[test]
+fn nats_client_connection_events_are_counted() {
+    // Core NATS reconnects internally, so a node failover does not show up in the
+    // role-based reconnect counters; these client-event counters are the honest
+    // signal. `connects` includes the first connect.
+    let metrics = Metrics::new();
+    let snapshot = serde_json::to_value(metrics.snapshot()).unwrap();
+    assert_eq!(snapshot["nats_client_connects_total"], 0);
+    assert_eq!(snapshot["nats_client_disconnects_total"], 0);
+
+    metrics.record_nats_connect();
+    metrics.record_nats_connect();
+    metrics.record_nats_disconnect();
+
+    let snapshot = serde_json::to_value(metrics.snapshot()).unwrap();
+    assert_eq!(snapshot["nats_client_connects_total"], 2);
+    assert_eq!(snapshot["nats_client_disconnects_total"], 1);
+}
+
+#[test]
 fn uncertain_transactions_are_counted_without_leaving_messages_pending() {
     let metrics = Metrics::new();
     let output = metrics.register_output("running-output");

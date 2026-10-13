@@ -330,6 +330,8 @@ mod input_client_name;
 mod input_filtering;
 #[path = "service/nats_input.rs"]
 mod nats_input;
+#[path = "service/nats_lifecycle.rs"]
+mod nats_lifecycle;
 #[path = "service/nats_output.rs"]
 mod nats_output;
 #[path = "service/nats_subjects.rs"]

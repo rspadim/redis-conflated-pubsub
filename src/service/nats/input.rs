@@ -15,7 +15,6 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::task::Poll;
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_nats::{Client, Subscriber};
@@ -28,12 +27,12 @@ use crate::{
     status::Metrics,
 };
 
-use super::super::MAX_RETRY_DELAY;
 use super::super::OutputSender;
 use super::super::backend::{InputEnvelope, InputSource, NATS_HOP_HEADER};
 use super::super::filter::ChannelFilterSet;
 use super::super::input::{OutputChannelFilter, fan_out};
-use super::connect::{ConnectionPlan, connect, connection_plan};
+use super::super::{INITIAL_RETRY_DELAY, next_retry_delay};
+use super::connect::{ConnectionPlan, connect_with_metrics, connection_plan};
 
 /// One configured NATS subscription: the filter, its output mapping, and the
 /// concrete subscriber stream once connected.
@@ -53,6 +52,9 @@ pub(in crate::service) struct NatsInput {
     next_index: usize,
     /// Backend address reported in the envelope, for logs and metrics.
     source_address: String,
+    /// Optional sink for NATS client connection events. `None` in unit tests
+    /// that construct the adapter without a metrics registry.
+    metrics: Option<std::sync::Arc<Metrics>>,
 }
 
 impl NatsInput {
@@ -95,13 +97,41 @@ impl NatsInput {
             client: None,
             next_index: 0,
             source_address,
+            metrics: None,
         })
+    }
+
+    /// Attaches a metrics registry so NATS connect/disconnect events are counted.
+    pub(in crate::service) fn with_metrics(mut self, metrics: std::sync::Arc<Metrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 
     /// Number of configured subscriptions.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(in crate::service) fn subscription_count(&self) -> usize {
         self.subscriptions.len()
+    }
+
+    /// `true` once a client and all of its subscription streams are installed.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(in crate::service) fn is_connected(&self) -> bool {
+        self.client.is_some()
+            && self
+                .subscriptions
+                .iter()
+                .all(|subscription| subscription.stream.is_some())
+    }
+
+    /// Clears the client and every installed stream. The reader's reconnect path
+    /// uses this indirectly through `connect`; exposed for tests that assert the
+    /// disconnected state is fully reset.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(in crate::service) fn force_disconnect(&mut self) {
+        self.client = None;
+        for subscription in &mut self.subscriptions {
+            subscription.stream = None;
+        }
     }
 
     /// Owned `(prefix, suffix)` mapping for a subscription identity, or `None`
@@ -134,43 +164,50 @@ impl InputSource for NatsInput {
     /// Connects (or reconnects) and (re)installs every configured subscription.
     /// Subscriptions are flushed so the server has processed them before the
     /// first message is awaited.
+    ///
+    /// The relay builds `ConnectOptions` with the default `retry_on_initial_connect`
+    /// disabled, so `async-nats` makes a single pass over the seed pool here.
+    /// Retrying the initial connect (backoff, forever) is the reader's outer loop,
+    /// exactly as it is for the Redis reader. On any failure the previous client
+    /// and streams are dropped so the next attempt is clean.
     async fn connect(&mut self) -> Result<()> {
-        let client = connect(&self.plan).await?;
-        let mut streams = Vec::with_capacity(self.subscriptions.len());
-        for subscription in &self.subscriptions {
-            let subscriber = client
-                .subscribe(subscription.subject.clone())
-                .await
-                .with_context(|| {
-                    format!(
-                        "failed to subscribe to NATS subject {:?}",
-                        subscription.subject
-                    )
-                })?;
-            streams.push(subscriber);
+        match self.establish().await {
+            Ok((client, streams, source_address)) => {
+                for (subscription, stream) in self.subscriptions.iter_mut().zip(streams) {
+                    subscription.stream = Some(stream);
+                }
+                self.source_address = source_address;
+                self.next_index = 0;
+                self.client = Some(client);
+                Ok(())
+            }
+            Err(error) => {
+                // Leave no half-installed state behind: a later reconnect must
+                // start from a clean client and a fresh subscription set.
+                self.client = None;
+                for subscription in &mut self.subscriptions {
+                    subscription.stream = None;
+                }
+                Err(error)
+            }
         }
-        client
-            .flush()
-            .await
-            .context("failed to flush NATS subscriptions")?;
-        let server = client.server_info();
-        if !server.host.is_empty() && server.port != 0 {
-            self.source_address =
-                format!("{}://{}:{}", self.plan.transport, server.host, server.port);
-        }
-        for (subscription, stream) in self.subscriptions.iter_mut().zip(streams) {
-            subscription.stream = Some(stream);
-        }
-        self.next_index = 0;
-        self.client = Some(client);
-        Ok(())
     }
 
     /// Yields the next envelope in arrival order, rotating fairly across
     /// subscriptions. Returns `None` when every subscription stream is closed,
     /// which tells the caller to reconnect with backoff.
+    ///
+    /// If the adapter is not connected (or a stream is missing because a
+    /// previous connect failed part-way), this returns `None` instead of
+    /// panicking so the reader re-runs `connect`.
     async fn next_envelope(&mut self) -> anyhow::Result<Option<InputEnvelope>> {
-        if self.subscriptions.is_empty() {
+        if self.subscriptions.is_empty()
+            || self.client.is_none()
+            || self
+                .subscriptions
+                .iter()
+                .any(|subscription| subscription.stream.is_none())
+        {
             return Ok(None);
         }
         let count = self.subscriptions.len();
@@ -218,6 +255,39 @@ impl InputSource for NatsInput {
     }
 }
 
+impl NatsInput {
+    /// Opens a fresh client and installs every configured subscription on it.
+    /// Nothing is committed to `self` here, so a partial failure drops the new
+    /// client and its subscriptions without disturbing the current state.
+    async fn establish(&self) -> Result<(Client, Vec<Subscriber>, String)> {
+        let client = connect_with_metrics(&self.plan, self.metrics.clone()).await?;
+        let mut streams = Vec::with_capacity(self.subscriptions.len());
+        for subscription in &self.subscriptions {
+            let subscriber = client
+                .subscribe(subscription.subject.clone())
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to subscribe to NATS subject {:?}",
+                        subscription.subject
+                    )
+                })?;
+            streams.push(subscriber);
+        }
+        client
+            .flush()
+            .await
+            .context("failed to flush NATS subscriptions")?;
+        let server = client.server_info();
+        let source_address = if !server.host.is_empty() && server.port != 0 {
+            format!("{}://{}:{}", self.plan.transport, server.host, server.port)
+        } else {
+            self.source_address.clone()
+        };
+        Ok((client, streams, source_address))
+    }
+}
+
 /// Reads a NATS input forever, fanning each envelope out to the outputs. Models
 /// the Redis `read_input` loop: the adapter reconnects with the shared backoff
 /// and per-message mapping/filtering stays backend-agnostic.
@@ -239,9 +309,9 @@ pub(in crate::service) async fn read_nats_input(
     if !echo_filters.is_empty() {
         warn!("nats_input_ignores_redis_echo_filters");
     }
-    let mut retry_delay = Duration::from_millis(250);
+    let mut retry_delay = INITIAL_RETRY_DELAY;
     let mut input = match NatsInput::new(&config) {
-        Ok(input) => input,
+        Ok(input) => input.with_metrics(Arc::clone(&metrics)),
         Err(error) => {
             metrics.record_error(&error);
             warn!(error = %error, "nats_input_invalid_configuration");
@@ -251,7 +321,7 @@ pub(in crate::service) async fn read_nats_input(
     loop {
         match input.connect().await {
             Ok(()) => {
-                retry_delay = Duration::from_millis(250);
+                retry_delay = INITIAL_RETRY_DELAY;
                 info!("input_connected");
                 loop {
                     let received_at = time::Instant::now();
@@ -316,6 +386,6 @@ pub(in crate::service) async fn read_nats_input(
             }
         }
         time::sleep(retry_delay).await;
-        retry_delay = (retry_delay * 2).min(MAX_RETRY_DELAY);
+        retry_delay = next_retry_delay(retry_delay);
     }
 }

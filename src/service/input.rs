@@ -1,4 +1,4 @@
-use std::{sync::Arc, sync::atomic::Ordering, time::Duration};
+use std::{sync::Arc, sync::atomic::Ordering};
 
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
@@ -12,7 +12,8 @@ use crate::{
 };
 
 use super::{
-    ChannelFilterSet, InboundMessage, MAX_RETRY_DELAY, OutputSender, QueuedInboundMessage,
+    ChannelFilterSet, INITIAL_RETRY_DELAY, InboundMessage, OutputSender, QueuedInboundMessage,
+    next_retry_delay,
 };
 
 #[derive(Clone, Debug)]
@@ -105,7 +106,7 @@ pub(super) async fn read_input(
     mut channel_filter: ChannelFilterSet,
     metrics: Arc<Metrics>,
 ) {
-    let mut retry_delay = Duration::from_millis(250);
+    let mut retry_delay = INITIAL_RETRY_DELAY;
     // With a single subscription the connection only delivers messages for it,
     // so the pattern reported by Redis can be ignored without allocating.
     let single_subscription = match config.subscriptions.as_slice() {
@@ -128,7 +129,7 @@ pub(super) async fn read_input(
         .await
         {
             Ok(mut pubsub) => {
-                retry_delay = Duration::from_millis(250);
+                retry_delay = INITIAL_RETRY_DELAY;
                 info!("input_connected");
                 let mut stream = pubsub.on_message();
                 while let Some(message) = stream.next().await {
@@ -199,7 +200,7 @@ pub(super) async fn read_input(
             }
         }
         time::sleep(retry_delay).await;
-        retry_delay = (retry_delay * 2).min(MAX_RETRY_DELAY);
+        retry_delay = next_retry_delay(retry_delay);
     }
 }
 

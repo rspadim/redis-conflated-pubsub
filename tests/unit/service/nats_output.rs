@@ -12,8 +12,9 @@ fn not_sent(step: PublishStep) -> String {
 }
 
 /// The NATS sink returns no subscriber count. This pins the honest status
-/// choice: success means "the server processed our publish commands and the
-/// flush round trip completed", never "N subscribers received it".
+/// choice: success means "the release's publish commands left the local client
+/// buffer and the flush drained it", never "N subscribers received it". Core
+/// NATS has no per-message acknowledgement.
 #[test]
 fn nats_success_carries_no_subscriber_count() {
     assert_eq!(NATS_NO_SUBSCRIBER_COUNT, 0);

@@ -148,7 +148,7 @@ pub(super) fn json_schema() -> serde_json::Value {
         }
     }
     schema["$defs"]["NatsConfig"]["description"] = serde_json::json!(
-        "Core NATS backend. One or more `servers` seed URLs; the URL scheme selects nats://, tls://, ws://, or wss://. Secrets are referenced by environment variable name or file path, never inline. Not connected by the runtime yet."
+        "Core NATS backend. One or more `servers` seed URLs; the URL scheme selects nats://, tls://, ws://, or wss:// (one transport family per list). Secrets are referenced by environment variable name or file path, never inline. Core NATS Pub/Sub only, not JetStream."
     );
     schema["$defs"]["NatsAuth"]["description"] = serde_json::json!(
         "NATS authentication. Tagged by `type`: `none` (default), `user_password` (username + password_env), `token` (token_env), `nkey` (seed_file), or `credentials_file` (path)."

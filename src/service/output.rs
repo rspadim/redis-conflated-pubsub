@@ -650,6 +650,13 @@ pub(super) async fn publish_output(
     failure_log.flush_suppressed(&name);
     policy_log.flush_suppressed(&name);
     shed_log.flush_suppressed(&name);
+    // The loop only exits once the intake queue, conflated buckets, and the
+    // in-flight direct window are all empty, so every message has already gone
+    // through a backend settlement. A final NATS flush is still issued because
+    // the client may hold publish commands that were queued without an
+    // individual per-chunk flush (the direct lane flushes per batch, so this is
+    // normally a cheap no-op). Redis has no equivalent and ignores it.
+    connection.flush_before_shutdown().await;
     metrics.set_output_state(&output_metrics, "stopped");
 }
 

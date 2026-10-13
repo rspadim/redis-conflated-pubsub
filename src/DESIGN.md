@@ -1,10 +1,28 @@
 # Design
 
-Architecture, runtime behavior, defaults and reference measurements for `redis-conflated-pubsub` 0.2.0. This document describes the current version; see [`../CHANGELOG.md`](../CHANGELOG.md) for change history. The NATS-backed 0.3 proposal is tracked separately in [`../DESIGN-0.3.md`](../DESIGN-0.3.md).
+Architecture, runtime behavior, defaults and reference measurements for `redis-conflated-pubsub` 0.3.0. This document describes the current version; see [`../CHANGELOG.md`](../CHANGELOG.md) for change history. The original 0.3 NATS proposal and the transport spike behind it are in [`../DESIGN-0.3.md`](../DESIGN-0.3.md).
 
 ## Purpose
 
-Forward raw Redis Pub/Sub messages from `SUBSCRIBE`/`PSUBSCRIBE` inputs to one or more named outputs. Each output independently maps channels, filters messages, conflates to the latest value per channel and interval, deduplicates identical payloads within a TTL, and publishes to its own Redis endpoint. Payloads stay raw bytes; there is no disk spool.
+Forward raw Pub/Sub messages from a single input backend to one or more named outputs. The input is Redis (`SUBSCRIBE`/`PSUBSCRIBE`) **or** Core NATS (`nats_subject`); each output independently selects Redis or Core NATS. Each output maps addresses, filters messages, conflates to the latest value per channel and interval, deduplicates identical payloads within a TTL, and publishes to its own endpoint. Payloads stay raw bytes; there is no disk spool. JetStream and Redis Streams are out of scope.
+
+## Backends
+
+Backend selection is protocol-neutral: `input` and each output carry exactly one of two optional keys, `redis` or `nats`; existing Redis JSON is unchanged. `--check-config` and the generated JSON Schema enforce the exactly-one rule (the schema via `oneOf` on `required: ["redis"]`/`["nats"]`); cross-checks that a subscription kind matches its input backend, the single-transport-per-list rule, and paired mTLS files are enforced by runtime validation only.
+
+Redis uses `redis-rs`; Core NATS uses `async-nats` (features `websockets`, `nkeys`, `ring`). The two backends share the filtering/queue/conflation/deduplication path and differ only at the input reader and the output sink.
+
+NATS input subscriptions use native subject semantics (`*` matches one token, `>` matches one or more trailing tokens and must be last); Redis glob patterns are not translated. The mapped output string is used directly as the publish subject and must be concrete (no wildcards).
+
+NATS authentication variants: `none`, `user_password` (`username` + `password_env`), `token` (`token_env`), `nkey` (`seed_file`), and `credentials_file` (a user JWT plus its NKey seed; not a bearer JWT). Secrets are referenced by environment variable name or file path and are never inlined, logged, or placed in a connection plan; error messages name the variable or path instead. TLS/mTLS is separate from `auth` and lives under `tls` (`root_cert_file`, and paired `client_cert_file`/`client_key_file`).
+
+### NATS completion semantics
+
+Core NATS has no per-message acknowledgement and no subscriber count. A NATS output reports `0` subscribers; each chunk is published in order and then `flush` drains the client's **local write buffer** to the socket. `async-nats` `flush` does **not** wait for the server to process the commands, so it is **not** a round-trip barrier and **not** a delivery guarantee. Read `publish_errors_total`, `uncertain_messages_total`, `input_reconnects_total`, and `output_reconnects_total` for a NATS output; do not read `0` subscribers as "nobody is listening". Failure mapping: connect failure, oversized payload, and invalid subject are definitive `NotSent`; a `flush` timeout or error is `Uncertain`.
+
+### Loop guard
+
+A NATS output published on one connection can match an input subscription on another, so NATS-to-NATS loops are broken with a `Relay-Hop: 1` header: every NATS output stamps it on each forwarded message and the NATS input drops any message that already carries it. The payload is never modified. Suppressed messages are counted in `loop_suppressed_messages_total`. The guard is NATS-specific; Redis has no headers and keeps its existing same-server echo handling, and a Redis input never receives NATS output traffic.
 
 ## Module map
 
@@ -16,7 +34,11 @@ Forward raw Redis Pub/Sub messages from `SUBSCRIBE`/`PSUBSCRIBE` inputs to one o
 | `service/output.rs` | Output worker loop: intake, policy resolution, interval schedules, direct in-flight window. |
 | `service/output/flush.rs` | Queue settlement, conflated bucket flush, direct batch publish path. |
 | `service/batch.rs` | RESP frame accounting, batch sizing, oversized-message policy. |
-| `service/publish.rs` | Redis connection handling, publish commands, failure classification. |
+| `service/publish.rs` | Redis connection handling, publish commands, failure classification; `OutputSink`/`OutputConnection` backend selection. |
+| `service/backend.rs` | Backend boundary: `InputEnvelope` and the `InputSource`/`OutputSink` traits, plus the `Relay-Hop` header constant. |
+| `service/nats/connect.rs` | Turns a `NatsConfig` into a connected client; splits the secret-free `ConnectionPlan` from the secret-resolving `connect`. |
+| `service/nats/input.rs` | NATS input reader: installs subscriptions, fans streams in, drops loop re-entry. |
+| `service/nats/output.rs` | NATS output sink: ordered publish plus one `flush`; stamps the hop header. |
 | `service/policy.rs`, `service/policy/glob.rs` | Compiled channel selectors, policy resolution cache, timer schedules. |
 | `service/dedup.rs` | Per-channel TTL cache and named deduplication groups. |
 | `service/filter.rs`, `service/channel_cache.rs` | Ordered filters and the bounded LRUs behind filters/policies, plus opt-in inspection. |
@@ -35,10 +57,12 @@ Forward raw Redis Pub/Sub messages from `SUBSCRIBE`/`PSUBSCRIBE` inputs to one o
 
 The single input reader processes messages in arrival order:
 
-1. Drop Sentinel notification channels and output echoes when configured (both default on).
+1. Drop Sentinel notification channels and output echoes when configured (both default on; both are Redis-specific).
 2. Match the message against the configured subscriptions.
 3. Apply the **input filter** to the source channel.
 4. For each output: apply that output's **filter** to the subscription-mapped channel (before the output's own prefix/suffix), build the final channel, and send a copy to the output's queue.
+
+For a Redis input the reader is `service/input.rs`; for a NATS input it is `service/nats/input.rs` (`read_nats_input`), which installs each `nats_subject` subscription, fans the streams in round-robin order, carries the matching subscription's identity into the mapping, and drops any message already stamped with the relay hop header (loop guard). Sentinel/echo exclusion is Redis-only; the NATS path relies on the hop header instead.
 
 Filters are ordered rules with `glob`, `regex` or literal (`raw`/`single`/`string`) selectors and `accept`/`deny` actions. Every rule is evaluated and the last match wins; `filter_default` is `accept`.
 
@@ -92,15 +116,17 @@ On Unix, `SIGHUP` parses and validates the new file before switching; invalid fi
 
 ### Observability
 
-The status snapshot (`schema_version` 5) exposes global and per-output counters for inputs, published/conflated/deduplicated/dropped/truncated/shed messages and bytes, deduplication evictions, publish errors, uncertain operations, reconnects and pending messages/bytes/keys. Per output it also exposes:
+The status snapshot (`schema_version` 5) exposes global and per-output counters for inputs, published/conflated/deduplicated/dropped/truncated/shed messages and bytes, deduplication evictions, publish errors, uncertain operations, reconnects, loop-suppressed messages (`loop_suppressed_messages_total`, NATS only) and pending messages/bytes/keys. Per output it also exposes:
 
 - **queue wait** samples/total/max from fan-out enqueue to worker acceptance (includes policy resolution);
 - **publish RTT** samples/total/max around the Redis publish round trip;
 - **pending queue bytes** and **oldest pending age** gauges for the bounded-queue policies.
 
+NATS connection events are counted globally (`nats_client_connects_total`, `nats_client_disconnects_total`) through the `async-nats` event callback. Core NATS reconnects internally, so a node failover does not appear in `input_reconnects_total`/`output_reconnects_total`; `nats_client_connects_total` includes the first connect, so a reconnection shows as a disconnect plus a connects count above the number of NATS endpoints.
+
 `GET /filters` optionally exposes full channel names and cache entries and is disabled by default because it reveals raw channel names; enabling it switches the filter/policy LRUs to shared, mutex-protected storage.
 
-`CLIENT LIST` identifies the service connections. Outputs send `CLIENT SETNAME` on every (re)connect; the Pub/Sub input does the same by connecting the plain TCP socket, authenticating (username/password when configured) and sending `CLIENT SETNAME` before subscribing, then handing the stream to `PubSub::new` — Redis keeps the connection name while subscribed. TLS inputs fall back to the unnamed connection because redis-rs keeps its TLS connector private. Names come from the `client_name` template (`{version}`, `{role}`, `{user}`, `{host}`). Naming is a best-effort cosmetic step: a forbidden `CLIENT SETNAME` logs one warning per connection and the connection keeps working.
+`CLIENT LIST` identifies the service's Redis connections. Outputs send `CLIENT SETNAME` on every (re)connect; the Pub/Sub input does the same by connecting the plain TCP socket, authenticating (username/password when configured) and sending `CLIENT SETNAME` before subscribing, then handing the stream to `PubSub::new` — Redis keeps the connection name while subscribed. TLS inputs fall back to the unnamed connection because redis-rs keeps its TLS connector private. Names come from the `client_name` template (`{version}`, `{role}`, `{user}`, `{host}`). Naming is a best-effort cosmetic step: a forbidden `CLIENT SETNAME` logs one warning per connection and the connection keeps working. A NATS endpoint has no `CLIENT SETNAME`; it reports its `name` through the NATS connection instead, and the `client_name` template is ignored for NATS (a debug log notes this).
 
 ## Configuration defaults
 
@@ -118,8 +144,11 @@ The status snapshot (`schema_version` 5) exposes global and per-output counters 
 | Filter/policy cache capacity (each) | `16384`, max `100000`, `0` disables |
 | `exclude_output_echoes`, `exclude_sentinel_pubsub` | `true` |
 | `logging.prefix` / `logging.enabled` | `redis-conflated-pubsub` / `true` |
-| `client_name` template | `ConflatedPS-{version}-{role}::{user}::{host}` (empty disables naming) |
+| `client_name` template | `ConflatedPS-{version}-{role}::{user}::{host}` (empty disables naming; Redis only) |
 | Status update interval | `1000 ms` |
+| NATS `connect_timeout_ms` | `5000` |
+| NATS `auth` | `none` |
+| NATS `ignore_discovered_servers` | `false` |
 
 Positive intervals and TTLs are capped at 365 days; group `round_ms` must not exceed a positive group TTL.
 
@@ -157,6 +186,10 @@ Input excludes 882 Sentinel `__sentinel__:hello` messages per run; the repeated-
 ### Loopback (no Redis/Valkey)
 
 `examples/loopback_benchmark.rs` (built into the same benchmark image) implements a minimal RESP2 broker in Rust: it accepts the service's `PSUBSCRIBE`, feeds messages as fast as the socket accepts them, and acts as the output server that receives the service's `PUBLISH`/`MULTI/EXEC` commands, reporting end-to-end percentiles. `compose.loopback.test.yml` runs it with no Redis containers, isolating the service and the wire protocol. A 200k-message smoke measured ~35k msg/s with the broker process sharing CPU with the service; `LOOPBACK_MESSAGES`, `LOOPBACK_CHUNK`, `LOOPBACK_WARMUP` and `LOOPBACK_TIMEOUT_S` tune the run.
+
+### Transport comparison and NATS e2e (`spikes/`)
+
+`spikes/compare` is a separate Rust crate that measures the raw transport paths (`async-nats` vs `redis-rs`) and drives the **real relay binary** end to end. Its publisher and subscriber run as **separate OS processes** so the publisher's buffering cannot inflate the measured latency; a single-process harness produces queue-dominated numbers and must not be used for latency claims. Modes: `publisher`/`subscriber` (transport comparison), `e2e-publish`/`e2e-verify` (relay end to end), plus `latency-sweep.ps1` for a like-for-like latency-vs-rate sweep. `spikes/nats` holds the earlier isolated transport spike (cluster, TCP/WS/WSS, five auth methods, failover probe, echo probe, load matrix) and is not the runtime.
 
 ### Manual unit benchmarks
 

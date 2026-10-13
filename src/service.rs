@@ -68,6 +68,19 @@ use queue::{OutputQueueReceiver, OutputQueueSender, QueueLimits, QueueShedLog, o
 
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 
+/// Next input-reconnect delay: exponential doubling capped at [`MAX_RETRY_DELAY`].
+///
+/// Shared by the Redis and Core NATS input readers so both reconnect with the
+/// same backoff schedule. The first retry uses the initial short delay, and the
+/// delay is reset to that initial value after a successful connect, so a healthy
+/// connection never inherits a grown delay.
+fn next_retry_delay(current: Duration) -> Duration {
+    (current * 2).min(MAX_RETRY_DELAY)
+}
+
+/// Initial reconnect backoff, matching the Redis reader.
+const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(250);
+
 #[derive(Debug)]
 pub enum RunOutcome {
     Shutdown,
@@ -334,7 +347,9 @@ pub async fn run(
                     if client_name.is_some() {
                         debug!(output = name, "nats_output_ignores_redis_client_name");
                     }
-                    OutputConnection::Nats(NatsOutputSink::new(output_config)?)
+                    OutputConnection::Nats(
+                        NatsOutputSink::new(output_config)?.with_metrics(Arc::clone(&metrics)),
+                    )
                 }
             };
             Ok((
@@ -611,6 +626,11 @@ fn reload_logging_settings_unchanged(current: &AppConfig, next: &AppConfig) -> b
 fn load_reload_config(current: &AppConfig, path: &Path) -> Result<ReloadPlan> {
     let next = AppConfig::load(path).context("failed to load configuration after SIGHUP")?;
     next.validate()?;
+    // Reject a config whose backends cannot even be constructed (a bad Redis
+    // connection URL or a malformed NATS endpoint) before the caller tears the
+    // running workers down. This mirrors the fallible setup `run` performs at
+    // startup, so a reload cannot get past validation and then fail mid-switch.
+    validate_reload_backends(&next)?;
     if !reload_logging_settings_unchanged(current, &next) {
         bail!("changes to logging require a full service restart");
     }
@@ -627,6 +647,42 @@ fn load_reload_config(current: &AppConfig, path: &Path) -> Result<ReloadPlan> {
         config: next,
         instance_lock,
     })
+}
+
+/// Backend construction preflight for a reload: resolves every input/output
+/// endpoint and verifies it can be built without any network access.
+///
+/// Redis credentials are resolved here exactly as the runtime does (so a
+/// missing `password_env` is a reload rejection rather than a half-started
+/// service), and NATS endpoints go through [`nats::connect::connection_plan`].
+/// No connection is opened and no secret value is retained.
+#[cfg(unix)]
+fn validate_reload_backends(config: &AppConfig) -> Result<()> {
+    match config.input.endpoint("input")? {
+        Endpoint::Redis(redis) => {
+            redis
+                .client()
+                .context("input Redis settings are not usable")?;
+        }
+        Endpoint::Nats(nats) => {
+            nats::connect::connection_plan(nats).context("input NATS settings are not usable")?;
+        }
+    }
+    for (name, output) in &config.outputs {
+        let path = format!("outputs.{name}");
+        match output.endpoint(&path)? {
+            Endpoint::Redis(redis) => {
+                redis
+                    .client()
+                    .with_context(|| format!("{path} Redis settings are not usable"))?;
+            }
+            Endpoint::Nats(nats) => {
+                nats::connect::connection_plan(nats)
+                    .with_context(|| format!("{path} NATS settings are not usable"))?;
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn bind_status_http(

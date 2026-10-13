@@ -1,11 +1,12 @@
 //! NATS output adapter: publishes an ordered chunk and flushes it.
 //!
-//! Core NATS has no per-message acknowledgement and no subscriber count. The
-//! sink therefore publishes every message in order and then issues one
-//! `flush`, which is a server round-trip barrier for the commands already
-//! buffered on this connection. Completion means "the server processed our
-//! publish commands", not "a subscriber received them": the returned count is
-//! always `0` and the honest completion signal is the flush round trip.
+//! Core NATS has no per-message acknowledgement and no subscriber count.
+//! `async-nats` `flush()` only drains the client's own write buffer down to the
+//! socket; it does not wait for the server to process the commands. The sink
+//! therefore publishes every message in order and calls `flush` to push them
+//! onto the wire, but neither the returned value nor the flush promises
+//! delivery: the count is always `0`, and completion means only "the commands
+//! left the local buffer".
 
 use std::time::Duration;
 
@@ -18,9 +19,10 @@ use crate::config::OutputConfig;
 use super::super::PendingMessage;
 use super::super::backend::{NATS_HOP_HEADER, OutputSink};
 use super::super::publish::PublishFailure;
-use super::connect::{ConnectionPlan, connect, connect_failure, connection_plan};
+use super::connect::{ConnectionPlan, connect_failure, connect_with_metrics, connection_plan};
 
 /// Why a NATS publish step stopped before the flush barrier.
+#[derive(Debug)]
 pub(in crate::service) enum PublishStep {
     /// The client rejected the message before it entered the wire buffer, so it
     /// can never reach the server (`NotSent`).
@@ -107,6 +109,8 @@ impl OutputSink for NatsSender {
 pub(in crate::service) struct NatsOutputSink {
     plan: ConnectionPlan,
     sender: Option<NatsSender>,
+    /// Optional sink for NATS client connection events; `None` in unit tests.
+    metrics: Option<std::sync::Arc<crate::status::Metrics>>,
 }
 
 impl NatsOutputSink {
@@ -118,7 +122,20 @@ impl NatsOutputSink {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("NatsOutputSink requires a `nats` output endpoint"))?;
         let plan = connection_plan(nats)?;
-        Ok(Self { plan, sender: None })
+        Ok(Self {
+            plan,
+            sender: None,
+            metrics: None,
+        })
+    }
+
+    /// Attaches a metrics registry so NATS connect/disconnect events are counted.
+    pub(in crate::service) fn with_metrics(
+        mut self,
+        metrics: std::sync::Arc<crate::status::Metrics>,
+    ) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 
     pub(in crate::service) fn is_connected(&self) -> bool {
@@ -143,33 +160,72 @@ impl NatsOutputSink {
         if self.sender.is_some() {
             return Ok(());
         }
-        let client = connect(&self.plan).await.map_err(connect_failure)?;
+        let client = connect_with_metrics(&self.plan, self.metrics.clone())
+            .await
+            .map_err(connect_failure)?;
         self.sender = Some(NatsSender::new(client, self.plan.connect_timeout));
         Ok(())
+    }
+
+    /// Flushes anything still buffered on the client at shutdown. `async-nats`
+    /// `flush` pushes the locally buffered publish commands to the socket; it
+    /// does not wait for the server to process them, but it is the most the
+    /// client can do before exit. A disconnected sink has nothing buffered, so
+    /// this is a no-op. Errors are intentionally ignored: shutdown must not
+    /// block on an unreachable server.
+    pub(in crate::service) async fn flush_before_shutdown(&mut self) {
+        if let Some(sender) = self.sender.as_mut() {
+            let _ = sender.flush().await;
+        }
     }
 }
 
 impl OutputSink for NatsOutputSink {
+    /// Connects on demand (like `RedisOutputSink::publish` does through its
+    /// internal `ensure_output_connection`) and discards the client on failure.
+    ///
+    /// This is what keeps the conflated lane honest: the conflated flush path
+    /// calls `publish`/`flush` directly through `OutputConnection` and never
+    /// calls `ensure_connected` itself, so the sink must reconnect here.
+    /// Discarding on failure makes the next attempt build a fresh client from
+    /// `ConnectOptions`, mirroring the Redis path's reconnect-on-next-publish.
     async fn publish(
         &mut self,
         messages: &[PendingMessage],
         atomic: bool,
     ) -> std::result::Result<i64, PublishFailure> {
-        match self.sender.as_mut() {
+        // `ensure_connected` leaves the sink disconnected on failure, so the
+        // next publish retries the connection.
+        self.ensure_connected().await?;
+        let result = match self.sender.as_mut() {
             Some(sender) => sender.publish(messages, atomic).await,
             None => Err(PublishFailure::NotSent(
                 "NATS output is not connected".to_owned(),
             )),
+        };
+        // Discard the client when the connection may be broken (a send or flush
+        // failure). A definitive pre-send rejection (invalid mapped subject,
+        // oversized payload) leaves a healthy client in place, so a repeated
+        // mapping error does not trigger a reconnect storm.
+        if matches!(result, Err(PublishFailure::Uncertain(_))) {
+            self.disconnect();
         }
+        result
     }
 
+    /// Settles the chunk through the client's flush barrier. A disconnected sink
+    /// has no buffered command to settle, so this succeeds without attempting a
+    /// new connection (the following publish is what reconnects). A flush
+    /// failure discards the client so the next publish rebuilds it.
     async fn flush(&mut self) -> std::result::Result<(), PublishFailure> {
-        match self.sender.as_mut() {
+        let result = match self.sender.as_mut() {
             Some(sender) => sender.flush().await,
-            None => Err(PublishFailure::NotSent(
-                "NATS output is not connected".to_owned(),
-            )),
+            None => Ok(()),
+        };
+        if result.is_err() {
+            self.disconnect();
         }
+        result
     }
 }
 
@@ -201,22 +257,34 @@ async fn publish_chunk(
         {
             Ok(()) => {}
             Err(error) => {
-                let text = format!(
-                    "NATS publish to subject {:?} failed: {error}",
-                    message.output_channel
-                );
-                return Err(match error.kind() {
-                    // Rejected before the command entered the wire buffer.
-                    PublishErrorKind::MaxPayloadExceeded | PublishErrorKind::InvalidSubject => {
-                        PublishStep::NotSent(text)
-                    }
-                    // The command may have been buffered and sent.
-                    PublishErrorKind::Send => PublishStep::Uncertain(text),
-                });
+                let kind = error.kind();
+                let text = format!("{error}");
+                return Err(classify_publish_step(&message.output_channel, kind, &text));
             }
         }
     }
     Ok(())
+}
+
+/// Maps a client publish failure to [`PublishStep`].
+///
+/// `MaxPayloadExceeded` and `InvalidSubject` are rejected by the client before
+/// the command enters the wire buffer, so they are definitive (`NotSent`).
+/// `Send` means the command may already be buffered on the connection, so it is
+/// ambiguous (`Uncertain`) and the caller discards the client before retrying.
+/// Extracted so the mapping is unit-testable without a live client.
+pub(in crate::service) fn classify_publish_step(
+    subject: &str,
+    kind: PublishErrorKind,
+    error: &str,
+) -> PublishStep {
+    let text = format!("NATS publish to subject {subject:?} failed: {error}");
+    match kind {
+        PublishErrorKind::MaxPayloadExceeded | PublishErrorKind::InvalidSubject => {
+            PublishStep::NotSent(text)
+        }
+        PublishErrorKind::Send => PublishStep::Uncertain(text),
+    }
 }
 
 /// Enforces the server-advertised payload limit before enqueueing, so the

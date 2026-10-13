@@ -12,12 +12,13 @@
 //! Secrets are only ever read here; they are never logged or included in error
 //! messages, which name the environment variable or file path instead.
 
-use std::{env, fs, path::PathBuf, str::FromStr, time::Duration};
+use std::{env, fs, path::PathBuf, str::FromStr, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use async_nats::{Client, ConnectOptions, ServerAddr};
 
 use crate::config::{NatsAuth, NatsConfig};
+use crate::status::Metrics;
 
 use super::super::publish::PublishFailure;
 
@@ -167,9 +168,21 @@ pub(in crate::service) fn resolve_auth(auth: &NatsAuthPlan) -> Result<NatsAuthMa
     })
 }
 
-/// Builds `ConnectOptions` from a plan, resolving the auth secret from its
-/// environment variable or file reference. No secret value is logged.
+/// Builds `ConnectOptions` from a plan without connection-event counting. Only
+/// the config-mapping tests use it; the runtime calls
+/// [`connect_options_with_metrics`] so events reach the status counters.
+#[cfg(test)]
 pub(in crate::service) fn connect_options(plan: &ConnectionPlan) -> Result<ConnectOptions> {
+    connect_options_with_metrics(plan, None)
+}
+
+/// Like [`connect_options`], but also registers an `event_callback` that records
+/// NATS connect/disconnect events into `metrics`. Core NATS reconnects
+/// internally, so this is the only honest signal that a node failover happened.
+pub(in crate::service) fn connect_options_with_metrics(
+    plan: &ConnectionPlan,
+    metrics: Option<Arc<Metrics>>,
+) -> Result<ConnectOptions> {
     let mut options = ConnectOptions::new()
         .connection_timeout(plan.connect_timeout)
         // Reconnect for the lifetime of the relay, matching the Redis input
@@ -204,6 +217,18 @@ pub(in crate::service) fn connect_options(plan: &ConnectionPlan) -> Result<Conne
     if let (Some(cert), Some(key)) = (&plan.client_cert_file, &plan.client_key_file) {
         options = options.add_client_certificate(cert.clone(), key.clone());
     }
+    if let Some(metrics) = metrics {
+        options = options.event_callback(move |event| {
+            let metrics = Arc::clone(&metrics);
+            async move {
+                match event {
+                    async_nats::Event::Connected => metrics.record_nats_connect(),
+                    async_nats::Event::Disconnected => metrics.record_nats_disconnect(),
+                    _ => {}
+                }
+            }
+        });
+    }
     Ok(options)
 }
 
@@ -222,8 +247,15 @@ pub(in crate::service) fn connection_plan_nkey_seed(plan: &ConnectionPlan) -> Re
 ///
 /// A failure to establish the connection means nothing was sent on it, which is
 /// why the caller maps this to `PublishFailure::NotSent` for an output sink.
-pub(in crate::service) async fn connect(plan: &ConnectionPlan) -> Result<Client> {
-    let options = connect_options(plan)?;
+/// Like [`connect`], but registers connection-event counting when `metrics` is
+/// provided. The initial connect also fires `Event::Connected`, so the counter
+/// includes the first connection; callers compare it against the number of NATS
+/// endpoints to detect reconnections.
+pub(in crate::service) async fn connect_with_metrics(
+    plan: &ConnectionPlan,
+    metrics: Option<Arc<Metrics>>,
+) -> Result<Client> {
+    let options = connect_options_with_metrics(plan, metrics)?;
     let addresses = plan
         .servers
         .iter()

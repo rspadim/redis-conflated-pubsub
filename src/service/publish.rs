@@ -179,6 +179,20 @@ impl OutputConnection {
             Self::Nats(sink) => sink.ensure_connected().await,
         }
     }
+
+    /// Flushes whatever the backend still has buffered before the process exits.
+    /// Redis settles per publish batch, so this is a no-op there; NATS pushes
+    /// its client-buffered publish commands to the socket (a local drain, not a
+    /// server round trip). Errors are ignored because shutdown must not block on
+    /// a backend that is already unreachable.
+    pub(crate) async fn flush_before_shutdown(&mut self) {
+        match self {
+            Self::Redis(sink) => {
+                let _ = OutputSink::flush(sink).await;
+            }
+            Self::Nats(sink) => sink.flush_before_shutdown().await,
+        }
+    }
 }
 
 impl OutputSink for OutputConnection {
@@ -202,10 +216,10 @@ impl OutputSink for OutputConnection {
 }
 
 /// Publishes one chunk through any sink and settles it through the backend's
-/// flush barrier. The subscriber count is backend-specific: Redis returns the
+/// flush step. The subscriber count is backend-specific: Redis returns the
 /// summed `PUBLISH` replies, Core NATS returns `0` because it has no
-/// acknowledgement or subscriber count (`flush` is a server round-trip, not a
-/// delivery guarantee).
+/// acknowledgement or subscriber count (`flush` only drains the client's local
+/// write buffer, so it is not a delivery guarantee).
 pub(super) async fn publish_once<S: OutputSink>(
     publisher: &mut S,
     batch: &[PendingMessage],
