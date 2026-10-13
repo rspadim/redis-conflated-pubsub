@@ -36,6 +36,9 @@ COUNTER_FIELDS = (
     "uncertain_messages_total",
     "input_reconnects_total",
     "output_reconnects_total",
+    "nats_client_connects_total",
+    "nats_client_disconnects_total",
+    "loop_suppressed_messages_total",
     "pending_keys",
     "uptime_seconds",
     "schema_version",
@@ -57,16 +60,47 @@ SENDER_SUMMARY_PATTERN = re.compile(
 )
 
 
+def normalize_optional_string(config: Dict[str, Any], name: str) -> Optional[str]:
+    """Returns a non-empty stripped string, or None for an absent/null field.
+
+    Raises when the field is present but not a string, so a mistyped value is
+    reported rather than silently ignored.
+    """
+    value = config.get(name)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("configuration field {!r} must be a non-empty string".format(name))
+    return value.strip()
+
+
 def load_config(path: Path) -> Dict[str, Any]:
     with path.open("r", encoding="utf-8") as config_file:
         config = json.load(config_file)
     if not isinstance(config, dict):
         raise ValueError("configuration must be a JSON object")
 
-    required_strings = ("base_url", "zabbix_server", "host", "sender_path")
+    required_strings = ("base_url", "host", "sender_path")
     for name in required_strings:
         if not isinstance(config.get(name), str) or not config[name].strip():
             raise ValueError("configuration field {!r} must be a non-empty string".format(name))
+
+    # The zabbix_sender reads no config file by default; passing `zabbix_config`
+    # (typically /etc/zabbix/zabbix_agentd.conf) makes it inherit the agent's
+    # ServerActive/Hostname/TLS settings. When a config file is given,
+    # `zabbix_server` becomes optional because the sender can use ServerActive.
+    zabbix_config = config.get("zabbix_config")
+    if zabbix_config is not None:
+        if not isinstance(zabbix_config, str) or not zabbix_config.strip():
+            raise ValueError("configuration field 'zabbix_config' must be a non-empty string")
+        config["zabbix_config"] = zabbix_config
+    config["zabbix_server"] = normalize_optional_string(config, "zabbix_server")
+    if config["zabbix_server"] is None and zabbix_config is None:
+        raise ValueError(
+            "configuration field 'zabbix_server' must be a non-empty string, or set "
+            "'zabbix_config' to read ServerActive from an agent configuration file"
+        )
+    config["source_address"] = normalize_optional_string(config, "source_address")
 
     prefix = config.get("key_prefix", DEFAULT_KEY_PREFIX)
     if not isinstance(prefix, str) or not KEY_PREFIX_PATTERN.fullmatch(prefix):
@@ -212,15 +246,17 @@ def build_health_input(host: str, prefix: str, health: int) -> str:
 
 
 def send_batch(config: Dict[str, Any], payload: str, expected_count: int) -> None:
-    command = [
-        config["sender_path"],
-        "-z",
-        config["zabbix_server"],
-        "-p",
-        str(config["zabbix_port"]),
-        "-i",
-        "-",
-    ]
+    command = [config["sender_path"]]
+    # `-c` first: the sender then inherits the agent config, and any explicit
+    # `-z`/`-p`/`-I` below still override it (documented sender behavior).
+    if config.get("zabbix_config"):
+        command.extend(["-c", config["zabbix_config"]])
+    if config.get("zabbix_server"):
+        command.extend(["-z", config["zabbix_server"]])
+    command.extend(["-p", str(config["zabbix_port"])])
+    if config.get("source_address"):
+        command.extend(["-I", config["source_address"]])
+    command.extend(["-i", "-"])
     result = subprocess.run(
         command,
         input=payload,

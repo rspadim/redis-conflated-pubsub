@@ -1,9 +1,15 @@
 import json
 import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import zabbix_sender
+
+EXPECTED_VALUES = (
+    len(zabbix_sender.COUNTER_FIELDS) + len(zabbix_sender.TEXT_FIELDS) + 2
+)
 
 
 def sample_status():
@@ -50,7 +56,7 @@ class ZabbixSenderTests(unittest.TestCase):
         )
         lines = payload.splitlines()
 
-        self.assertEqual(len(lines), 31)
+        self.assertEqual(len(lines), EXPECTED_VALUES)
         self.assertIn('"Redis Service" redis_conflated_pubsub.health 1', lines)
         self.assertIn(
             '"Redis Service" redis_conflated_pubsub.input_messages_total 0', lines
@@ -98,7 +104,9 @@ class ZabbixSenderTests(unittest.TestCase):
         run.return_value = subprocess.CompletedProcess(
             args=["zabbix_sender"],
             returncode=0,
-            stdout="processed: 31; failed: 0; total: 31\n",
+            stdout="processed: {}; failed: 0; total: {}\n".format(
+                EXPECTED_VALUES, EXPECTED_VALUES
+            ),
             stderr="",
         )
         config = {
@@ -114,13 +122,73 @@ class ZabbixSenderTests(unittest.TestCase):
             1,
         )
 
-        zabbix_sender.send_batch(config, payload, 31)
+        zabbix_sender.send_batch(config, payload, EXPECTED_VALUES)
 
         run.assert_called_once()
         self.assertEqual(run.call_args.kwargs["input"], payload)
-        self.assertEqual(len(payload.splitlines()), 31)
+        self.assertEqual(len(payload.splitlines()), EXPECTED_VALUES)
         self.assertIn("-i", run.call_args.args[0])
         self.assertEqual(run.call_args.kwargs["timeout"], 5.0)
+
+    @patch.object(zabbix_sender.subprocess, "run")
+    def test_agent_config_adds_dash_c_and_optional_inheritance(self, run):
+        run.return_value = subprocess.CompletedProcess(
+            args=["zabbix_sender"], returncode=0, stdout="processed: 1; failed: 0; total: 1\n", stderr=""
+        )
+        config = {
+            "sender_path": "zabbix_sender",
+            "zabbix_config": "/etc/zabbix/zabbix_agentd.conf",
+            "zabbix_server": None,
+            "zabbix_port": 10051,
+            "source_address": "10.0.0.5",
+            "timeout_seconds": 5.0,
+        }
+
+        zabbix_sender.send_batch(config, "x", 1)
+
+        args = run.call_args.args[0]
+        self.assertEqual(args[0], "zabbix_sender")
+        self.assertEqual(args[1:3], ["-c", "/etc/zabbix/zabbix_agentd.conf"])
+        # No `-z`: the server address is inherited from the agent config.
+        self.assertNotIn("-z", args)
+        self.assertEqual(args[3:5], ["-p", "10051"])
+        self.assertEqual(args[5:7], ["-I", "10.0.0.5"])
+
+    def test_zabbix_server_becomes_optional_with_an_agent_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "base_url": "http://127.0.0.1:9090/",
+                        "host": "monitored-host",
+                        "sender_path": "zabbix_sender",
+                        "zabbix_config": "/etc/zabbix/zabbix_agentd.conf",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            loaded = zabbix_sender.load_config(path)
+
+        self.assertEqual(loaded["zabbix_config"], "/etc/zabbix/zabbix_agentd.conf")
+        self.assertIsNone(loaded["zabbix_server"])
+        self.assertIsNone(loaded["source_address"])
+
+    def test_requires_a_server_when_no_agent_config_is_given(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "base_url": "http://127.0.0.1:9090/",
+                        "host": "monitored-host",
+                        "sender_path": "zabbix_sender",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "zabbix_server"):
+                zabbix_sender.load_config(path)
 
     def test_preserves_named_output_payload_metrics_in_compact_json(self):
         status = sample_status()

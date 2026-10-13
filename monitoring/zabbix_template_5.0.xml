@@ -251,6 +251,30 @@
                     <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
                 </item>
                 <item>
+                    <name>NATS client connects total</name>
+                    <type>2</type>
+                    <key>redis_conflated_pubsub.nats_client_connects_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><status>0</status><value_type>3</value_type>
+                    <description>Total NATS client connect events (includes the first connect). Core NATS reconnects internally, so a node failover shows up here rather than in the reconnect counters.</description>
+                    <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
+                </item>
+                <item>
+                    <name>NATS client disconnects total</name>
+                    <type>2</type>
+                    <key>redis_conflated_pubsub.nats_client_disconnects_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><status>0</status><value_type>3</value_type>
+                    <description>Total NATS client disconnect events. A value above zero means at least one reconnection happened.</description>
+                    <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
+                </item>
+                <item>
+                    <name>Loop suppressed messages total</name>
+                    <type>2</type>
+                    <key>redis_conflated_pubsub.loop_suppressed_messages_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><status>0</status><value_type>3</value_type>
+                    <description>Messages dropped at the input because they already carried the relay hop header (NATS-to-NATS loop guard).</description>
+                    <applications><application><name>Redis Conflated Pub/Sub</name></application></applications>
+                </item>
+                <item>
                     <name>Last input timestamp</name>
                     <type>2</type>
                     <key>redis_conflated_pubsub.last_input_at</key>
