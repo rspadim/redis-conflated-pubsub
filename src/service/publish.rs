@@ -204,6 +204,40 @@ impl OutputConnection {
             Self::Nats(sink) => sink.flush_before_shutdown().await,
         }
     }
+
+    /// Decides whether a publish failure should discard the connection, and
+    /// returns whether a reconnect actually happened.
+    ///
+    /// Redis needs to reconnect on any failure (its publish path nulls the
+    /// connection on error). A NATS sink only discards the client on an
+    /// ambiguous (`Uncertain`) outcome: a definitive `NotSent` (invalid mapped
+    /// subject, oversized payload) leaves the healthy client in place, so a
+    /// repeated mapping error must not trigger a reconnect storm or inflate the
+    /// reconnect counter. This keeps the direct and conflated lanes consistent.
+    pub(crate) fn on_publish_failure(&mut self, failure: &PublishFailure) -> bool {
+        match self {
+            Self::Redis(_) => {
+                let was_connected = self.is_connected();
+                self.disconnect();
+                was_connected
+            }
+            Self::Nats(sink) => {
+                if matches!(failure, PublishFailure::Uncertain(_)) && sink.is_connected() {
+                    sink.disconnect();
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    /// Whether a definitive `NotSent` implies a reconnect for this backend:
+    /// Redis reconnects on any failure; NATS does not reconnect for a
+    /// deterministic mapping/oversize rejection.
+    pub(crate) fn not_sent_reconnects(&self) -> bool {
+        matches!(self, Self::Redis(_))
+    }
 }
 
 impl OutputSink for OutputConnection {
@@ -286,9 +320,11 @@ pub(super) fn settle_publish_result(
             }
             match &failure {
                 PublishFailure::NotSent(error) => {
-                    context
-                        .metrics
-                        .record_output_error(context.output_metrics, error, true);
+                    context.metrics.record_output_error(
+                        context.output_metrics,
+                        error,
+                        context.not_sent_reconnects,
+                    );
                     context
                         .metrics
                         .record_output_error_messages(context.output_metrics, batch.len());

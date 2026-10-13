@@ -267,6 +267,7 @@ fn publish_context_for_test<'a>(
         deduplication_cache,
         metrics,
         output_metrics,
+        not_sent_reconnects: true,
     }
 }
 

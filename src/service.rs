@@ -269,6 +269,11 @@ struct OutputPublishContext<'a> {
     deduplication_cache: &'a mut DeduplicationCache,
     metrics: &'a Metrics,
     output_metrics: &'a OutputMetrics,
+    /// Whether a definitive `NotSent` failure implies a reconnect. Redis
+    /// reconnects on any failure, so `true`; Core NATS keeps a healthy client on
+    /// a mapping/oversize `NotSent`, so `false`, and `output_reconnects_total`
+    /// is not inflated by a deterministic config error.
+    not_sent_reconnects: bool,
 }
 
 pub async fn run(

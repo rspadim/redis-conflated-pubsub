@@ -132,6 +132,21 @@ async fn shutdown_flush_after_failed_publish_is_a_noop() {
     assert!(!connection.is_connected());
 }
 
+/// A NATS output must not treat a definitive `NotSent` (invalid mapped subject,
+/// oversized payload) as a reason to reconnect: the client is healthy and the
+/// error is deterministic, so reconnecting per message would be a reconnect
+/// storm and would inflate `output_reconnects_total`. `on_publish_failure`
+/// therefore reports no reconnect for NATS on `NotSent`, and
+/// `not_sent_reconnects` is `false` so the metric agrees.
+#[test]
+fn nats_not_sent_does_not_reconnect_and_does_not_count_as_one() {
+    let mut connection =
+        OutputConnection::Nats(NatsOutputSink::new(&unreachable_output_config()).unwrap());
+    assert!(!connection.not_sent_reconnects());
+    // A definitive pre-send failure never reconnects the NATS client.
+    assert!(!connection.on_publish_failure(&PublishFailure::NotSent("bad subject".to_owned())));
+}
+
 #[test]
 fn prefixed_and_oversized_subject_failures_are_definitive() {
     for (kind, expected_not_sent) in [

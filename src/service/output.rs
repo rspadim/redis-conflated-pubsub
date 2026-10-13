@@ -236,6 +236,10 @@ pub(super) async fn publish_output(
     let mut in_flight_batches = VecDeque::<(usize, usize)>::new();
     let mut in_flight_direct_messages = 0usize;
     let mut in_flight_direct_bytes = 0usize;
+    // Constant per output: Redis reconnects on any failure, NATS only on an
+    // ambiguous outcome, so a definitive NotSent must not inflate the reconnect
+    // counter for a NATS output.
+    let not_sent_reconnects = connection.not_sent_reconnects();
 
     metrics.set_output_state(&output_metrics, "running");
     loop {
@@ -379,6 +383,7 @@ pub(super) async fn publish_output(
                     deduplication_cache: &mut deduplication_cache,
                     metrics: &metrics,
                     output_metrics: &output_metrics,
+                    not_sent_reconnects,
                 };
                 let (has_remaining, pending_keys) = publish_conflated_interval_pending(
                     &mut connection,
@@ -445,6 +450,7 @@ pub(super) async fn publish_output(
                                 deduplication_cache: &mut deduplication_cache,
                                 metrics: &metrics,
                                 output_metrics: &output_metrics,
+                                not_sent_reconnects,
                             };
                             let result = settle_dispatched_batch(
                                 &batch,
@@ -479,6 +485,7 @@ pub(super) async fn publish_output(
                                 deduplication_cache: &mut deduplication_cache,
                                 metrics: &metrics,
                                 output_metrics: &output_metrics,
+                                not_sent_reconnects,
                             };
                             let result = settle_dispatched_batch(
                                 &batch,
@@ -569,6 +576,7 @@ pub(super) async fn publish_output(
                         deduplication_cache: &mut deduplication_cache,
                         metrics: &metrics,
                         output_metrics: &output_metrics,
+                        not_sent_reconnects,
                     };
                     metrics.record_output_publish_rtt(&output_metrics, publish_rtt);
                     let result = settle_dispatched_batch(
@@ -600,7 +608,10 @@ pub(super) async fn publish_output(
                             pending_keys
                         }
                         Err(failure) => {
-                            connection.disconnect();
+                            // Redis drops the connection on any failure; NATS
+                            // keeps a healthy client on a definitive NotSent
+                            // (see `on_publish_failure`).
+                            connection.on_publish_failure(&failure);
                             flush::settle_failed_batch(
                                 0,
                                 &batch,
