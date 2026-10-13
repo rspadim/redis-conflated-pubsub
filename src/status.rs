@@ -32,6 +32,9 @@ pub struct Metrics {
     pub deduplicated_payload_bytes_total: AtomicU64,
     pub deduplication_evictions_total: AtomicU64,
     pub excluded_messages_total: AtomicU64,
+    /// Messages dropped at the input because they already carried the relay hop
+    /// header, i.e. re-entry of a message this relay forwarded (NATS loop guard).
+    pub loop_suppressed_messages_total: AtomicU64,
     pub dropped_messages_total: AtomicU64,
     pub dropped_payload_bytes_total: AtomicU64,
     pub shed_messages_total: AtomicU64,
@@ -253,6 +256,7 @@ impl Metrics {
             deduplicated_payload_bytes_total: AtomicU64::new(0),
             deduplication_evictions_total: AtomicU64::new(0),
             excluded_messages_total: AtomicU64::new(0),
+            loop_suppressed_messages_total: AtomicU64::new(0),
             dropped_messages_total: AtomicU64::new(0),
             dropped_payload_bytes_total: AtomicU64::new(0),
             shed_messages_total: AtomicU64::new(0),
@@ -695,6 +699,9 @@ impl Metrics {
                 .deduplication_evictions_total
                 .load(Ordering::Relaxed),
             excluded_messages_total: self.excluded_messages_total.load(Ordering::Relaxed),
+            loop_suppressed_messages_total: self
+                .loop_suppressed_messages_total
+                .load(Ordering::Relaxed),
             dropped_messages_total: self.dropped_messages_total.load(Ordering::Relaxed),
             dropped_payload_bytes_total: self.dropped_payload_bytes_total.load(Ordering::Relaxed),
             shed_messages_total: self.shed_messages_total.load(Ordering::Relaxed),
@@ -746,6 +753,9 @@ pub struct StatusSnapshot {
     /// Per-channel deduplication cache entries evicted by the optional LRU limits.
     pub deduplication_evictions_total: u64,
     pub excluded_messages_total: u64,
+    /// Messages dropped at the input because they already carried the relay hop
+    /// header (NATS loop re-entry guard).
+    pub loop_suppressed_messages_total: u64,
     pub dropped_messages_total: u64,
     pub dropped_payload_bytes_total: u64,
     /// Messages discarded by a queue overflow policy.

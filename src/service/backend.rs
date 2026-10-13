@@ -11,6 +11,11 @@ use std::sync::Arc;
 use super::PendingMessage;
 use super::publish::PublishFailure;
 
+/// Header a relay stamps on every message it forwards. A message that already
+/// carries it is a loop and must not be forwarded again. Header-based means the
+/// payload is never rewritten, so the relay stays byte-transparent.
+pub(in crate::service) const NATS_HOP_HEADER: &str = "Relay-Hop";
+
 /// Normalized inbound message envelope shared by every input backend.
 ///
 /// The relay's filtering/conflation/deduplication path consumes this envelope
@@ -32,6 +37,11 @@ pub(super) struct InputEnvelope {
     pub(super) payload: Arc<[u8]>,
     /// Identity of the subscription that matched this message.
     pub(super) subscription_identity: String,
+    /// `true` when the message already carries the relay hop header, meaning it
+    /// was forwarded by this relay (or another) before. The input drops these to
+    /// break NATS-to-NATS loops, because Core NATS `no_echo` only suppresses the
+    /// publishing connection. Always `false` for Redis, which has no headers.
+    pub(super) already_forwarded: bool,
 }
 
 /// An input backend: connect/reconnect, install the configured subscriptions,

@@ -17,22 +17,26 @@ use tokio::{sync::Notify, time};
 /// numbers before the adapters exist.
 ///
 /// Knobs (all optional, read from the environment):
-/// - `NATS_LOAD_MODE`         `roundtrip` (subscriber + end-to-end) or `publish`
-///                            (no subscriber; measures the publish+flush ceiling).
-/// - `NATS_LOAD_TOTAL`        total messages across all publishers (default 200000).
-/// - `NATS_LOAD_PUBLISHERS`   concurrent publisher tasks (default 4).
-/// - `NATS_LOAD_PAYLOAD_BYTES` payload size in bytes (default 256, min 8).
-/// - `NATS_LOAD_FLUSH_EVERY`  `flush()` barrier every N messages (default 64;
-///                            `1` is effectively a closed loop per message).
-/// - `NATS_LOAD_WAIT_SECS`    how long to wait for the last delivery (default 120).
-/// - `NATS_LOAD_LABEL`        free-form label echoed in the summary line.
-/// - `NATS_LOAD_TRANSPORT`    overrides the transport tag (default: scheme of
-///                            `NATS_SERVERS`).
-/// - `NATS_LOAD_PREFIX`       subject prefix (default `load`).
+///
+/// - `NATS_LOAD_MODE`: `roundtrip` (subscriber + end-to-end) or `publish`
+///   (no subscriber; measures the publish+flush ceiling).
+/// - `NATS_LOAD_TOTAL`: total messages across all publishers (default 200000).
+/// - `NATS_LOAD_PUBLISHERS`: concurrent publisher tasks (default 4).
+/// - `NATS_LOAD_PAYLOAD_BYTES`: payload size in bytes (default 256, min 8).
+/// - `NATS_LOAD_FLUSH_EVERY`: `flush()` barrier every N messages (default 64;
+///   `1` is effectively a closed loop per message).
+/// - `NATS_LOAD_WAIT_SECS`: how long to wait for the last delivery (default 120).
+/// - `NATS_LOAD_SEPARATE_SUBSCRIBER`: use a second connection for the subscriber
+///   (default `1`). This mirrors the relay's separate input/output connections
+///   and avoids the single connection starving its own reads under load.
+/// - `NATS_LOAD_LABEL`: free-form label echoed in the summary line.
+/// - `NATS_LOAD_TRANSPORT`: overrides the transport tag (default: scheme of
+///   `NATS_SERVERS`).
+/// - `NATS_LOAD_PREFIX`: subject prefix (default `load`).
 ///
 /// The last line printed is machine-readable:
 /// `load_summary label=... transport=... mode=... publishers=... ...`
-pub(crate) async fn run(client: &Client) -> Result<()> {
+pub(crate) async fn run(client: &Client, servers: &str) -> Result<()> {
     let total = env_u64("NATS_LOAD_TOTAL", 200_000).max(1);
     let publishers = env_usize("NATS_LOAD_PUBLISHERS", 4).max(1) as u64;
     let payload_bytes = env_usize("NATS_LOAD_PAYLOAD_BYTES", 256).max(8);
@@ -40,8 +44,12 @@ pub(crate) async fn run(client: &Client) -> Result<()> {
     let prefix = env_or("NATS_LOAD_PREFIX", "load");
     let mode = env_or("NATS_LOAD_MODE", "roundtrip");
     let label = env_or("NATS_LOAD_LABEL", "");
-    let transport = env_or("NATS_LOAD_TRANSPORT", &transport_of(&env_or("NATS_SERVERS", "nats://")));
+    let transport = env_or(
+        "NATS_LOAD_TRANSPORT",
+        &transport_of(&env_or("NATS_SERVERS", "nats://")),
+    );
     let wait_timeout = Duration::from_secs(env_u64("NATS_LOAD_WAIT_SECS", 120).max(1));
+    let separate_subscriber = env_bool("NATS_LOAD_SEPARATE_SUBSCRIBER", true);
     let with_subscriber = mode != "publish";
 
     let received = Arc::new(AtomicU64::new(0));
@@ -49,7 +57,20 @@ pub(crate) async fn run(client: &Client) -> Result<()> {
     let done = Arc::new(Notify::new());
 
     let subscriber = if with_subscriber {
-        let mut subscription = client.subscribe(format!("{prefix}.>")).await?;
+        // The relay uses independent input/output connections, so the default
+        // subscriber connection is separate from the publishers. Sharing one
+        // connection can make the client's write path starve its own reads.
+        let subscriber_client = if separate_subscriber {
+            let connection_name = format!("{label}-load-subscriber");
+            crate::connect_nats_with_ca(servers, connection_name.as_str(), None).await?
+        } else {
+            client.clone()
+        };
+        let mut subscription = subscriber_client.subscribe(format!("{prefix}.>")).await?;
+        // Wait for the server to acknowledge SUB before any publisher starts, so
+        // early messages cannot be dropped by a subscription that is still in
+        // flight. Without this, low-flush cells lose a few initial messages.
+        subscriber_client.flush().await?;
         let received = Arc::clone(&received);
         let latencies = Arc::clone(&latencies);
         let done = Arc::clone(&done);
@@ -253,5 +274,12 @@ fn env_usize(name: &str, default: usize) -> usize {
     std::env::var(name)
         .ok()
         .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+}
+
+fn env_bool(name: &str, default: bool) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(default)
 }

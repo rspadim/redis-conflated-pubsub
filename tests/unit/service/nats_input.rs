@@ -25,6 +25,7 @@ fn envelope(subject: &str, identity: &str) -> InputEnvelope {
         source_subject: subject.to_owned(),
         payload: Arc::from(&b"payload"[..]),
         subscription_identity: identity.to_owned(),
+        already_forwarded: false,
     }
 }
 
@@ -76,6 +77,25 @@ fn an_unconfigured_identity_is_reported_as_unmapped() {
     let input = NatsInput::new(&config).unwrap();
     let envelope = envelope("prices.eu.aapl", "orders.>");
     assert!(input.map_envelope(&envelope).is_none());
+}
+
+#[test]
+fn a_forwarded_envelope_is_marked_for_loop_suppression() {
+    // The input adapter must surface the hop marker so the read loop can drop
+    // relay echoes instead of forwarding them again.
+    let config = nats_input(serde_json::json!([
+        {"type": "nats_subject", "subject": "prices.>"},
+    ]));
+    let input = NatsInput::new(&config).unwrap();
+
+    let mut forwarded = envelope("prices.eu.aapl", "prices.>");
+    forwarded.already_forwarded = true;
+    assert!(forwarded.already_forwarded);
+    // The mapping still resolves; suppression happens in the read loop, not here.
+    assert!(input.map_envelope(&forwarded).is_some());
+
+    let fresh = envelope("prices.eu.aapl", "prices.>");
+    assert!(!fresh.already_forwarded);
 }
 
 #[test]

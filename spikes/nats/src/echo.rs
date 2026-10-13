@@ -52,10 +52,7 @@ pub(crate) async fn run(servers: &str) -> Result<()> {
     println!(
         "echo_probe_scenarios={total} echo_loop_observed={loops} guard_suppressed={guarded} \
          kept={} repeated_late={} same_conn_started={} same_conn_echo={}",
-        integrity.published,
-        integrity.late,
-        integrity.parallel,
-        integrity.parallel_echoed,
+        integrity.published, integrity.late, integrity.parallel, integrity.parallel_echoed,
     );
     println!(
         "echo_probe_conclusion=no_echo_only_covers_same_connection; relay needs the {HOP_HEADER} guard"
@@ -120,8 +117,7 @@ async fn run_scenario(servers: &str, scenario: Scenario, window: Duration) -> Re
     // Output connection: stamps/echoes. `no_echo` only matters in the
     // same-connection scenario; `same_connection_no_echo_off` disables it.
     let out_no_echo = scenario.same_connection && scenario.name == "same_connection_no_echo";
-    let out_client =
-        connect(servers, "nats-echo-output", out_no_echo).await?;
+    let out_client = connect(servers, "nats-echo-output", out_no_echo).await?;
     // Input connection: the relay's subscriber side. `no_echo` is always on here,
     // mirroring the intended relay setup, to show it still does not help.
     let in_client = connect(servers, "nats-echo-input", true).await?;
@@ -160,7 +156,10 @@ async fn run_scenario(servers: &str, scenario: Scenario, window: Duration) -> Re
             }
             let mut headers = HeaderMap::new();
             if guard {
-                headers.insert(HOP_HEADER, HeaderValue::from_str(HOP_HEADER_VALUE).expect("static header"));
+                headers.insert(
+                    HOP_HEADER,
+                    HeaderValue::from_str(HOP_HEADER_VALUE).expect("static header"),
+                );
             }
             let published = if guard {
                 publish_client
@@ -240,7 +239,10 @@ async fn header_integrity(servers: &str) -> Result<Integrity> {
 
     let payload = Bytes::from_static(b"loop-guard-payload-\x00\xff");
     let mut headers = HeaderMap::new();
-    headers.insert(HOP_HEADER, HeaderValue::from_str(HOP_HEADER_VALUE).expect("static header"));
+    headers.insert(
+        HOP_HEADER,
+        HeaderValue::from_str(HOP_HEADER_VALUE).expect("static header"),
+    );
     client
         .publish_with_headers(subject.clone(), headers, payload.clone())
         .await?;
@@ -250,7 +252,10 @@ async fn header_integrity(servers: &str) -> Result<Integrity> {
         .await
         .context("timed out waiting for guarded integrity message")?
         .context("integrity subscription closed")?;
-    ensure!(received.payload.as_ref() == payload, "guard altered the payload");
+    ensure!(
+        received.payload.as_ref() == payload,
+        "guard altered the payload"
+    );
     let hop_present = received
         .headers
         .as_ref()
@@ -286,7 +291,10 @@ async fn connect(servers: &str, name: &str, no_echo: bool) -> Result<Client> {
         .filter(|address| !address.is_empty())
         .map(ServerAddr::from_str)
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    ensure!(!addresses.is_empty(), "NATS_ECHO requires at least one server URL");
+    ensure!(
+        !addresses.is_empty(),
+        "NATS_ECHO requires at least one server URL"
+    );
     let mut options = ConnectOptions::new()
         .name(name)
         .max_reconnects(None)
@@ -299,7 +307,10 @@ async fn connect(servers: &str, name: &str, no_echo: bool) -> Result<Client> {
     {
         options = options.token(token);
     }
-    options.connect(addresses).await.context("connecting to NATS")
+    options
+        .connect(addresses)
+        .await
+        .context("connecting to NATS")
 }
 
 fn unique_suffix() -> String {

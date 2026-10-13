@@ -1,5 +1,6 @@
 //! NATS output sink tests that need no live server.
 
+use super::super::backend::NATS_HOP_HEADER;
 use super::super::nats::output::{NATS_NO_SUBSCRIBER_COUNT, PublishStep, check_payload_size};
 use crate::config::validate_nats_publish_subject;
 
@@ -28,6 +29,13 @@ fn concrete_subject_validation_matches_the_config_rule_set() {
     assert!(validate_nats_publish_subject("subject", "archive.prices.>.v1").is_err());
     assert!(validate_nats_publish_subject("subject", "archive..v1").is_err());
     assert!(validate_nats_publish_subject("subject", "archive.prices.a.v1 ").is_err());
+}
+
+/// The hop header is the constant the output stamps and the input checks. Pinning
+/// it stops the two sides from silently drifting apart.
+#[test]
+fn hop_header_name_is_stable() {
+    assert_eq!(NATS_HOP_HEADER, "Relay-Hop");
 }
 
 /// Payloads above the server-advertised maximum are a definitive pre-send

@@ -46,7 +46,7 @@ async fn main() -> Result<()> {
     if std::env::var("NATS_LOAD_TEST")
         .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes"))
     {
-        load::run(&nats).await?;
+        load::run(&nats, &servers).await?;
         return Ok(());
     }
     if std::env::var("NATS_ECHO_PROBE")

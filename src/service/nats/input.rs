@@ -21,7 +21,7 @@ use anyhow::{Context, Result};
 use async_nats::{Client, Subscriber};
 use futures_util::{StreamExt, future::poll_fn};
 use tokio::time;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
     config::{InputConfig, Subscription},
@@ -30,7 +30,7 @@ use crate::{
 
 use super::super::MAX_RETRY_DELAY;
 use super::super::OutputSender;
-use super::super::backend::{InputEnvelope, InputSource};
+use super::super::backend::{InputEnvelope, InputSource, NATS_HOP_HEADER};
 use super::super::filter::ChannelFilterSet;
 use super::super::input::{OutputChannelFilter, fan_out};
 use super::connect::{ConnectionPlan, connect, connection_plan};
@@ -201,11 +201,19 @@ impl InputSource for NatsInput {
         let Some((index, message)) = polled else {
             return Ok(None);
         };
+        // Core NATS delivers the message to this subscription even when this relay
+        // published it on another connection, so a loop is broken here by dropping
+        // anything already stamped with the hop header.
+        let already_forwarded = message
+            .headers
+            .as_ref()
+            .is_some_and(|headers| headers.get(NATS_HOP_HEADER).is_some());
         Ok(Some(InputEnvelope {
             source_address: self.source_address.clone(),
             source_subject: message.subject.as_str().to_owned(),
             payload: Arc::from(message.payload.as_ref()),
             subscription_identity: self.subscriptions[index].subject.clone(),
+            already_forwarded,
         }))
     }
 }
@@ -216,10 +224,11 @@ impl InputSource for NatsInput {
 ///
 /// Loop handling: Core NATS `no_echo` only suppresses messages published through
 /// the same client connection, and the relay uses separate input/output
-/// connections, so output echoes can reach the input. Loop prevention for
-/// NATS-to-NATS forwarding is a 0.3 step-4 workstream; the Redis echo filters
-/// encode Redis channel namespaces and never match NATS subjects, so they are
-/// intentionally not consulted here.
+/// connections, so output echoes can reach the input. Each NATS output stamps
+/// the [`NATS_HOP_HEADER`] on the messages it forwards; this reader drops any
+/// message that already carries it, which breaks NATS-to-NATS loops without
+/// touching the payload. The Redis echo filters encode Redis channel namespaces
+/// and never match NATS subjects, so they are intentionally not consulted here.
 pub(in crate::service) async fn read_nats_input(
     config: InputConfig,
     mut senders: Vec<OutputSender>,
@@ -256,6 +265,15 @@ pub(in crate::service) async fn read_nats_input(
                         }
                     };
                     let source_subject = envelope.source_subject.clone();
+                    if envelope.already_forwarded {
+                        // Loop re-entry: this relay already published this message,
+                        // so forwarding it again would cycle forever.
+                        metrics
+                            .loop_suppressed_messages_total
+                            .fetch_add(1, Ordering::Relaxed);
+                        debug!(subject = %source_subject, "nats_input_loop_suppressed");
+                        continue;
+                    }
                     if !channel_filter.allows(&source_subject) {
                         metrics
                             .excluded_messages_total

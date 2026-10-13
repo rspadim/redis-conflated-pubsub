@@ -9,14 +9,14 @@
 
 use std::time::Duration;
 
-use async_nats::{Client, PublishErrorKind};
+use async_nats::{Client, HeaderMap, HeaderValue, PublishErrorKind};
 use bytes::Bytes;
 use tokio::time;
 
 use crate::config::OutputConfig;
 
 use super::super::PendingMessage;
-use super::super::backend::OutputSink;
+use super::super::backend::{NATS_HOP_HEADER, OutputSink};
 use super::super::publish::PublishFailure;
 use super::connect::{ConnectionPlan, connect, connect_failure, connection_plan};
 
@@ -178,6 +178,11 @@ async fn publish_chunk(
     messages: &[PendingMessage],
     max_payload: usize,
 ) -> std::result::Result<(), PublishStep> {
+    // Stamp every forwarded message so a NATS input that also matches this
+    // subject recognises it as a relay echo and drops it. The value is
+    // constant, so the headers are built once per chunk.
+    let mut headers = HeaderMap::new();
+    headers.insert(NATS_HOP_HEADER, HeaderValue::from("1"));
     for message in messages {
         // Reject non-concrete or malformed publish subjects with the same
         // message `--check-config` uses, before the client would.
@@ -191,7 +196,7 @@ async fn publish_chunk(
         // `Bytes::from_owner` shares the `Arc<[u8]>` payload without copying.
         let payload = Bytes::from_owner(message.payload.clone());
         match client
-            .publish(message.output_channel.clone(), payload)
+            .publish_with_headers(message.output_channel.clone(), headers.clone(), payload)
             .await
         {
             Ok(()) => {}

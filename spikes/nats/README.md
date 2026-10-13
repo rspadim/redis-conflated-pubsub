@@ -69,7 +69,7 @@ $env:NATS_SERVERS = "nats://127.0.0.1:14222,nats://127.0.0.1:14223,nats://127.0.
 cargo run --release --locked --manifest-path spikes/nats/Cargo.toml
 ```
 
-Knobs: `NATS_LOAD_MODE` (`roundtrip` = subscriber + end-to-end latency, or `publish` = no subscriber, measures the publish+flush ceiling), `NATS_LOAD_TOTAL` (200000), `NATS_LOAD_PUBLISHERS` (4), `NATS_LOAD_PAYLOAD_BYTES` (256), `NATS_LOAD_FLUSH_EVERY` (64), `NATS_LOAD_WAIT_SECS` (120), `NATS_LOAD_LABEL`, `NATS_LOAD_TRANSPORT`. The last line is a machine-readable `load_summary ...` row with rate, delivered, `complete`, publish/flush errors, and RTT p50/p95/p99/max. Use `--release`.
+Knobs: `NATS_LOAD_MODE` (`roundtrip` = subscriber + end-to-end latency, or `publish` = no subscriber, measures the publish+flush ceiling), `NATS_LOAD_TOTAL` (200000), `NATS_LOAD_PUBLISHERS` (4), `NATS_LOAD_PAYLOAD_BYTES` (256), `NATS_LOAD_FLUSH_EVERY` (64), `NATS_LOAD_WAIT_SECS` (120), `NATS_LOAD_SEPARATE_SUBSCRIBER` (1 = subscriber on its own connection, mirroring the relay's separate input/output connections; set 0 to reproduce the single-connection slow-consumer stalls), `NATS_LOAD_LABEL`, `NATS_LOAD_TRANSPORT`. The last line is a machine-readable `load_summary ...` row with rate, delivered, `complete`, publish/flush errors, and RTT p50/p95/p99/max. Use `--release`.
 
 ### Load matrix runner
 
