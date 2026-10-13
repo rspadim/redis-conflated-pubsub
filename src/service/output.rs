@@ -51,6 +51,7 @@ struct OutputEnqueueContext<'a> {
     config: &'a crate::config::OutputConfig,
     channel_policies: &'a CompiledChannelPolicies,
     max_bytes_per_exec: usize,
+    nats_payload_ceiling: Option<usize>,
     oversized_policy: crate::config::OversizedMessagePolicy,
     pending: &'a mut PendingByInterval,
     passthrough: &'a mut VecDeque<PendingMessage>,
@@ -74,6 +75,7 @@ impl OutputEnqueueContext<'_> {
                 deduplication_ttl_ms: Some(policy.deduplication_ttl_ms),
                 deduplication_group: policy.deduplication_group,
                 max_bytes_per_exec: self.max_bytes_per_exec,
+                nats_payload_ceiling: self.nats_payload_ceiling,
                 oversized_policy: self.oversized_policy,
             },
             metrics: self.metrics,
@@ -242,6 +244,12 @@ pub(super) async fn publish_output(
         let input_command_capacity =
             max_in_flight_commands.saturating_sub(in_flight_direct_messages);
         let input_byte_capacity = max_in_flight_bytes.saturating_sub(in_flight_direct_bytes);
+        // The NATS payload ceiling is only known once the client is connected.
+        // Before the first connect (and while a broker is down) it is `None`, so
+        // the oversized policy falls back to the RESP target for that first
+        // batch; once connected, `nats_payload_ceiling` drives the policy. The
+        // window is one flush interval wide, after which the ceiling applies.
+        let nats_payload_ceiling = connection.nats_payload_ceiling();
         // Intake is always serviced (bounded by the in-flight window), even while
         // conflated buckets are due: the flush below is budgeted per turn, so
         // blocking intake here would starve it for the whole bucket drain.
@@ -261,6 +269,7 @@ pub(super) async fn publish_output(
                 config: &config,
                 channel_policies: &compiled_channel_policies,
                 max_bytes_per_exec,
+                nats_payload_ceiling,
                 oversized_policy,
                 pending: &mut pending,
                 passthrough: &mut passthrough,

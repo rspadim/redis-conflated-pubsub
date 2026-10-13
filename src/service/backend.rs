@@ -16,6 +16,13 @@ use super::publish::PublishFailure;
 /// payload is never rewritten, so the relay stays byte-transparent.
 pub(in crate::service) const NATS_HOP_HEADER: &str = "Relay-Hop";
 
+/// Bytes the hop header adds to a NATS message on the wire: the `NATS/1.0\r\n`
+/// prefix, the `Relay-Hop: 1\r\n` field, and the terminating `\r\n`. The server
+/// counts these toward its `max_payload`, so the usable payload is
+/// `max_payload - NATS_HOP_HEADER_WIRE_BYTES`.
+pub(in crate::service) const NATS_HOP_HEADER_WIRE_BYTES: usize =
+    "NATS/1.0\r\n".len() + "Relay-Hop: 1\r\n".len() + "\r\n".len();
+
 /// Normalized inbound message envelope shared by every input backend.
 ///
 /// The relay's filtering/conflation/deduplication path consumes this envelope

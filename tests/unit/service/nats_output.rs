@@ -1,6 +1,6 @@
 //! NATS output sink tests that need no live server.
 
-use super::super::backend::NATS_HOP_HEADER;
+use super::super::backend::{NATS_HOP_HEADER, NATS_HOP_HEADER_WIRE_BYTES};
 use super::super::nats::output::{NATS_NO_SUBSCRIBER_COUNT, PublishStep, check_payload_size};
 use crate::config::validate_nats_publish_subject;
 
@@ -40,10 +40,17 @@ fn hop_header_name_is_stable() {
 }
 
 /// Payloads above the server-advertised maximum are a definitive pre-send
-/// failure (`NotSent`), never an optimistic send that the server drops.
+/// failure (`NotSent`), never an optimistic send that the server drops. The
+/// relay's own hop header counts toward the server limit, so the usable payload
+/// is `max_payload - header_wire_bytes`; a payload that fits only without the
+/// header is rejected here rather than by the client.
 #[test]
 fn oversized_payloads_are_rejected_before_publishing() {
-    assert!(check_payload_size("events", 1024, 1024).is_ok());
-    let error = not_sent(check_payload_size("events", 1025, 1024).unwrap_err());
+    let ceiling = 1024 - NATS_HOP_HEADER_WIRE_BYTES;
+    assert!(check_payload_size("events", ceiling, 1024).is_ok());
+    // Exactly the server max is too big once the header is counted.
+    let error = not_sent(check_payload_size("events", 1024, 1024).unwrap_err());
+    assert!(error.contains("exceeds the server maximum"), "{error}");
+    let error = not_sent(check_payload_size("events", ceiling + 1, 1024).unwrap_err());
     assert!(error.contains("exceeds the server maximum"), "{error}");
 }

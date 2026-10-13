@@ -260,6 +260,7 @@ pub(super) fn prepare_output_message(
         deduplication_ttl_ms,
         deduplication_group,
         max_bytes_per_exec,
+        nats_payload_ceiling,
         oversized_policy,
     } = context.policy.clone();
     let mut pending_message = PendingMessage {
@@ -271,6 +272,44 @@ pub(super) fn prepare_output_message(
         raw_payload: None,
     };
     let atomic = interval_ms > 0;
+
+    // A connected NATS output has a hard server payload ceiling and no RESP
+    // framing, so the oversized policy must act against that real limit. Doing
+    // this here (rather than only at publish time) makes `truncate` actually
+    // truncate and `drop` drop, instead of the payload slipping past the
+    // RESP-based check and being rejected as oversized when it is sent.
+    if let Some(ceiling) = nats_payload_ceiling {
+        if pending_message.payload.len() > ceiling {
+            match oversized_policy {
+                // `send` keeps the full payload; the client/server still enforce
+                // its own limit, so a truly over-limit message fails as NotSent.
+                OversizedMessagePolicy::Send => {}
+                OversizedMessagePolicy::Drop => {
+                    context.metrics.record_output_dropped(
+                        context.output_metrics,
+                        1,
+                        pending_message.payload.len(),
+                        super::pending_message_queue_bytes(&pending_message),
+                    );
+                    context.policy_log.report(context.name, 1, 0, 0);
+                    return None;
+                }
+                OversizedMessagePolicy::Truncate => {
+                    let truncated_bytes = pending_message.payload.len() - ceiling;
+                    pending_message.raw_payload = Some(Arc::clone(&pending_message.payload));
+                    pending_message.payload = Arc::from(&pending_message.payload[..ceiling]);
+                    context
+                        .metrics
+                        .record_output_truncated(context.output_metrics, truncated_bytes);
+                    context
+                        .policy_log
+                        .report(context.name, 0, 1, truncated_bytes);
+                }
+            }
+        }
+        return Some(pending_message);
+    }
+
     if publish_operation_frame_bytes(&pending_message, atomic) <= max_bytes_per_exec
         || oversized_policy == OversizedMessagePolicy::Send
     {

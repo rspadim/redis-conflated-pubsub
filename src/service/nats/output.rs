@@ -17,7 +17,7 @@ use tokio::time;
 use crate::config::OutputConfig;
 
 use super::super::PendingMessage;
-use super::super::backend::{NATS_HOP_HEADER, OutputSink};
+use super::super::backend::{NATS_HOP_HEADER, NATS_HOP_HEADER_WIRE_BYTES, OutputSink};
 use super::super::publish::PublishFailure;
 use super::connect::{ConnectionPlan, connect_failure, connect_with_metrics, connection_plan};
 
@@ -150,6 +150,17 @@ impl NatsOutputSink {
     /// Connected handle for the direct lane to own inside its in-flight future.
     pub(in crate::service) fn sender(&self) -> Option<NatsSender> {
         self.sender.clone()
+    }
+
+    /// The server-advertised payload ceiling for this connection, minus the
+    /// bytes the relay's hop header adds. `None` while disconnected, so the
+    /// caller keeps the configured target until the limit is known.
+    pub(in crate::service) fn payload_ceiling(&self) -> Option<usize> {
+        self.sender.as_ref().map(|sender| {
+            sender
+                .max_payload
+                .saturating_sub(NATS_HOP_HEADER_WIRE_BYTES)
+        })
     }
 
     /// Connects if needed. A connection failure means nothing was sent on this
@@ -289,15 +300,17 @@ pub(in crate::service) fn classify_publish_step(
 
 /// Enforces the server-advertised payload limit before enqueueing, so the
 /// classification is a definitive `NotSent` rather than relying on the client
-/// error. Reuses the same policy the batch sizing does.
+/// error. The hop header the relay always attaches counts toward the server's
+/// limit, so it is subtracted here to match the client's own check.
 pub(in crate::service) fn check_payload_size(
     subject: &str,
     payload_len: usize,
     max_payload: usize,
 ) -> std::result::Result<(), PublishStep> {
-    if payload_len > max_payload {
+    let usable = max_payload.saturating_sub(NATS_HOP_HEADER_WIRE_BYTES);
+    if payload_len > usable {
         return Err(PublishStep::NotSent(format!(
-            "NATS subject {subject:?} payload of {payload_len} bytes exceeds the server maximum of {max_payload} bytes"
+            "NATS subject {subject:?} payload of {payload_len} bytes exceeds the server maximum of {max_payload} bytes ({usable} usable after the {NATS_HOP_HEADER_WIRE_BYTES}-byte relay header)"
         )));
     }
     Ok(())

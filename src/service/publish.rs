@@ -169,6 +169,17 @@ impl OutputConnection {
         }
     }
 
+    /// Server-advertised payload ceiling for a connected NATS output (usable
+    /// bytes after the relay header), or `None` for Redis or while disconnected.
+    /// The worker uses this to cap the oversized-message policy against the real
+    /// server limit, not only `max_bytes_per_exec`.
+    pub(crate) fn nats_payload_ceiling(&self) -> Option<usize> {
+        match self {
+            Self::Redis(_) => None,
+            Self::Nats(sink) => sink.payload_ceiling(),
+        }
+    }
+
     /// Reconnects every backend through its own sink. Not currently called by
     /// the worker (which performs the connect inline), kept for the shared
     /// boundary and future direct-lane use.

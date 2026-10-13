@@ -235,6 +235,10 @@ struct OutputMessagePolicy {
     deduplication_ttl_ms: Option<i64>,
     deduplication_group: Option<String>,
     max_bytes_per_exec: usize,
+    /// For a connected NATS output: the server payload ceiling (after the relay
+    /// header). When set, the oversized policy compares the payload against this
+    /// real server limit instead of the RESP-framed `max_bytes_per_exec`.
+    nats_payload_ceiling: Option<usize>,
     oversized_policy: OversizedMessagePolicy,
 }
 

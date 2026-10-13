@@ -787,6 +787,7 @@ fn truncate_preserves_payload_prefix_and_exact_exec_byte_target() {
             deduplication_ttl_ms: None,
             deduplication_group: None,
             max_bytes_per_exec: max_bytes,
+            nats_payload_ceiling: None,
             oversized_policy: OversizedMessagePolicy::Truncate,
         },
         InboundMessage {
@@ -825,6 +826,7 @@ fn truncate_drops_when_even_an_empty_publish_frame_exceeds_the_target() {
                 deduplication_ttl_ms: None,
                 deduplication_group: None,
                 max_bytes_per_exec: max_bytes,
+                nats_payload_ceiling: None,
                 oversized_policy: OversizedMessagePolicy::Truncate,
             },
             InboundMessage {
@@ -860,6 +862,7 @@ fn direct_truncation_uses_publishes_frame_without_transaction_wrappers() {
             deduplication_ttl_ms: None,
             deduplication_group: None,
             max_bytes_per_exec: max_bytes,
+            nats_payload_ceiling: None,
             oversized_policy: OversizedMessagePolicy::Truncate,
         },
         InboundMessage {
@@ -896,6 +899,7 @@ fn drop_policy_skips_one_oversized_message_and_counts_it() {
                 deduplication_ttl_ms: None,
                 deduplication_group: None,
                 max_bytes_per_exec: 1,
+                nats_payload_ceiling: None,
                 oversized_policy: OversizedMessagePolicy::Drop,
             },
             InboundMessage {
@@ -931,4 +935,115 @@ fn output_batch_is_deterministic_and_retains_one_payload_per_channel() {
     assert_eq!(batch.len(), 2);
     assert_eq!(batch[0].output_channel, "replica:a");
     assert_eq!(batch[1].payload.as_ref(), [0, 255]);
+}
+
+/// A connected NATS output has a hard server payload ceiling (no RESP framing),
+/// so the oversized policy acts against that real limit: `truncate` actually
+/// truncates to the ceiling, and the RESP-based `max_bytes_per_exec` is
+/// irrelevant once the ceiling is known. Regression for the bug where a
+/// `truncate` config with the default 4 MiB target silently dropped messages
+/// that exceeded a smaller server limit.
+#[test]
+fn nats_payload_ceiling_drives_the_oversized_policy() {
+    let metrics = Metrics::new();
+    let output_metrics = metrics.register_output("nats-ceiling-output");
+    let payload = vec![7u8; 100];
+    metrics.record_output_input(&output_metrics, payload.len(), payload.len());
+    let mut policy_log = OversizedPolicyLog::default();
+
+    // Ceiling of 64 bytes with a huge max_bytes_per_exec: the payload must be
+    // truncated to 64, not left at 100 and rejected at publish time.
+    let prepared = prepare_for_test(
+        "nats-ceiling-output",
+        OutputMessagePolicy {
+            interval_ms: 0,
+            deduplication_ttl_ms: None,
+            deduplication_group: None,
+            max_bytes_per_exec: 4 * 1024 * 1024,
+            nats_payload_ceiling: Some(64),
+            oversized_policy: OversizedMessagePolicy::Truncate,
+        },
+        InboundMessage {
+            output_channel: "events.data".to_owned(),
+            payload: payload.clone().into(),
+        },
+        &metrics,
+        &output_metrics,
+        &mut policy_log,
+    )
+    .expect("truncate keeps the message");
+
+    assert_eq!(prepared.payload.len(), 64);
+    assert_eq!(prepared.raw_payload().len(), 100);
+    let output = &metrics.snapshot().outputs["nats-ceiling-output"];
+    assert_eq!(output.truncated_messages_total, 1);
+    assert_eq!(output.truncated_payload_bytes_total, 36);
+}
+
+/// With `drop`, a payload above the NATS ceiling is dropped here instead of
+/// reaching the publish path; the RESP target must not decide this.
+#[test]
+fn nats_payload_ceiling_drops_for_the_drop_policy() {
+    let metrics = Metrics::new();
+    let output_metrics = metrics.register_output("nats-drop-output");
+    let payload = vec![7u8; 100];
+    metrics.record_output_input(&output_metrics, payload.len(), payload.len());
+    let mut policy_log = OversizedPolicyLog::default();
+
+    let prepared = prepare_for_test(
+        "nats-drop-output",
+        OutputMessagePolicy {
+            interval_ms: 0,
+            deduplication_ttl_ms: None,
+            deduplication_group: None,
+            max_bytes_per_exec: 4 * 1024 * 1024,
+            nats_payload_ceiling: Some(64),
+            oversized_policy: OversizedMessagePolicy::Drop,
+        },
+        InboundMessage {
+            output_channel: "events.data".to_owned(),
+            payload: payload.into(),
+        },
+        &metrics,
+        &output_metrics,
+        &mut policy_log,
+    );
+
+    assert!(prepared.is_none());
+    let output = &metrics.snapshot().outputs["nats-drop-output"];
+    assert_eq!(output.dropped_messages_total, 1);
+    assert_eq!(output.dropped_payload_bytes_total, 100);
+}
+
+/// A payload within the NATS ceiling is untouched by any policy.
+#[test]
+fn payload_within_the_nats_ceiling_is_untouched() {
+    let metrics = Metrics::new();
+    let output_metrics = metrics.register_output("nats-fit-output");
+    let payload = vec![7u8; 32];
+    metrics.record_output_input(&output_metrics, payload.len(), payload.len());
+    let mut policy_log = OversizedPolicyLog::default();
+
+    let prepared = prepare_for_test(
+        "nats-fit-output",
+        OutputMessagePolicy {
+            interval_ms: 0,
+            deduplication_ttl_ms: None,
+            deduplication_group: None,
+            max_bytes_per_exec: 4 * 1024 * 1024,
+            nats_payload_ceiling: Some(64),
+            oversized_policy: OversizedMessagePolicy::Drop,
+        },
+        InboundMessage {
+            output_channel: "events.data".to_owned(),
+            payload: payload.clone().into(),
+        },
+        &metrics,
+        &output_metrics,
+        &mut policy_log,
+    )
+    .expect("a payload within the ceiling is kept");
+
+    assert_eq!(prepared.payload.as_ref(), payload.as_slice());
+    assert!(prepared.raw_payload.is_none());
 }

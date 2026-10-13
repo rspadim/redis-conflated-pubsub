@@ -216,6 +216,7 @@ fn enqueue_for_test_with_cache_at(
             deduplication_ttl_ms: None,
             deduplication_group: None,
             max_bytes_per_exec: 4 * 1024 * 1024,
+            nats_payload_ceiling: None,
             oversized_policy: OversizedMessagePolicy::Send,
         },
     );
