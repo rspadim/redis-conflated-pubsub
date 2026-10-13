@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::{env, fs, path::PathBuf, time::Duration};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use redis::{Client, ConnectionInfo};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -9,6 +9,11 @@ use url::Url;
 
 mod schema;
 mod validate;
+
+// Frozen validation helper for the NATS adapter workstreams; not yet called
+// outside `--check-config`.
+#[allow(unused_imports)]
+pub(crate) use validate::validate_nats_subject;
 
 pub const MAX_RUNTIME_DURATION_MS: i64 = 31_536_000_000;
 pub const MAX_DEDUPLICATION_GROUP_MEMBERS: usize = 100_000;
@@ -150,6 +155,55 @@ pub fn same_pubsub_server(left: &RedisConfig, right: &RedisConfig) -> bool {
     left.host.eq_ignore_ascii_case(&right.host) && left.port == right.port && left.tls == right.tls
 }
 
+/// A single selected backend for an input or output.
+///
+/// The JSON keeps the Redis-compatible shape: exactly one of the keys `redis`
+/// or `nats` is present on `input` and on each output. This enum is the runtime
+/// view resolved from those keys rather than the serde representation, because a
+/// literal untagged enum silently accepts the "both keys" case and cannot report
+/// the "no backend" case with a useful message. See `InputConfig::endpoint` and
+/// `OutputConfig::endpoint`.
+#[derive(Clone, Copy, Debug)]
+pub enum Endpoint<'a> {
+    Redis(&'a RedisConfig),
+    Nats(&'a NatsConfig),
+}
+
+impl<'a> Endpoint<'a> {
+    /// Borrows the Redis settings, or `None` when NATS is selected.
+    pub fn as_redis(self) -> Option<&'a RedisConfig> {
+        match self {
+            Endpoint::Redis(redis) => Some(redis),
+            Endpoint::Nats(_) => None,
+        }
+    }
+
+    /// Borrows the NATS settings, or `None` when Redis is selected.
+    pub fn as_nats(self) -> Option<&'a NatsConfig> {
+        match self {
+            Endpoint::Nats(nats) => Some(nats),
+            Endpoint::Redis(_) => None,
+        }
+    }
+}
+
+/// Resolves the exactly-one-backend selection shared by `input` and outputs.
+/// `path` is the JSON path used in the error message.
+pub(crate) fn select_endpoint<'a>(
+    path: &str,
+    redis: Option<&'a RedisConfig>,
+    nats: Option<&'a NatsConfig>,
+) -> Result<Endpoint<'a>> {
+    match (redis, nats) {
+        (Some(redis), None) => Ok(Endpoint::Redis(redis)),
+        (None, Some(nats)) => Ok(Endpoint::Nats(nats)),
+        (Some(_), Some(_)) => bail!(
+            "{path} must select exactly one backend, but both `redis` and `nats` are configured"
+        ),
+        (None, None) => bail!("{path} must select one backend with `redis` or `nats`"),
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum FilterAction {
@@ -182,7 +236,13 @@ pub struct ChannelFilterRule {
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InputConfig {
-    pub redis: RedisConfig,
+    /// Redis backend. Exactly one of `redis`/`nats` must be present; `redis`
+    /// keeps its 0.2 fields and semantics unchanged.
+    #[serde(default)]
+    pub redis: Option<RedisConfig>,
+    /// Core NATS backend; not implemented by the runtime yet.
+    #[serde(default)]
+    pub nats: Option<NatsConfig>,
     #[schemars(length(min = 1))]
     pub subscriptions: Vec<Subscription>,
     #[serde(default)]
@@ -199,6 +259,14 @@ pub struct InputConfig {
     pub exclude_output_echoes: bool,
     #[serde(default = "default_exclude_sentinel_pubsub")]
     pub exclude_sentinel_pubsub: bool,
+}
+
+impl InputConfig {
+    /// Resolves the single configured backend, rejecting zero or two. `path`
+    /// names the JSON location for error messages.
+    pub fn endpoint(&self, path: &str) -> Result<Endpoint<'_>> {
+        select_endpoint(path, self.redis.as_ref(), self.nats.as_ref())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
@@ -220,6 +288,18 @@ pub enum Subscription {
         #[serde(default)]
         output_suffix: String,
     },
+    /// Native Core NATS subscription. `*` matches one token and `>` matches one
+    /// or more trailing tokens; these use NATS semantics and are not translated
+    /// from Redis globs.
+    #[serde(rename = "nats_subject")]
+    NatsSubject {
+        #[schemars(length(min = 1))]
+        subject: String,
+        #[serde(default)]
+        output_prefix: String,
+        #[serde(default)]
+        output_suffix: String,
+    },
 }
 
 impl Subscription {
@@ -234,6 +314,11 @@ impl Subscription {
                 output_prefix,
                 output_suffix,
                 ..
+            }
+            | Self::NatsSubject {
+                output_prefix,
+                output_suffix,
+                ..
             } => (output_prefix.as_str(), output_suffix.as_str()),
         }
     }
@@ -242,7 +327,12 @@ impl Subscription {
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OutputConfig {
-    pub redis: RedisConfig,
+    /// Redis backend. Exactly one of `redis`/`nats` must be present.
+    #[serde(default)]
+    pub redis: Option<RedisConfig>,
+    /// Core NATS backend; not implemented by the runtime yet.
+    #[serde(default)]
+    pub nats: Option<NatsConfig>,
     #[serde(default)]
     pub channel_prefix: String,
     #[serde(default)]
@@ -288,6 +378,22 @@ pub struct OutputConfig {
     #[serde(default, alias = "default_filter")]
     #[schemars(default)]
     pub filter_default: FilterAction,
+}
+
+impl OutputConfig {
+    /// Resolves the single configured backend, rejecting zero or two. `path`
+    /// names the JSON location for error messages.
+    pub fn endpoint(&self, path: &str) -> Result<Endpoint<'_>> {
+        select_endpoint(path, self.redis.as_ref(), self.nats.as_ref())
+    }
+
+    /// Redis settings for the runtime publish path, which is only reached after
+    /// the endpoint selection has resolved to Redis.
+    pub(crate) fn redis_endpoint(&self) -> &RedisConfig {
+        self.redis
+            .as_ref()
+            .expect("runtime publish path requires a Redis output endpoint")
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
@@ -572,6 +678,97 @@ impl RedisConfig {
     }
 }
 
+/// Core NATS backend settings.
+///
+/// The `servers` list holds one or more seed URLs; the URL scheme selects the
+/// transport (`nats://`, `tls://`, `ws://`, `wss://`). No NATS I/O is wired into
+/// the runtime yet, so this type is parsed and validated but not connected.
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NatsConfig {
+    /// One or more NATS server URLs used as cluster seeds.
+    #[schemars(length(min = 1))]
+    pub servers: Vec<String>,
+    /// Optional connection name reported in NATS server `CONNZ` listings.
+    #[serde(default)]
+    #[schemars(length(min = 1))]
+    pub name: Option<String>,
+    /// Optional connect timeout in milliseconds.
+    #[serde(default = "default_nats_connect_timeout_ms")]
+    #[schemars(range(min = 1))]
+    pub connect_timeout_ms: u64,
+    /// When true, only the configured `servers` are used and servers advertised
+    /// by the cluster are ignored. Useful behind proxies or WebSocket ingress.
+    /// Consumed by the NATS adapter workstream.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub ignore_discovered_servers: bool,
+    /// Authentication method; defaults to none.
+    #[serde(default)]
+    pub auth: NatsAuth,
+    /// Optional TLS transport settings (trusted roots and client identity).
+    #[serde(default)]
+    #[schemars(default)]
+    pub tls: Option<NatsTlsConfig>,
+}
+
+impl NatsConfig {
+    pub fn connect_timeout(&self) -> Duration {
+        Duration::from_millis(self.connect_timeout_ms)
+    }
+}
+
+/// Secret reference for NATS authentication. Secrets are always referenced by
+/// environment variable name or file path; values are never read from JSON.
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum NatsAuth {
+    /// No authentication (development only).
+    #[default]
+    None,
+    /// Username plus a password read from `password_env`.
+    UserPassword {
+        #[schemars(length(min = 1))]
+        username: String,
+        #[schemars(length(min = 1))]
+        password_env: String,
+    },
+    /// Token read from `token_env`.
+    Token {
+        #[schemars(length(min = 1))]
+        token_env: String,
+    },
+    /// NKey seed read from `seed_file`.
+    Nkey {
+        #[schemars(length(min = 1))]
+        seed_file: PathBuf,
+    },
+    /// NATS credentials file (user JWT plus its NKey seed) at `path`.
+    CredentialsFile {
+        #[schemars(length(min = 1))]
+        path: PathBuf,
+    },
+}
+
+/// Optional NATS TLS settings. The server URL scheme selects TLS; these fields
+/// extend it with a custom trusted root and/or a client identity for mTLS.
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NatsTlsConfig {
+    /// Additional trusted root certificate file.
+    #[serde(default)]
+    #[schemars(length(min = 1))]
+    pub root_cert_file: Option<PathBuf>,
+    /// Client certificate file for mTLS; requires `client_key_file`.
+    #[serde(default)]
+    #[schemars(length(min = 1))]
+    pub client_cert_file: Option<PathBuf>,
+    /// Client private key file for mTLS; requires `client_cert_file`.
+    #[serde(default)]
+    #[schemars(length(min = 1))]
+    pub client_key_file: Option<PathBuf>,
+}
+
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ConflationConfig {
@@ -736,6 +933,10 @@ fn default_port() -> u16 {
 }
 
 fn default_connect_timeout_ms() -> u64 {
+    5000
+}
+
+fn default_nats_connect_timeout_ms() -> u64 {
     5000
 }
 

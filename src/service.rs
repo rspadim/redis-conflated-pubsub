@@ -16,6 +16,7 @@ use crate::{
     status::{self, Metrics, OutputMetrics},
 };
 
+mod backend;
 mod batch;
 mod channel_cache;
 mod dedup;
@@ -257,9 +258,17 @@ pub async fn run(
     let _ = config_path;
     metrics.clear_channel_cache_inspectors();
     let input_client_name = config.client_name_for("i");
+    // Redis is the only backend wired into the runtime so far; selecting NATS
+    // parses and validates but stops here with a clear message until the NATS
+    // adapter workstream lands. The relay processing below stays backend-agnostic.
+    let input_redis = config
+        .input
+        .redis
+        .as_ref()
+        .ok_or_else(|| anyhow!("NATS backend not implemented yet for `input`"))?;
     let input_client = match &input_client_name {
-        Some(lib_name) => config.input.redis.client_with_lib_name(lib_name)?,
-        None => config.input.redis.client()?,
+        Some(lib_name) => input_redis.client_with_lib_name(lib_name)?,
+        None => input_redis.client()?,
     };
     let filters_endpoint_enabled = config
         .status
@@ -297,9 +306,13 @@ pub async fn run(
                 filters_endpoint_enabled.then(|| (&*metrics, format!("outputs.{name}.filters"))),
             )?;
             output_config.filters = Vec::new();
+            let output_redis = output_config
+                .redis
+                .as_ref()
+                .ok_or_else(|| anyhow!("NATS backend not implemented yet for `outputs.{name}`"))?;
             let client = match &client_name {
-                Some(lib_name) => output_config.redis.client_with_lib_name(lib_name)?,
-                None => output_config.redis.client()?,
+                Some(lib_name) => output_redis.client_with_lib_name(lib_name)?,
+                None => output_redis.client()?,
             };
             Ok((
                 name.clone(),

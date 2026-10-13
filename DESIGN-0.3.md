@@ -112,6 +112,32 @@ Redis remains implemented using redis-rs. Use the official Rust `async-nats` cli
 
 0. **Load harness plan:** decide the workload generator, metrics collection, and pass/fail gates before writing the adapters, so throughput is designed in rather than bolted on.
 1. **Protocol-neutral config and types:** preserve old Redis JSON, add the exactly-one-backend validation/schema rules, normalize addresses and subscription identity, and add unit tests.
+
+   **Shipped (foundation, 0.3 step 1).** Backend selection is expressed with two optional keys, `redis` and `nats`, on `input` and on each output; existing Redis JSON is unchanged because no discriminator is added.
+
+   ```json
+   // before (0.2, still valid) and after (0.3) are byte-identical for Redis:
+   "input": { "redis": { "host": "localhost" }, "subscriptions": [ ... ] }
+
+   // new NATS selection:
+   "input": {
+     "nats": {
+       "servers": ["nats://localhost:4222", "nats://other:4222"],
+       "name": "relay",
+       "connect_timeout_ms": 5000,
+       "ignore_discovered_servers": false,
+       "auth": { "type": "user_password", "username": "relay", "password_env": "NATS_PASSWORD" },
+       "tls": { "root_cert_file": "/run/secrets/ca.pem" }
+     },
+     "subscriptions": [ { "type": "nats_subject", "subject": "prices.>" } ]
+   }
+   ```
+
+   *Representation chosen.* `InputConfig`/`OutputConfig` keep `redis: Option<RedisConfig>` and `nats: Option<NatsConfig>` side by side, and a `config::Endpoint<'a>` enum (`Redis`/`Nats`) is the resolved runtime view via `InputConfig::endpoint(path)`/`OutputConfig::endpoint(path)`. Serialization/deserialization stays on the two optional keys so 0.2 files parse verbatim. `--check-config` and the `input.endpoint(path)`/`output.endpoint(path)` accessors reject zero or two backends with a path-qualified message. The generated JSON Schema adds `allOf: [{ oneOf: [{ required: ["redis"] }, { required: ["nats"] }] }]` to `InputConfig` and `OutputConfig` (appended to `OutputConfig`'s existing channel-policy `allOf`), so a schema validator enforces the same constraint.
+
+   A literal `#[serde(untagged)]` enum over `{redis: ...}`/`{nats: ...}` variants was rejected as the serde shape because a struct with two `Option` fields only errors when *both* keys are present if the variants are not `deny_unknown_fields`; the two-optional-key struct plus explicit resolution gives a clear error for both the zero and the two cases, and keeps the error message referencing the JSON path. Rust field access must now go through the endpoint accessors rather than a hard `redis` field.
+
+   Also shipped: `Subscription::NatsSubject { subject, output_prefix, output_suffix }` with native `*`/`>` semantics (`nats_subject` JSON tag), `validate_nats_subject` (rejects empty, whitespace, empty tokens, partial `*`/`>` tokens, and a non-final `>`), cross-checks that Redis subscriptions require a Redis input and NATS subjects require a NATS input, and NATS endpoint validation for `servers`, timeout, auth variants, and paired mTLS client cert/key. A new backend boundary module (`src/service/backend.rs`) defines the normalized `InputEnvelope { source_address, payload, subscription_identity }` and the `InputSource`/`OutputSink` traits, but the running Redis path is not rewired onto them yet, so the traits are `#[allow(dead_code)]` until the adapters land. Selecting any NATS endpoint fails fast at startup with `NATS backend not implemented yet ...`. Redis behavior, defaults, and byte-for-byte subscription matching are unchanged; the suite is 137 passed / 8 ignored (130 existing plus 7 new).
 2. **NATS input:** connect to seed URLs, subscribe using native subject syntax, fan in subscription streams, and test exact/wildcard and overlapping-subscription mapping.
 3. **NATS output:** share the existing queue/policy worker where possible; implement ordered publish/flush chunks, payload-limit handling, backend-accurate metrics, and explicit reconnect/error settlement.
 4. **Loop safety and lifecycle:** design output-echo prevention, connection-event metrics, reload/shutdown behavior, and initial-connect/reconnect policy.

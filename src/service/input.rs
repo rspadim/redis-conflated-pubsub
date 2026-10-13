@@ -7,10 +7,7 @@ use tokio::time;
 use tracing::{debug, info, warn};
 
 use crate::{
-    config::{
-        InputConfig, OutputConfig, QueueOverflowPolicy, RedisConfig, Subscription,
-        same_pubsub_server,
-    },
+    config::{InputConfig, OutputConfig, QueueOverflowPolicy, RedisConfig, Subscription},
     status::Metrics,
 };
 
@@ -35,9 +32,18 @@ pub(super) fn output_echo_filters(
     input: &InputConfig,
     outputs: &std::collections::BTreeMap<String, OutputConfig>,
 ) -> Vec<OutputChannelFilter> {
+    // Echo filters only apply when the input is Redis and an output shares that
+    // Redis server; a NATS endpoint never produces Redis Pub/Sub echoes.
+    let Some(input_redis) = input.redis.as_ref() else {
+        return Vec::new();
+    };
     outputs
         .values()
-        .filter(|output| same_pubsub_server(&input.redis, &output.redis))
+        .filter(|output| {
+            output.redis.as_ref().is_some_and(|output_redis| {
+                crate::config::same_pubsub_server(input_redis, output_redis)
+            })
+        })
         .flat_map(|output| {
             input.subscriptions.iter().map(|subscription| {
                 let (subscription_prefix, subscription_suffix) = subscription.output_mapping();
@@ -106,10 +112,16 @@ pub(super) async fn read_input(
         [subscription] => Some(subscription),
         _ => None,
     };
+    // The runtime only reaches here through the Redis path; the caller resolves
+    // string selectors to compiled form and keeps `config.redis` present.
+    let redis_config = config
+        .redis
+        .as_ref()
+        .expect("read_input requires a Redis input endpoint");
     loop {
         match connect_input(
             &client,
-            &config.redis,
+            redis_config,
             &config.subscriptions,
             input_client_name.as_deref(),
         )
@@ -319,6 +331,9 @@ pub(super) fn single_subscription_match<'a>(
             ..
         } => (!from_pattern && configured == channel).then_some(subscription),
         Subscription::Psubscribe { .. } => from_pattern.then_some(subscription),
+        // A NATS subscription is matched by its own dedicated adapter using the
+        // backend-native subject identity, not by the Redis channel/pattern path.
+        Subscription::NatsSubject { .. } => None,
     }
 }
 
@@ -389,6 +404,9 @@ pub(super) async fn connect_input(
                 )
                 .await
                 .context("timed out subscribing to input pattern")??;
+            }
+            Subscription::NatsSubject { .. } => {
+                anyhow::bail!("NATS backend not implemented yet for an input subscription");
             }
         }
     }

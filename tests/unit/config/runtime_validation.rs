@@ -189,7 +189,7 @@ fn configured_runtime_durations_are_limited_to_avoid_instant_overflow() {
         .unwrap()
         .deduplication
         .ttl_ms = 5000;
-    config.input.redis.connect_timeout_ms = MAX_RUNTIME_DURATION_MS as u64 + 1;
+    config.input.redis.as_mut().unwrap().connect_timeout_ms = MAX_RUNTIME_DURATION_MS as u64 + 1;
     assert!(
         config
             .validate()
@@ -197,7 +197,7 @@ fn configured_runtime_durations_are_limited_to_avoid_instant_overflow() {
             .to_string()
             .contains("connect_timeout_ms")
     );
-    config.input.redis.connect_timeout_ms = 5000;
+    config.input.redis.as_mut().unwrap().connect_timeout_ms = 5000;
     config.status.path = Some(PathBuf::from("status.json"));
     config.status.update_interval_ms = MAX_RUNTIME_DURATION_MS as u64 + 1;
     assert!(

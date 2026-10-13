@@ -130,6 +130,29 @@ pub(super) fn json_schema() -> serde_json::Value {
     }
     schema["$defs"]["RedisConfig"]["properties"]["connect_timeout_ms"]["maximum"] =
         serde_json::json!(MAX_RUNTIME_DURATION_MS as u64);
+    schema["$defs"]["NatsConfig"]["properties"]["connect_timeout_ms"]["maximum"] =
+        serde_json::json!(MAX_RUNTIME_DURATION_MS as u64);
+    // Express the exactly-one-backend rule for input and each output. `oneOf`
+    // requires at least one key and forbids both at once. OutputConfig already
+    // uses `allOf` for the channel-policy rule, so append rather than replace.
+    for definition in ["InputConfig", "OutputConfig"] {
+        let rule = serde_json::json!({
+            "oneOf": [
+                {"required": ["redis"]},
+                {"required": ["nats"]}
+            ]
+        });
+        match schema["$defs"][definition]["allOf"].as_array_mut() {
+            Some(rules) => rules.push(rule),
+            None => schema["$defs"][definition]["allOf"] = serde_json::json!([rule]),
+        }
+    }
+    schema["$defs"]["NatsConfig"]["description"] = serde_json::json!(
+        "Core NATS backend. One or more `servers` seed URLs; the URL scheme selects nats://, tls://, ws://, or wss://. Secrets are referenced by environment variable name or file path, never inline. Not connected by the runtime yet."
+    );
+    schema["$defs"]["NatsAuth"]["description"] = serde_json::json!(
+        "NATS authentication. Tagged by `type`: `none` (default), `user_password` (username + password_env), `token` (token_env), `nkey` (seed_file), or `credentials_file` (path)."
+    );
     schema["$defs"]["StatusConfig"]["properties"]["update_interval_ms"]["maximum"] =
         serde_json::json!(MAX_RUNTIME_DURATION_MS as u64);
     schema["$defs"]["DeduplicationGroup"]["properties"]["max_members"]["maximum"] =

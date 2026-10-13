@@ -191,7 +191,7 @@ pub(super) async fn ensure_output_connection(
         return Ok(());
     }
     let mut connected = match time::timeout(
-        config.redis.connect_timeout(),
+        config.redis_endpoint().connect_timeout(),
         client.get_multiplexed_async_connection(),
     )
     .await
@@ -245,7 +245,7 @@ async fn publish_on_connection(
             "output publish batch is empty".to_owned(),
         ));
     }
-    let result = time::timeout(config.redis.connect_timeout(), async {
+    let result = time::timeout(config.redis_endpoint().connect_timeout(), async {
         if atomic {
             let mut pipeline = redis::pipe();
             pipeline.atomic();

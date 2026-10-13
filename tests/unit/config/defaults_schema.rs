@@ -6,8 +6,8 @@ fn example_config_uses_one_input_and_named_outputs() {
         serde_json::from_str(include_str!("../../../config.example.json")).unwrap();
     config.validate().unwrap();
 
-    assert_eq!(config.input.redis.host, "localhost");
-    assert_eq!(config.input.redis.database, 0);
+    assert_eq!(config.input.redis.as_ref().unwrap().host, "localhost");
+    assert_eq!(config.input.redis.as_ref().unwrap().database, 0);
     assert_eq!(
         config.input.filter_cache_max_entries,
         DEFAULT_CHANNEL_CACHE_MAX_ENTRIES
@@ -22,8 +22,8 @@ fn example_config_uses_one_input_and_named_outputs() {
             if pattern == "*" && output_prefix.is_empty() && output_suffix.is_empty()
     ));
     assert_eq!(config.outputs.len(), 2);
-    assert_eq!(config.outputs["output0"].redis.host, "localhost");
-    assert_eq!(config.outputs["output0"].redis.database, 0);
+    assert_eq!(config.outputs["output0"].redis_endpoint().host, "localhost");
+    assert_eq!(config.outputs["output0"].redis_endpoint().database, 0);
     assert!(config.outputs["output0"].deduplication_groups.is_empty());
     assert!(config.outputs["output0"].profiles.is_empty());
     assert!(config.outputs["output0"].channel_policies.is_empty());
@@ -61,8 +61,8 @@ fn example_config_uses_one_input_and_named_outputs() {
         None
     );
     assert_eq!(config.outputs["output0"].channel_prefix, "db0:");
-    assert_eq!(config.outputs["output1"].redis.host, "localhost");
-    assert_eq!(config.outputs["output1"].redis.database, 1);
+    assert_eq!(config.outputs["output1"].redis_endpoint().host, "localhost");
+    assert_eq!(config.outputs["output1"].redis_endpoint().database, 1);
     assert_eq!(config.outputs["output1"].conflation.interval_ms, 250);
     assert_eq!(
         config.outputs["output1"].conflation.max_commands_per_exec,

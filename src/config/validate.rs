@@ -1,15 +1,17 @@
 use anyhow::{Result, bail};
 
 use super::{
-    AppConfig, ChannelFilterRule, ChannelOverrides, MAX_CHANNEL_CACHE_MAX_ENTRIES,
+    AppConfig, ChannelFilterRule, ChannelOverrides, Endpoint, MAX_CHANNEL_CACHE_MAX_ENTRIES,
     MAX_CLIENT_NAME_TEMPLATE_LEN, MAX_DEDUPLICATION_CACHE_BYTES, MAX_DEDUPLICATION_CACHE_ENTRIES,
     MAX_DEDUPLICATION_GROUP_CACHE_BYTES, MAX_DEDUPLICATION_GROUP_MEMBERS, MAX_RUNTIME_DURATION_MS,
-    OutputConfig, QueueOverflowPolicy, RedisConfig, Subscription, same_pubsub_server,
+    NatsAuth, NatsConfig, OutputConfig, QueueOverflowPolicy, RedisConfig, Subscription,
+    same_pubsub_server,
 };
 
 pub(super) fn validate(config: &AppConfig) -> Result<()> {
     validate_status_and_input(config)?;
     validate_client_name(config)?;
+    validate_subscriptions(config)?;
     validate_redis_and_outputs(config)?;
     if config.logging.retention_days == 0 || config.logging.max_total_size_mb == 0 {
         bail!("logging retention and size limits must be greater than zero");
@@ -77,7 +79,7 @@ fn validate_status_and_input(config: &AppConfig) -> Result<()> {
 }
 
 fn validate_redis_and_outputs(config: &AppConfig) -> Result<()> {
-    validate_redis(&config.input.redis)?;
+    validate_endpoint("input", &config.input.endpoint("input")?)?;
     for (name, output) in &config.outputs {
         if name.trim().is_empty() {
             bail!("output names must not be empty");
@@ -90,7 +92,8 @@ fn validate_redis_and_outputs(config: &AppConfig) -> Result<()> {
             &format!("outputs.{name}.channel_policy_cache_max_entries"),
             output.channel_policy_cache_max_entries,
         )?;
-        validate_redis(&output.redis)?;
+        let path = format!("outputs.{name}");
+        validate_endpoint(&path, &output.endpoint(&path)?)?;
         if output.conflation.max_commands_per_exec == 0 {
             bail!("outputs.{name}.conflation.max_commands_per_exec must be greater than zero");
         }
@@ -336,19 +339,19 @@ fn validate_channel_overrides(
 }
 
 fn validate_echo_loop_guard(config: &AppConfig) -> Result<()> {
+    // Echo loops are a Redis-input concern: NATS uses no_echo/loop guards that
+    // the adapter workstream will own, and a NATS input has no Redis echoes.
+    let Some(input_redis) = config.input.endpoint("input")?.as_redis() else {
+        return Ok(());
+    };
     for subscription in &config.input.subscriptions {
-        match subscription {
-            Subscription::Subscribe { channel, .. } if channel.is_empty() => {
-                bail!("SUBSCRIBE channels must not be empty");
-            }
-            Subscription::Psubscribe { pattern, .. } if pattern.is_empty() => {
-                bail!("PSUBSCRIBE patterns must not be empty");
-            }
-            _ => {}
-        }
         let (subscription_prefix, subscription_suffix) = subscription.output_mapping();
         for (name, output) in &config.outputs {
-            if same_pubsub_server(&config.input.redis, &output.redis)
+            let same_server = output
+                .endpoint(&format!("outputs.{name}"))?
+                .as_redis()
+                .is_some_and(|output_redis| same_pubsub_server(input_redis, output_redis));
+            if same_server
                 && config.input.exclude_output_echoes
                 && output.channel_prefix.is_empty()
                 && subscription_prefix.is_empty()
@@ -364,18 +367,167 @@ fn validate_echo_loop_guard(config: &AppConfig) -> Result<()> {
     Ok(())
 }
 
-fn validate_redis(redis: &RedisConfig) -> Result<()> {
+/// Validates every subscription's source identity against the selected input
+/// backend: Redis subscriptions keep their existing non-empty checks, while NATS
+/// subjects must be valid concrete or wildcard subjects.
+fn validate_subscriptions(config: &AppConfig) -> Result<()> {
+    let (redis_selected, nats_selected) = match config.input.endpoint("input")? {
+        Endpoint::Redis(_) => (true, false),
+        Endpoint::Nats(_) => (false, true),
+    };
+    for (index, subscription) in config.input.subscriptions.iter().enumerate() {
+        match subscription {
+            Subscription::Subscribe { channel, .. } => {
+                if redis_selected && channel.is_empty() {
+                    bail!("input.subscriptions[{index}] SUBSCRIBE channels must not be empty");
+                }
+                if nats_selected {
+                    bail!(
+                        "input.subscriptions[{index}] uses a Redis SUBSCRIBE subscription, which requires a `redis` input"
+                    );
+                }
+            }
+            Subscription::Psubscribe { pattern, .. } => {
+                if redis_selected && pattern.is_empty() {
+                    bail!("input.subscriptions[{index}] PSUBSCRIBE patterns must not be empty");
+                }
+                if nats_selected {
+                    bail!(
+                        "input.subscriptions[{index}] uses a Redis PSUBSCRIBE subscription, which requires a `redis` input"
+                    );
+                }
+            }
+            Subscription::NatsSubject { subject, .. } => {
+                if redis_selected {
+                    bail!(
+                        "input.subscriptions[{index}] uses a NATS subject subscription, which requires a `nats` input"
+                    );
+                }
+                validate_nats_subject(&format!("input.subscriptions[{index}].subject"), subject)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validates a NATS subject filter. Prefer importing `validate_nats_subject`
+/// directly in the adapter workstreams; it is `pub(crate)` for that reason.
+pub(crate) fn validate_nats_subject(path: &str, subject: &str) -> Result<()> {
+    if subject.is_empty() {
+        bail!("{path} must not be empty");
+    }
+    if subject.chars().any(char::is_whitespace) {
+        bail!("{path} must not contain whitespace");
+    }
+    let tokens = subject.split('.').collect::<Vec<_>>();
+    for (index, token) in tokens.iter().enumerate() {
+        let is_last = index + 1 == tokens.len();
+        if token.is_empty() {
+            bail!("{path} must not contain empty tokens");
+        }
+        if token.contains('*') && *token != "*" {
+            bail!("{path} may only use `*` as a full token");
+        }
+        if token.contains('>') {
+            if *token != ">" {
+                bail!("{path} may only use `>` as a full token");
+            }
+            if !is_last {
+                bail!("{path} `>` must be the final token");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_endpoint(path: &str, endpoint: &Endpoint<'_>) -> Result<()> {
+    if let Some(redis) = endpoint.as_redis() {
+        return validate_redis(path, redis);
+    }
+    let nats = endpoint
+        .as_nats()
+        .expect("an endpoint is either Redis or NATS");
+    validate_nats(path, nats)
+}
+
+fn validate_redis(path: &str, redis: &RedisConfig) -> Result<()> {
     if redis.database < 0 {
-        bail!("Redis database IDs must not be negative");
+        bail!("{path}.database must not be negative");
     }
     if redis.host.is_empty() {
-        bail!("Redis hosts must not be empty");
+        bail!("{path}.host must not be empty");
     }
     if redis.connect_timeout_ms == 0 {
-        bail!("Redis connect_timeout_ms must be greater than zero");
+        bail!("{path}.connect_timeout_ms must be greater than zero");
     }
     if redis.connect_timeout_ms > MAX_RUNTIME_DURATION_MS as u64 {
-        bail!("Redis connect_timeout_ms must not exceed {MAX_RUNTIME_DURATION_MS} ms");
+        bail!("{path}.connect_timeout_ms must not exceed {MAX_RUNTIME_DURATION_MS} ms");
+    }
+    Ok(())
+}
+
+fn validate_nats(path: &str, nats: &NatsConfig) -> Result<()> {
+    if nats.servers.is_empty() {
+        bail!("{path}.servers must contain at least one NATS server URL");
+    }
+    for (index, server) in nats.servers.iter().enumerate() {
+        if server.trim().is_empty() {
+            bail!("{path}.servers[{index}] must not be empty");
+        }
+    }
+    if nats.name.as_deref().is_some_and(str::is_empty) {
+        bail!("{path}.name must not be empty");
+    }
+    if nats.connect_timeout().is_zero() {
+        bail!("{path}.connect_timeout_ms must be greater than zero");
+    }
+    if nats.connect_timeout_ms > MAX_RUNTIME_DURATION_MS as u64 {
+        bail!("{path}.connect_timeout_ms must not exceed {MAX_RUNTIME_DURATION_MS} ms");
+    }
+    match &nats.auth {
+        NatsAuth::None => {}
+        NatsAuth::UserPassword {
+            username,
+            password_env,
+        } => {
+            if username.is_empty() {
+                bail!("{path}.auth.username must not be empty");
+            }
+            if password_env.is_empty() {
+                bail!("{path}.auth.password_env must not be empty");
+            }
+        }
+        NatsAuth::Token { token_env } => {
+            if token_env.is_empty() {
+                bail!("{path}.auth.token_env must not be empty");
+            }
+        }
+        NatsAuth::Nkey { seed_file } => {
+            if seed_file.as_os_str().is_empty() {
+                bail!("{path}.auth.seed_file must not be empty");
+            }
+        }
+        NatsAuth::CredentialsFile { path: credentials } => {
+            if credentials.as_os_str().is_empty() {
+                bail!("{path}.auth.path must not be empty");
+            }
+        }
+    }
+    if let Some(tls) = &nats.tls {
+        if tls
+            .root_cert_file
+            .as_ref()
+            .is_some_and(|p| p.as_os_str().is_empty())
+        {
+            bail!("{path}.tls.root_cert_file must not be empty");
+        }
+        let has_cert = tls.client_cert_file.is_some();
+        let has_key = tls.client_key_file.is_some();
+        if has_cert != has_key {
+            bail!(
+                "{path}.tls.client_cert_file and {path}.tls.client_key_file must be configured together"
+            );
+        }
     }
     Ok(())
 }
