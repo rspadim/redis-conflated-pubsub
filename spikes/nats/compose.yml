@@ -1,0 +1,49 @@
+services:
+  certgen:
+    image: alpine:3.22
+    command:
+      - /bin/sh
+      - -ec
+      - apk add --no-cache openssl >/dev/null; exec /bin/sh /spikes/nats/generate-certs.sh
+    volumes:
+      - .:/spikes/nats:ro
+      - ./certs:/certs
+
+  redis:
+    image: redis:7.4-alpine
+    ports:
+      - "16380:6379"
+
+  nats1:
+    image: nats:2.15-alpine
+    command: ["-c", "/etc/nats/nats.conf"]
+    volumes:
+      - ./nats1.conf:/etc/nats/nats.conf:ro
+    ports:
+      - "14222:4222"
+      - "18080:8080"
+      - "18222:8222"
+
+  nats2:
+    image: nats:2.15-alpine
+    command: ["-c", "/etc/nats/nats.conf"]
+    depends_on:
+      certgen:
+        condition: service_completed_successfully
+    volumes:
+      - ./nats2.conf:/etc/nats/nats.conf:ro
+      - ./certs:/etc/nats/certs:ro
+    ports:
+      - "14223:4222"
+      - "18443:8443"
+      - "18223:8222"
+
+  nats3:
+    image: nats:2.15-alpine
+    command: ["-c", "/etc/nats/nats.conf"]
+    volumes:
+      - ./nats3.conf:/etc/nats/nats.conf:ro
+    ports:
+      - "14224:4222"
+      - "18082:8080"
+      - "18224:8222"

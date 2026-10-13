@@ -1,6 +1,6 @@
 # Design
 
-Architecture, runtime behavior, defaults and reference measurements for `redis-conflated-pubsub` 0.2.0. This document describes the current version; see [`../CHANGELOG.md`](../CHANGELOG.md) for change history.
+Architecture, runtime behavior, defaults and reference measurements for `redis-conflated-pubsub` 0.2.0. This document describes the current version; see [`../CHANGELOG.md`](../CHANGELOG.md) for change history. The NATS-backed 0.3 proposal is tracked separately in [`../DESIGN-0.3.md`](../DESIGN-0.3.md).
 
 ## Purpose
 
