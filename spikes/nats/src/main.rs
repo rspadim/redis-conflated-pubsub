@@ -7,6 +7,7 @@ use futures_util::StreamExt;
 use redis::AsyncCommands;
 use tokio::time;
 
+mod echo;
 mod load;
 
 const MESSAGE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -46,6 +47,12 @@ async fn main() -> Result<()> {
         .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes"))
     {
         load::run(&nats).await?;
+        return Ok(());
+    }
+    if std::env::var("NATS_ECHO_PROBE")
+        .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes"))
+    {
+        echo::run(&servers).await?;
         return Ok(());
     }
 

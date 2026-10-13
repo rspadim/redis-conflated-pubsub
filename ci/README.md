@@ -15,6 +15,8 @@ The CI workflow runs on pushes to `main`, pull requests, and manual dispatch. It
   ```
 
 - Validate monitoring with Python 3.13 unit tests, JSON parsing, and Zabbix XML parsing.
+- Lint, Clippy, and build the experiment harnesses under `spikes/` (`experiment-harnesses`): the NATS transport spike and the NATS-vs-Redis comparison harness, each as an independent crate with its own `Cargo.lock`.
+- Run the local NATS authentication matrix (`nats-auth-smoke`) via `spikes/nats/test-auth.sh`: disposable user/password, token, NKey, credentials-file, and mTLS servers in Compose, each checked with an authenticated publish/subscribe round trip. Credentials are random and local; the stack is torn down afterward.
 
 The TTL Compose E2E verifies output-local deduplication groups with shared expiry anchored to rounded start timestamps, both fixed (`restart_on_change: false`) and reset-on-change (`true`) modes, and that only published changes/new members reset a deadline. It exercises profile-based and inline channel rules, one default fallback policy and ordered first-match selection, independent 100/300 ms scheduler intervals, a valid Unix `SIGHUP` config swap, and an invalid-file reload that leaves the active config running. The driver is the `ttl-integration` subcommand of `examples/e2e.rs` (built by `Dockerfile.e2e`), like the other Rust-migrated stacks; the TTL Compose command above is run from the repository root, where `compose.ttl.test.yml` lives. Docker usage is in [`docker/README.md`](../docker/README.md).
 

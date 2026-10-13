@@ -89,6 +89,41 @@ jobs:
         if: always()
         run: docker compose -p redis-conflated-ci-ttl -f compose.ttl.test.yml down --volumes --remove-orphans || true
 
+  experiment-harnesses:
+    name: Experiment harnesses (spikes)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          components: clippy, rustfmt
+      - name: Lint and build NATS spike
+        working-directory: spikes/nats
+        run: |
+          cargo fmt --manifest-path Cargo.toml -- --check
+          cargo clippy --all-targets --locked --manifest-path Cargo.toml -- -D warnings
+          cargo build --locked --manifest-path Cargo.toml
+      - name: Lint and build transport comparison harness
+        working-directory: spikes/compare
+        run: |
+          cargo fmt --manifest-path Cargo.toml -- --check
+          cargo clippy --all-targets --locked --manifest-path Cargo.toml -- -D warnings
+          cargo build --locked --manifest-path Cargo.toml
+
+  nats-auth-smoke:
+    name: NATS auth matrix smoke (Docker)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - name: Run the local NATS auth matrix
+        shell: bash
+        run: |
+          chmod +x spikes/nats/test-auth.sh
+          CARGO_TARGET_DIR="$PWD/spikes/nats/.target" spikes/nats/test-auth.sh
+
   monitoring-validation:
     name: Validate Zabbix monitoring files
     runs-on: ubuntu-24.04

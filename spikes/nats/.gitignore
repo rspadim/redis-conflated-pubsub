@@ -1,0 +1,5 @@
+# Dedicated cargo target dir for the spike so it never contends with the
+# repository's own `cargo` lock during parallel workstreams.
+.target/
+# Local load-matrix outputs (synthetic numbers only).
+results/
