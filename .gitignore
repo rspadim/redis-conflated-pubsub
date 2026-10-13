@@ -11,9 +11,15 @@ __pycache__/
 *.py[cod]
 *.tmp
 redis-conflated-pubsub.lock
+# Run artifacts from local test configs (status snapshots and lock files). These
+# live in the repository root because relative paths resolve from the CWD.
+/*-status.json
+/*.lock
+!/Cargo.lock
 monitoring/config.json
 .env
 .env.*
 *.pem
 *.key
 tests/.tmp-*
+/.audit/

@@ -16,8 +16,10 @@ services:
 
   nats:
     image: nats:2.15-alpine
+    command: ["-p", "4222", "-m", "8222"]
     ports:
       - "127.0.0.1:14230:4222"
+      - "127.0.0.1:18222:8222"
 
   nats-ws:
     image: nats:2.15-alpine

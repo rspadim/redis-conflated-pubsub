@@ -8,6 +8,16 @@ use tokio::time::Instant;
 
 const WAIT_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// Overall wait for a subscriber/verifier to reach the expected count. Tests
+/// and the matrix driver set `COMPARE_WAIT_TIMEOUT_SECS` so a regression fails
+/// fast instead of blocking for the full default.
+fn wait_timeout() -> Duration {
+    std::env::var("COMPARE_WAIT_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map_or(WAIT_TIMEOUT, Duration::from_secs)
+}
+
 /// Two roles, meant to run as **separate OS processes** so the publisher and the
 /// subscriber do not contend for the same event loop or CPU.
 ///
@@ -30,85 +40,303 @@ async fn main() -> Result<()> {
     match role.as_str() {
         "publisher" => publish(&engine, &prefix, total, payload_bytes, batch, rate).await,
         "subscriber" => subscribe(&engine, &prefix, total).await,
-        "e2e-publish" => e2e_publish(&prefix, total, payload_bytes, rate).await,
-        "e2e-verify" => e2e_verify(&prefix, total).await,
-        other => anyhow::bail!("role must be publisher or subscriber, got {other:?}"),
+        "e2e-publish" => e2e_publish(&engine, total, payload_bytes, rate).await,
+        "e2e-verify" => e2e_verify(&engine, env_u64("COMPARE_EXPECTED", total)).await,
+        other => anyhow::bail!(
+            "role must be publisher, subscriber, e2e-publish, or e2e-verify, got {other:?}"
+        ),
     }
 }
 
-/// Publishes `total` messages to `{prefix}.{i}` on NATS and waits for every
-/// message to be acknowledged by the server (flush) before returning. Used to
-/// drive the relay's NATS input.
-async fn e2e_publish(prefix: &str, total: u64, payload_bytes: usize, rate: u64) -> Result<()> {
-    let client = connect_nats().await?;
+/// Redis connection URL for an input-side role. `REDIS_URL` selects the input
+/// server.
+fn redis_url() -> String {
+    env_or("REDIS_URL", "redis://127.0.0.1:16390")
+}
+
+/// Redis connection URL for the verifier (output side). `REDIS_VERIFY_URL`
+/// overrides `REDIS_URL` so an input Redis server and an output Redis server can
+/// be different processes in the same run.
+fn redis_verify_url() -> String {
+    std::env::var("REDIS_VERIFY_URL")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(redis_url)
+}
+
+/// Publishes `total` messages to the relay's **input** address space and waits
+/// for the broker to acknowledge them before returning. `engine` selects the
+/// input backend, so the same publisher drives a Redis or a NATS relay input.
+///
+/// The input namespace is `COMPARE_INPUT_PREFIX` (default `in`); each message is
+/// published on `{prefix}.<segment>.<index>` and the relay config subscribes to
+/// `{prefix}.*` (Redis PSUBSCRIBE) or `{prefix}.>` (NATS). The driver substitutes
+/// a unique prefix per run so output address spaces never collide across runs.
+async fn e2e_publish(engine: &str, total: u64, payload_bytes: usize, rate: u64) -> Result<()> {
+    // Wait for the verifier(s) to subscribe before the first publish, so the
+    // output space is already being consumed.
+    wait_for_ready().await?;
+    // The relay configs subscribe to this namespace; a unique per-run value keeps
+    // concurrent or repeated runs from observing each other's traffic.
+    let input_prefix = env_or("COMPARE_INPUT_PREFIX", "in");
+    // When positive, every Nth message is published on a `{prefix}.drop.*`
+    // address so an output `deny` filter drops it; the rest go to
+    // `{prefix}.keep.*`. The returned count is what the verifier should expect.
+    let deny_every = env_u64("COMPARE_FILTER_DENY_EVERY", 0);
+    let mut denied = 0u64;
     let started = Instant::now();
     let interval = (rate > 0).then(|| Duration::from_secs_f64(1.0 / rate as f64));
     let mut next_deadline = started;
-    let mut since = 0usize;
-    for index in 0..total {
-        let subject = format!("{prefix}.{index}");
-        client
-            .publish(subject, Bytes::from(build_payload(payload_bytes)))
-            .await
-            .context("e2e nats publish")?;
-        since += 1;
-        if since == 256 {
-            client.flush().await.context("e2e nats flush")?;
-            since = 0;
+    match engine {
+        "nats" => {
+            let client = connect_nats().await?;
+            let mut since = 0usize;
+            for index in 0..total {
+                let subject = input_address(&input_prefix, index, deny_every, &mut denied);
+                client
+                    .publish(subject, Bytes::from(build_payload(payload_bytes)))
+                    .await
+                    .context("e2e nats publish")?;
+                since += 1;
+                if since == 256 {
+                    client.flush().await.context("e2e nats flush")?;
+                    since = 0;
+                }
+                pace(&mut next_deadline, interval).await;
+            }
+            if since > 0 {
+                client.flush().await.context("e2e nats flush")?;
+            }
+            // `async-nats` `flush` only empties the client's local write buffer;
+            // it is not a server round trip, so a process that exits immediately
+            // can drop the tail of the stream. Barrier on a real round trip
+            // before returning.
+            nats_barrier(&client, &input_prefix).await?;
         }
-        pace(&mut next_deadline, interval).await;
+        "redis" => {
+            let client = redis::Client::open(redis_url())?;
+            let mut connection = client.get_multiplexed_async_connection().await?;
+            let mut pipe = redis::pipe();
+            let mut pending = 0usize;
+            for index in 0..total {
+                let channel = input_address(&input_prefix, index, deny_every, &mut denied);
+                pipe.cmd("PUBLISH")
+                    .arg(channel)
+                    .arg(build_payload(payload_bytes))
+                    .ignore();
+                pending += 1;
+                if pending == 256 {
+                    let _: () = pipe
+                        .query_async(&mut connection)
+                        .await
+                        .context("e2e redis publish pipeline")?;
+                    pipe = redis::pipe();
+                    pending = 0;
+                }
+                pace(&mut next_deadline, interval).await;
+            }
+            if pending > 0 {
+                let _: () = pipe
+                    .query_async(&mut connection)
+                    .await
+                    .context("e2e redis publish pipeline")?;
+            }
+        }
+        other => anyhow::bail!("engine must be nats or redis, got {other:?}"),
     }
-    if since > 0 {
-        client.flush().await.context("e2e nats flush")?;
-    }
-    client.flush().await.context("e2e nats final flush")?;
     let elapsed = started.elapsed();
     println!(
-        "role=e2e-publish total={total} seconds={:.3} rate_msg_s={:.0}",
+        "role=e2e-publish engine={engine} prefix={input_prefix} total={total} \
+         filter_denied_expected={denied} expected_forwarded={} seconds={:.3} \
+         publish_rate_msg_s={:.0}",
+        total - denied,
         elapsed.as_secs_f64(),
         total as f64 / elapsed.as_secs_f64().max(f64::MIN_POSITIVE)
     );
     Ok(())
 }
 
-/// Subscribes to the relay's output subject space `{prefix}.>` and reports how
-/// many messages arrived and the end-to-end age (publish -> observed here).
-async fn e2e_verify(prefix: &str, expected: u64) -> Result<()> {
-    let client = connect_nats().await?;
-    let mut subscription = client
-        .subscribe(format!("{prefix}.>"))
-        .await
-        .context("e2e verify subscribe")?;
-    client.flush().await.ok();
-    signal_ready();
+/// Chooses the input address for one message: a `drop` token when this index is
+/// subject to the configured filter test, otherwise a `keep` token.
+fn input_address(prefix: &str, index: u64, deny_every: u64, denied: &mut u64) -> String {
+    if deny_every > 0 && index.is_multiple_of(deny_every) {
+        *denied += 1;
+        format!("{prefix}.drop.{index}")
+    } else {
+        format!("{prefix}.keep.{index}")
+    }
+}
 
+/// Forces a real client/server round trip after publishing.
+///
+/// `async-nats` `flush()` resolves as soon as the client's local write buffer is
+/// empty and does **not** wait for the server to process the commands. A short
+/// request/reply against the server is a genuine barrier: by the time the reply
+/// (or the "no responders" reply) arrives, every command queued before it has
+/// been handled, so the publisher can exit without dropping the tail of the
+/// stream. The barrier subject is deliberately outside every relay input
+/// namespace (`_barrier.<prefix>`), so it is never forwarded.
+async fn nats_barrier(client: &Client, input_prefix: &str) -> Result<()> {
+    let subject = format!("_barrier.{input_prefix}");
+    match tokio::time::timeout(
+        Duration::from_secs(10),
+        client.request(subject, Bytes::new()),
+    )
+    .await
+    {
+        // Either a real reply or the server's immediate "no responders"
+        // response is a completed round trip; both settle the earlier commands.
+        Ok(_) => Ok(()),
+        Err(_) => Err(anyhow::anyhow!(
+            "NATS barrier round trip timed out; server did not confirm the tail of the publish stream"
+        )),
+    }
+}
+
+/// Verifier engine list: `COMPARE_VERIFY_ENGINES`, falling back to
+/// `COMPARE_ENGINE` for single-output runs.
+fn verify_engines() -> String {
+    std::env::var("COMPARE_VERIFY_ENGINES")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| env_or("COMPARE_ENGINE", "nats"))
+}
+
+/// Subscribes to the relay's output subject space and reports how many messages
+/// arrived and the end-to-end age (publish -> observed here). The input prefix
+/// is unused for verification because the output space is selected separately by
+/// `COMPARE_VERIFY_PREFIX`.
+async fn e2e_verify(_input_prefix: &str, expected: u64) -> Result<()> {
+    let engines = verify_engines();
+    e2e_verify_engines(&engines, expected).await
+}
+
+/// Verifies the relay's **output** address space. The verifier runs one
+/// independent consume task per requested output, so a fan-out run with one
+/// Redis and one NATS output is measured from both backends at once:
+///
+/// * `COMPARE_VERIFY_ENGINES` is a comma list (`redis`, `nats`, or
+///   `redis,nats`).
+/// * `COMPARE_VERIFY_PREFIX` is a comma list of output subject prefixes, one per
+///   engine. A single value applies to every engine.
+///
+/// Each engine prints its own `role=e2e-verify engine=<engine> ...` line, then
+/// the process joins all tasks. The ready file is written only after every
+/// consumer is subscribed, so the publisher never races subscription setup.
+async fn e2e_verify_engines(engines: &str, expected: u64) -> Result<()> {
+    let engine_list = engines
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    anyhow::ensure!(!engine_list.is_empty(), "no verify engines selected");
+    let prefixes = env_or("COMPARE_VERIFY_PREFIX", &format!("{expected}.out"))
+        .split(',')
+        .map(str::trim)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+
+    // Wait until every consumer has signalled readiness before the driver starts
+    // the publisher.
+    let (ready_tx, mut ready_rx) = tokio::sync::mpsc::channel::<()>(engine_list.len());
+    let mut tasks = Vec::with_capacity(engine_list.len());
+    for (index, engine) in engine_list.iter().enumerate() {
+        let prefix = prefixes
+            .get(index)
+            .or_else(|| prefixes.first())
+            .cloned()
+            .unwrap_or_default();
+        let engine = engine.clone();
+        let ready = ready_tx.clone();
+        tasks.push(tokio::spawn(async move {
+            verify_engine(&engine, &prefix, expected, ready).await
+        }));
+    }
+    drop(ready_tx);
+    // A consumer signals readiness after it has subscribed; wait for all of them.
+    for _ in 0..engine_list.len() {
+        if ready_rx.recv().await.is_none() {
+            break;
+        }
+    }
+    signal_ready();
+    for task in tasks {
+        task.await.context("verify task join")??;
+    }
+    Ok(())
+}
+
+/// Consumes one output address space and reports counts and end-to-end age.
+async fn verify_engine(
+    engine: &str,
+    prefix: &str,
+    expected: u64,
+    ready: tokio::sync::mpsc::Sender<()>,
+) -> Result<()> {
+    let started = Instant::now();
     let mut latencies: Vec<u64> = Vec::with_capacity(expected as usize);
     let mut received = 0u64;
-    let started = Instant::now();
     let consume = async {
-        while received < expected {
-            match subscription.next().await {
-                Some(message) => {
-                    latencies.push(age(&message.payload));
-                    received += 1;
+        match engine {
+            "nats" => {
+                let client = connect_nats().await?;
+                let mut subscription = client
+                    .subscribe(format!("{prefix}.>"))
+                    .await
+                    .context("e2e verify nats subscribe")?;
+                client.flush().await.ok();
+                ready.send(()).await.ok();
+                while received < expected {
+                    match subscription.next().await {
+                        Some(message) => {
+                            latencies.push(age(&message.payload));
+                            received += 1;
+                        }
+                        None => break,
+                    }
                 }
-                None => break,
             }
+            "redis" => {
+                let client = redis::Client::open(redis_verify_url())?;
+                let mut pubsub = client.get_async_pubsub().await?;
+                pubsub
+                    .psubscribe(format!("{prefix}.*"))
+                    .await
+                    .context("e2e verify redis psubscribe")?;
+                ready.send(()).await.ok();
+                let mut messages = pubsub.on_message();
+                while received < expected {
+                    match messages.next().await {
+                        Some(message) => {
+                            latencies.push(age(message.get_payload_bytes()));
+                            received += 1;
+                        }
+                        None => break,
+                    }
+                }
+            }
+            other => anyhow::bail!("engine must be nats or redis, got {other:?}"),
         }
+        Ok::<(), anyhow::Error>(())
     };
-    let timed_out = tokio::time::timeout(WAIT_TIMEOUT, consume).await.is_err();
+    let outcome = tokio::time::timeout(wait_timeout(), consume).await;
+    let timed_out = outcome.is_err();
+    if let Ok(Err(error)) = outcome {
+        return Err(error);
+    }
     let elapsed = started.elapsed();
     latencies.sort_unstable();
     println!(
-        "role=e2e-verify received={received} expected={expected} complete={} timed_out={timed_out} \
-         seconds={:.3} rate_msg_s={:.0}",
+        "role=e2e-verify engine={engine} prefix={prefix} received={received} expected={expected} \
+         complete={} timed_out={timed_out} seconds={:.3} rate_msg_s={:.0}",
         received == expected,
         elapsed.as_secs_f64(),
         received as f64 / elapsed.as_secs_f64().max(f64::MIN_POSITIVE)
     );
     if !latencies.is_empty() {
         println!(
-            "e2e_age_ms p50={:.3} p95={:.3} p99={:.3} max={:.3}",
+            "e2e_age_ms engine={engine} p50={:.3} p95={:.3} p99={:.3} max={:.3}",
             percentile_ms(&latencies, 50.0),
             percentile_ms(&latencies, 95.0),
             percentile_ms(&latencies, 99.0),
@@ -272,7 +500,7 @@ async fn subscribe(engine: &str, prefix: &str, total: u64) -> Result<()> {
         Ok::<(), anyhow::Error>(())
     };
 
-    let outcome = tokio::time::timeout(WAIT_TIMEOUT, consume).await;
+    let outcome = tokio::time::timeout(wait_timeout(), consume).await;
     let timed_out = outcome.is_err();
     if let Ok(Err(error)) = outcome {
         return Err(error);
@@ -303,6 +531,22 @@ fn signal_ready() {
     if let Ok(path) = std::env::var("COMPARE_READY_FILE") {
         let _ = std::fs::write(path, b"ready");
     }
+}
+
+/// Blocks until `COMPARE_READY_FILE` exists, so the publisher starts only after
+/// the verifier has subscribed. No-op when the variable is unset.
+async fn wait_for_ready() -> Result<()> {
+    let Ok(path) = std::env::var("COMPARE_READY_FILE") else {
+        return Ok(());
+    };
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !std::path::Path::new(&path).exists() {
+        if Instant::now() > deadline {
+            anyhow::bail!("verifier did not signal readiness");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    Ok(())
 }
 
 async fn connect_nats() -> Result<Client> {

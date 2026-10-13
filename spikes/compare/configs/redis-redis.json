@@ -1,0 +1,59 @@
+{
+  "max_bytes_per_exec": 4194304,
+  "oversized_message_policy": "send",
+  "input": {
+    "redis": {
+      "host": "127.0.0.1",
+      "port": 16390,
+      "username": null,
+      "password_env": null,
+      "tls": false,
+      "database": 0,
+      "connect_timeout_ms": 5000
+    },
+    "filters": [],
+    "filter_cache_max_entries": 16384,
+    "filter_default": "accept",
+    "subscriptions": [
+      {
+        "type": "psubscribe",
+        "pattern": "__NS__.in.*",
+        "output_prefix": "__NS__.out.",
+        "output_suffix": ""
+      }
+    ]
+  },
+  "outputs": {
+    "redis-out": {
+      "redis": {
+        "host": "127.0.0.1",
+        "port": 16390,
+        "username": null,
+        "password_env": null,
+        "tls": false,
+        "database": 0,
+        "connect_timeout_ms": 5000
+      },
+      "channel_prefix": "",
+      "channel_suffix": "",
+      "filters": [],
+      "filter_cache_max_entries": 16384,
+      "channel_policy_cache_max_entries": 16384,
+      "filter_default": "accept",
+      "conflation": {
+        "interval_ms": 0,
+        "max_commands_per_exec": 256,
+        "max_in_flight_commands": 256,
+        "oversized_message_policy": "send"
+      },
+      "deduplication": { "ttl_ms": 0 }
+    }
+  },
+  "instance_lock": { "path": "__NS__.lock" },
+  "status": {
+    "path": "__NS__-status.json",
+    "update_interval_ms": 500,
+    "http": { "bind": "127.0.0.1", "port": __PORT__ }
+  },
+  "logging": { "enabled": false }
+}

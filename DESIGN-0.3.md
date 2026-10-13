@@ -1,6 +1,6 @@
 # Design proposal: 0.3
 
-**Status:** proposal backed by an isolated transport spike; no NATS support has been added to the relay runtime yet.
+**Status:** implemented in this branch — Core NATS support has been added to the relay runtime; see [Shipped in this branch](#shipped-in-this-branch) for what landed and what remains. This document is otherwise kept as the original proposal, which was backed by an isolated transport spike.
 
 The 0.2 runtime design is documented in [`src/DESIGN.md`](src/DESIGN.md). The experiment behind this proposal is in [`spikes/nats/`](spikes/nats/README.md).
 
@@ -102,7 +102,7 @@ Redis remains implemented using redis-rs. Use the official Rust `async-nats` cli
 ### NATS behavior that must stay explicit
 
 1. **Cluster and reconnect:** configure a seed pool and let `async-nats` perform reconnect and server discovery. The spike verifies one short node interruption, not every topology, DNS, proxy, or extended-outage case. Discovery must be configurable because advertised internal node addresses may not be reachable from a client behind a proxy or WebSocket ingress.
-2. **Publish completion:** Core NATS `publish` does not return a subscriber count or an acknowledgement for each delivered message. A successful `flush` is a server round-trip barrier for earlier client-buffered commands; it is not a subscriber-delivery guarantee. Keep Redis subscriber counts specific to Redis and define what status counters mean for NATS.
+2. **Publish completion:** Core NATS `publish` does not return a subscriber count or an acknowledgement for each delivered message. `async-nats` `flush` drains only the client's local write buffer and does not wait for the server, so a "successful" chunk means the commands left the local buffer, not that the server processed or delivered them. Keep Redis subscriber counts specific to Redis and define what status counters mean for NATS.
 3. **Batching and failures:** Redis `MULTI/EXEC` atomicity and RESP byte accounting do not transfer to NATS. Publish NATS chunks in order and flush them, but do not claim all-or-nothing batches. Model the ambiguity of connection loss and the NATS client's reconnect buffer before settling or retrying messages; test its bounded-queue/backpressure behavior.
 4. **Payload limits:** RESP request limits remain Redis-specific. NATS provides a server-advertised maximum payload through the client; the local test server reported 1 MiB. Apply oversized-message policy against the active NATS limit and test servers with customized limits.
 5. **WebSocket compression:** set `websocket.compress: true` on NATS listeners where compression is desired; permessage-deflate is negotiated independently on each WebSocket connection and only used when both peers offer support. `async-nats` 0.50.0 uses `tokio-websockets` 0.10.1, whose documented limitations say WebSocket compression is unsupported, so this relay currently connects uncompressed. Other clients can negotiate it if their WebSocket implementation supports the extension. The local Compose config enables the server option and confirms the Rust connection still works without compression.
@@ -170,7 +170,7 @@ The existing Redis hot-path benchmarks (`examples/hotpath_benchmark.rs`, `exampl
 
 **Metrics per run:** end-to-end rate (input msg/s and output publish/s), p50/p95/p99/max latency, conflation and deduplication reduction %, publish errors, uncertain operations, reconnects, queue wait, publish RTT, and peak pending backlog.
 
-**Collection:** reuse the status HTTP endpoint (`GET /`) for service counters and the harness's own subscriber for end-to-end latency. Add NATS-side completion semantics explicitly (no subscriber count; `flush` round trip) so a NATS cell is never compared on a Redis-only metric.
+**Collection:** reuse the status HTTP endpoint (`GET /`) for service counters and the harness's own subscriber for end-to-end latency. Add NATS-side completion semantics explicitly (no subscriber count; `flush` only drains the local buffer) so a NATS cell is never compared on a Redis-only metric.
 
 **Environment discipline:** pin NATS server image/version and settings (max_payload, no JetStream, WebSocket `compress` on/off), pin payload generator seeds, and run each cell as a median of N repetitions. Record run-to-run variance; treat differences under the observed noise band as noise.
 
@@ -199,3 +199,23 @@ This measures the raw `async-nats` client path with a loopback subscriber, not t
 - A cluster failover test demonstrates continued operation with one node unavailable. TCP/TLS/WS/WSS are tested against supported configurations, including the address-discovery behavior used by deployment.
 - Status and logs do not claim NATS per-message acknowledgement or subscriber counts that Core NATS does not provide. Secrets and production payloads are absent from committed artifacts.
 - A documented load test covers all four input/output combinations and reports rate, p50/p95/p99 latency, conflation/deduplication reduction, publish errors, uncertain operations, and peak backlog. Results and the exact server/client tuning are recorded in this design.
+
+## Shipped in this branch
+
+This subsection records what actually landed and supersedes the original proposal's status line, which stated that no NATS support had been added to the relay runtime yet. The rest of the document is left as the original proposal.
+
+**Landed**
+
+- **Backend selection.** `input` and each output carry two optional keys, `redis` and `nats`; exactly one must be present. Existing Redis JSON parses and validates verbatim. `--check-config` and the generated JSON Schema (`allOf` + `oneOf` on `required: ["redis"]`/`["nats"]`) both enforce the exactly-one rule. Resolved at runtime through `config::Endpoint` (`InputConfig::endpoint`/`OutputConfig::endpoint`).
+- **Native subscriptions.** `nats_subject` with native `*`/`>` semantics and `validate_nats_subject`/`validate_nats_publish_subject`; Redis globs are not translated. Cross-checks reject a Redis subscription on a NATS input and vice versa.
+- **NATS input adapter.** `src/service/nats/input.rs` connects the seed pool, installs every subscription, flushes, and fans the streams in round-robin order, reconnecting with the shared backoff. `service.rs` dispatches to `read_nats_input` when the input endpoint is NATS.
+- **NATS output adapter.** `src/service/nats/output.rs` publishes each ordered chunk and settles it with one `flush`; it ignores the Redis `atomic` hint (Core NATS is not transactional) and enforces the server-advertised max payload before enqueueing. The output worker selects `OutputConnection::Nats` per endpoint.
+- **Auth variants and TLS.** `none`, `user_password` (`username` + `password_env`), `token` (`token_env`), `nkey` (`seed_file`), `credentials_file` (`path`), plus `tls.root_cert_file` and paired `tls.client_cert_file`/`client_key_file`. `src/service/nats/connect.rs` splits the pure `ConnectionPlan` from the secret-resolving `connect`, so no plan value carries a secret and errors name the variable or path.
+- **Loop guard.** Each NATS output stamps a `Relay-Hop: 1` header and the NATS input drops messages that already carry it, breaking NATS-to-NATS loops without rewriting the payload. New status counter `loop_suppressed_messages_total`.
+- **Completion semantics.** The NATS sink returns `0` subscribers and treats `flush` as the settlement barrier; documented so logs/status are not read as a subscriber count.
+
+**Remaining**
+
+- **Acceptance/load matrix.** The four input/output combinations have not been benchmarked against the gates in "Load testing plan for 0.3"; those gates are still unfilled and only the client-path spike baseline exists. Multi-node failover during traffic, and TCP/TLS/WS/WSS acceptance runs, are not yet recorded.
+- **Lifecycle review.** The step 4 items beyond the loop guard — connection-event metrics beyond reconnect counters, `SIGHUP` reload/shutdown behavior specific to NATS, initial-connect/reconnect policy, and the reconnect-buffer/backpressure ambiguity — still need explicit design and tests.
+- The 0.2 runtime document (`src/DESIGN.md`) has not been extended to describe the NATS path.
