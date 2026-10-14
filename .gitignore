@@ -5,6 +5,8 @@
 /status.json
 /state/
 /dist/
+/site/
+build.log
 /redis-conflated-pubsub-linux-x86_64
 /redis-conflated-pubsub-named-linux-x86_64
 __pycache__/

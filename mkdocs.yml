@@ -1,0 +1,115 @@
+# Site de documentação do Conflated Pub/Sub.
+#
+# Build local:
+#   pip install -r requirements-docs.txt
+#   mkdocs serve          # http://127.0.0.1:8000
+#   mkdocs build --strict # validação usada no CI
+#
+# Idioma: o conteúdo em `docs/*.md` é escrito em pt-BR (idioma padrão, servido na
+# raiz). Para habilitar outro idioma, adicione os arquivos `*.en.md` e descomente
+# o bloco `en` em `plugins.i18n.languages` (veja docs/desenvolvimento.md).
+#
+# Ao renomear o repositório, atualize `site_url`, `repo_url`, `repo_name` e o
+# `edit_uri` aqui.
+
+site_name: Conflated Pub/Sub
+site_description: >-
+  Relay em Rust que encaminha mensagens Pub/Sub entre Redis e Core NATS,
+  aplicando conflation, deduplicação e filtros por canal em cada saída.
+site_author: rspadim
+site_url: https://rspadim.github.io/redis-conflated-pubsub/
+repo_url: https://github.com/rspadim/redis-conflated-pubsub
+repo_name: rspadim/redis-conflated-pubsub
+edit_uri: edit/main/docs/
+copyright: Licenciado sob MIT. Copyright &copy; 2026 Conflated Pub/Sub contributors.
+
+docs_dir: docs
+
+theme:
+  name: material
+  logo: assets/logo.svg
+  favicon: assets/logo.svg
+  language: pt-BR
+  features:
+    - navigation.tabs
+    - navigation.indexes
+    - navigation.tracking
+    - navigation.top
+    - toc.follow
+    - search.highlight
+    - search.suggest
+    - content.code.copy
+    - content.code.annotate
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: cyan
+      toggle:
+        icon: material/weather-sunny
+        name: Mudar para o tema escuro
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: cyan
+      toggle:
+        icon: material/weather-night
+        name: Mudar para o tema claro
+  icon:
+    repo: fontawesome/brands/github
+
+nav:
+  - Início: index.md
+  - Início rápido: inicio-rapido.md
+  - Configuração: configuracao.md
+  - Backend NATS: nats.md
+  - Docker e testes: docker.md
+  - Operação e monitoramento: operacao.md
+  - Arquitetura: design.md
+  - Desenvolvimento: desenvolvimento.md
+  - Histórico de mudanças: changelog.md
+
+plugins:
+  - search
+  - i18n:
+      docs_structure: suffix
+      fallback_to_default: true
+      reconfigure_material: true
+      reconfigure_search: true
+      languages:
+        - locale: pt-BR
+          name: Português (Brasil)
+          default: true
+          build: true
+        # Segundo idioma: crie docs/<pagina>.en.md e habilite o bloco abaixo.
+        # - locale: en
+        #   name: English
+        #   build: true
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      toc_depth: 3
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/rspadim/redis-conflated-pubsub
+      name: Repositório no GitHub
