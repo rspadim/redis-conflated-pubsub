@@ -269,12 +269,47 @@ mod reload {
             .expect("example config should deserialize")
     }
 
+    /// The shipped NATS example uses secret references (`credentials_file`,
+    /// `token_env`) that are not present in a test environment. For a test that
+    /// plans a reload without standing up credentials, drop them to `auth: none`
+    /// so the preflight (which resolves secrets) still passes.
+    fn nats_example_without_secrets() -> AppConfig {
+        serde_json::from_str(&nats_example_json_without_secrets())
+            .expect("NATS example should deserialize")
+    }
+
+    /// The example JSON with NATS `auth` replaced by `none`, produced through
+    /// `serde_json::Value` (AppConfig is deserialize-only).
+    fn nats_example_json_without_secrets() -> String {
+        let mut value: serde_json::Value =
+            serde_json::from_str(include_str!("../../../config.nats.example.json")).unwrap();
+        value["input"]["nats"]["auth"] = serde_json::json!({ "type": "none" });
+        value["outputs"]["nats-archive"]["nats"]["auth"] = serde_json::json!({ "type": "none" });
+        serde_json::to_string(&value).unwrap()
+    }
+
     #[test]
     fn preflight_accepts_a_nats_config_without_connecting() {
-        let config: AppConfig =
-            serde_json::from_str(include_str!("../../../config.nats.example.json")).unwrap();
+        let config = nats_example_without_secrets();
         config.validate().unwrap();
         validate_reload_backends(&config).unwrap();
+    }
+
+    #[test]
+    fn preflight_rejects_a_nats_config_with_a_missing_secret() {
+        // Mirror the Redis secret preflight: a NATS endpoint pointing at an
+        // unset environment variable is rejected before tear-down, not
+        // half-started.
+        let mut config = nats_example_without_secrets();
+        config.input.nats.as_mut().unwrap().auth = crate::config::NatsAuth::Token {
+            token_env: "RCPS_RELOAD_TEST_UNSET_NATS".to_owned(),
+        };
+        config.validate().unwrap();
+        let error = validate_reload_backends(&config).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("RCPS_RELOAD_TEST_UNSET_NATS"),
+            "{error:#}"
+        );
     }
 
     #[test]
@@ -284,7 +319,7 @@ mod reload {
         let path = directory.path().join("config.json");
 
         // Redis -> NATS: the reload is planned (not executed) successfully.
-        std::fs::write(&path, include_str!("../../../config.nats.example.json")).unwrap();
+        std::fs::write(&path, nats_example_json_without_secrets()).unwrap();
         let plan = load_reload_config(&current, &path).unwrap();
         assert!(plan.config.input.nats.is_some());
         assert!(plan.config.input.redis.is_none());

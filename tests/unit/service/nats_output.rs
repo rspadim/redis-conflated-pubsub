@@ -2,7 +2,7 @@
 
 use super::super::backend::{NATS_HOP_HEADER, NATS_HOP_HEADER_WIRE_BYTES};
 use super::super::nats::output::{
-    NATS_NO_SUBSCRIBER_COUNT, PublishStep, check_payload_size, preflight_chunk,
+    NATS_NO_SUBSCRIBER_COUNT, PublishStep, check_payload_size, hop_headers, preflight_chunk,
 };
 use crate::config::validate_nats_publish_subject;
 use crate::service::tests::pending_message;
@@ -40,6 +40,16 @@ fn concrete_subject_validation_matches_the_config_rule_set() {
 #[test]
 fn hop_header_name_is_stable() {
     assert_eq!(NATS_HOP_HEADER, "Relay-Hop");
+}
+
+/// A relayed message carries exactly the hop header and no application headers,
+/// which keeps the per-message wire size constant for the ceiling accounting.
+#[test]
+fn only_the_hop_header_is_forwarded() {
+    let debug = format!("{:?}", hop_headers());
+    assert!(debug.contains(NATS_HOP_HEADER), "{debug}");
+    // The only key present is the hop header: no application header leaks in.
+    assert_eq!(debug.matches("Relay-Hop").count(), 1, "{debug}");
 }
 
 /// Payloads above the server-advertised maximum are a definitive pre-send

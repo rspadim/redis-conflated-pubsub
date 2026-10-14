@@ -318,6 +318,16 @@ pub(in crate::service) fn connection_plan_nkey_seed(plan: &ConnectionPlan) -> Re
     }
 }
 
+/// Preflights a plan without opening a connection: resolves the auth secret
+/// (environment variable or file) and confirms the TLS files exist, so a missing
+/// secret or unreadable certificate fails at startup or reload rather than
+/// looping in the reader. The resolved secret is discarded immediately.
+pub(in crate::service) fn preflight(plan: &ConnectionPlan) -> Result<()> {
+    // Building the options resolves the auth reference and reads the TLS paths.
+    let _ = connect_options_with_metrics(plan, None)?;
+    Ok(())
+}
+
 /// Connects a fresh client for a plan. The connect timeout is enforced by
 /// `async-nats` through `ConnectOptions::connection_timeout`.
 ///

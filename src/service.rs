@@ -300,7 +300,14 @@ pub async fn run(
                 None => input_redis.client()?,
             }))
         }
-        Endpoint::Nats(_) => None,
+        Endpoint::Nats(nats) => {
+            // Fail fast on a missing/invalid secret or TLS file, like the Redis
+            // client construction above, rather than looping in the reader.
+            let plan = nats::connect::connection_plan(nats)
+                .context("input NATS settings are not usable")?;
+            nats::connect::preflight(&plan).context("input NATS authentication is not usable")?;
+            None
+        }
     };
     let nats_input = matches!(input_endpoint, Endpoint::Nats(_));
     let filters_endpoint_enabled = config
@@ -674,7 +681,9 @@ fn validate_reload_backends(config: &AppConfig) -> Result<()> {
                 .context("input Redis settings are not usable")?;
         }
         Endpoint::Nats(nats) => {
-            nats::connect::connection_plan(nats).context("input NATS settings are not usable")?;
+            let plan = nats::connect::connection_plan(nats)
+                .context("input NATS settings are not usable")?;
+            nats::connect::preflight(&plan).context("input NATS authentication is not usable")?;
         }
     }
     for (name, output) in &config.outputs {
@@ -686,8 +695,10 @@ fn validate_reload_backends(config: &AppConfig) -> Result<()> {
                     .with_context(|| format!("{path} Redis settings are not usable"))?;
             }
             Endpoint::Nats(nats) => {
-                nats::connect::connection_plan(nats)
+                let plan = nats::connect::connection_plan(nats)
                     .with_context(|| format!("{path} NATS settings are not usable"))?;
+                nats::connect::preflight(&plan)
+                    .with_context(|| format!("{path} NATS authentication is not usable"))?;
             }
         }
     }

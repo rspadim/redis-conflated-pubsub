@@ -24,6 +24,8 @@ Core NATS has no per-message acknowledgement and no subscriber count. A NATS out
 
 A NATS output published on one connection can match an input subscription on another, so NATS-to-NATS loops are broken with a `Relay-Hop: 1` header: every NATS output stamps it on each forwarded message and the NATS input drops any message that already carries it. The payload is never modified. Suppressed messages are counted in `loop_suppressed_messages_total`. The guard is NATS-specific; Redis has no headers and keeps its existing same-server echo handling, and a Redis input never receives NATS output traffic.
 
+**NATS headers are not forwarded.** Only the payload crosses the relay; a NATS output builds a fresh header map containing just `Relay-Hop`, so inbound application headers (content-type, tracing, `Nats-Msg-Id`, …) are dropped NATS→NATS. This is intentional: propagating them would make the per-message wire size variable and complicate the payload-ceiling accounting. Payload bytes stay byte-transparent; headers do not.
+
 ## Module map
 
 | Path | Responsibility |
