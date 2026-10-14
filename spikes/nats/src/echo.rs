@@ -26,7 +26,7 @@ use tokio::time;
 /// Header a relay stamps on every message it forwards. A message that already
 /// carries it is a loop and must not be forwarded again. Header-based means the
 /// payload is never rewritten, so the relay stays byte-transparent.
-const HOP_HEADER: &str = "Relay-Hop";
+const HOP_HEADER: &str = "ConflatedPS-Hop";
 const HOP_HEADER_VALUE: &str = "1";
 /// Hard cap so a genuine loop cannot pin the machine; reaching it proves the loop.
 const MAX_RELAY_MESSAGES: u64 = 200_000;

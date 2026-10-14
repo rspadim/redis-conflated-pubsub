@@ -22,9 +22,9 @@ Core NATS has no per-message acknowledgement and no subscriber count. A NATS out
 
 ### Loop guard
 
-A NATS output published on one connection can match an input subscription on another, so NATS-to-NATS loops are broken with a `Relay-Hop: 1` header: every NATS output stamps it on each forwarded message and the NATS input drops any message that already carries it. The payload is never modified. Suppressed messages are counted in `loop_suppressed_messages_total`. The guard is NATS-specific; Redis has no headers and keeps its existing same-server echo handling, and a Redis input never receives NATS output traffic.
+A NATS output published on one connection can match an input subscription on another, so NATS-to-NATS loops are broken with a `ConflatedPS-Hop: 1` header: every NATS output stamps it on each forwarded message and the NATS input drops any message that already carries it. The payload is never modified. Suppressed messages are counted in `loop_suppressed_messages_total`. The guard is NATS-specific; Redis has no headers and keeps its existing same-server echo handling, and a Redis input never receives NATS output traffic.
 
-**NATS headers are not forwarded.** Only the payload crosses the relay; a NATS output builds a fresh header map containing just `Relay-Hop`, so inbound application headers (content-type, tracing, `Nats-Msg-Id`, …) are dropped NATS→NATS. This is intentional: propagating them would make the per-message wire size variable and complicate the payload-ceiling accounting. Payload bytes stay byte-transparent; headers do not.
+**NATS headers are not forwarded.** Only the payload crosses the relay; a NATS output builds a fresh header map containing just `ConflatedPS-Hop`, so inbound application headers (content-type, tracing, `Nats-Msg-Id`, …) are dropped NATS→NATS. This is intentional: propagating them would make the per-message wire size variable and complicate the payload-ceiling accounting. Payload bytes stay byte-transparent; headers do not.
 
 ## Module map
 
@@ -96,7 +96,7 @@ Per-channel deduplication compares the exact mapped output channel and the raw i
 
 Named `deduplication_groups` share one expiry across member channels: `round_ms` floors the Unix-epoch start, `restart_on_change` reanchors the deadline when a changed/new member publishes, and `max_members`/`max_cache_bytes` bound the cache. Suppressed duplicates and intermediate conflated values never renew the deadline.
 
-`deduplication.in_flight_suppression` (default `false`) treats a value that was sent but not yet acknowledged as published for suppression purposes: identical repeats are dropped without waiting for the in-flight batch to settle. A definitive pre-send (`NotSent`) failure rolls the remembered value back; an ambiguous (`Uncertain`) outcome keeps it because the publish may have reached the broker. `deduplication.max_entries` and `deduplication.max_cache_bytes` (optional; unset means unbounded) bound the per-channel TTL cache with LRU eviction, counted in `deduplication_evictions_total`.
+`deduplication.in_flight_suppression` (default `false`) treats a value that was sent but not yet acknowledged as published for suppression purposes: identical repeats are dropped without waiting for the in-flight batch to settle. A definitive pre-send (`NotSent`) failure rolls the remembered value back; an ambiguous (`Uncertain`) outcome keeps it because the publish may have reached the broker. **Trade-off:** because repeats are suppressed before the batch settles, a repeat admitted during an in-flight window that later fails `NotSent` is not re-published (failures are not retried), so this mode can drop a duplicate that the default mode would have kept queued. Leave it off unless the latency of same-value suppression matters more than that edge. `deduplication.max_entries` and `deduplication.max_cache_bytes` (optional; unset means unbounded) bound the per-channel TTL cache with LRU eviction, counted in `deduplication_evictions_total`.
 
 ### Intake queue limits
 
@@ -124,7 +124,7 @@ The status snapshot (`schema_version` 5) exposes global and per-output counters 
 - **publish RTT** samples/total/max around the Redis publish round trip;
 - **pending queue bytes** and **oldest pending age** gauges for the bounded-queue policies.
 
-NATS connection events are counted globally (`nats_client_connects_total`, `nats_client_disconnects_total`) through the `async-nats` event callback. Core NATS reconnects internally, so a node failover does not appear in `input_reconnects_total`/`output_reconnects_total`; `nats_client_connects_total` includes the first connect, so a reconnection shows as a disconnect plus a connects count above the number of NATS endpoints.
+NATS connection events are counted globally (`nats_client_connects_total`, `nats_client_disconnects_total`) and slow-consumer drops (`nats_client_slow_consumers_total`) through the `async-nats` event callback. Core NATS reconnects internally, so a node failover does not appear in `input_reconnects_total`/`output_reconnects_total`; `nats_client_connects_total` includes the first connect, so a reconnection shows as a disconnect plus a connects count above the number of NATS endpoints. These counters are best-effort: `async-nats` delivers events over a bounded channel with `try_send`, so under a fast reconnect storm some events can be dropped (an under-count, never a double-count), and the counters are process-global across input and all outputs.
 
 `GET /filters` optionally exposes full channel names and cache entries and is disabled by default because it reveals raw channel names; enabling it switches the filter/policy LRUs to shared, mutex-protected storage.
 

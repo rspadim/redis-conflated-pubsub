@@ -14,14 +14,17 @@ use super::publish::PublishFailure;
 /// Header a relay stamps on every message it forwards. A message that already
 /// carries it is a loop and must not be forwarded again. Header-based means the
 /// payload is never rewritten, so the relay stays byte-transparent.
-pub(in crate::service) const NATS_HOP_HEADER: &str = "Relay-Hop";
+///
+/// The name is vendor-namespaced so it cannot collide with an application
+/// header that happens to be called `Relay-Hop`.
+pub(in crate::service) const NATS_HOP_HEADER: &str = "ConflatedPS-Hop";
 
 /// Bytes the hop header adds to a NATS message on the wire: the `NATS/1.0\r\n`
-/// prefix, the `Relay-Hop: 1\r\n` field, and the terminating `\r\n`. The server
-/// counts these toward its `max_payload`, so the usable payload is
+/// prefix, the `ConflatedPS-Hop: 1\r\n` field, and the terminating `\r\n`. The
+/// server counts these toward its `max_payload`, so the usable payload is
 /// `max_payload - NATS_HOP_HEADER_WIRE_BYTES`.
 pub(in crate::service) const NATS_HOP_HEADER_WIRE_BYTES: usize =
-    "NATS/1.0\r\n".len() + "Relay-Hop: 1\r\n".len() + "\r\n".len();
+    "NATS/1.0\r\n".len() + "ConflatedPS-Hop: 1\r\n".len() + "\r\n".len();
 
 /// Normalized inbound message envelope shared by every input backend.
 ///

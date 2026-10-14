@@ -604,12 +604,15 @@ pub async fn run(
     }
 
     metrics.set_state("stopped");
-    if let Some(path) = &config.status.path {
-        let _ = status::write_atomic(path, &metrics.snapshot());
-    }
+    // Stop the periodic writer before the final snapshot: a tick already inside
+    // `write_atomic` would otherwise be able to overwrite the "stopped" file
+    // with a stale pre-shutdown snapshot.
     if let Some(status_task) = status_task {
         status_task.abort();
         let _ = status_task.await;
+    }
+    if let Some(path) = &config.status.path {
+        let _ = status::write_atomic(path, &metrics.snapshot());
     }
     if let Some(http_task) = http_task {
         http_task.abort();

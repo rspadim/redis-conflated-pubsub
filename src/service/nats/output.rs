@@ -44,18 +44,23 @@ pub(in crate::service) const NATS_NO_SUBSCRIBER_COUNT: i64 = 0;
 #[derive(Clone)]
 pub(in crate::service) struct NatsSender {
     client: Client,
-    max_payload: usize,
     timeout: Duration,
 }
 
 impl NatsSender {
     fn new(client: Client, timeout: Duration) -> Self {
-        let max_payload = client.max_payload();
-        Self {
-            client,
-            max_payload,
-            timeout,
-        }
+        Self { client, timeout }
+    }
+
+    /// The server-advertised payload ceiling minus the relay's hop header.
+    ///
+    /// Read live from the client rather than cached: `async-nats` updates the
+    /// value on every connect, so an internal reconnect to a server with a
+    /// different `max_payload` is reflected here.
+    fn payload_ceiling(&self) -> usize {
+        self.client
+            .max_payload()
+            .saturating_sub(NATS_HOP_HEADER_WIRE_BYTES)
     }
 }
 
@@ -74,9 +79,10 @@ impl OutputSink for NatsSender {
         // in order, and `flush` settles it, but no atomicity is claimed; the
         // `atomic` hint is intentionally ignored.
         let _ = atomic;
+        let max_payload = self.client.max_payload();
         match time::timeout(
             self.timeout,
-            publish_chunk(&self.client, messages, self.max_payload),
+            publish_chunk(&self.client, messages, max_payload),
         )
         .await
         {
@@ -156,11 +162,7 @@ impl NatsOutputSink {
     /// bytes the relay's hop header adds. `None` while disconnected, so the
     /// caller keeps the configured target until the limit is known.
     pub(in crate::service) fn payload_ceiling(&self) -> Option<usize> {
-        self.sender.as_ref().map(|sender| {
-            sender
-                .max_payload
-                .saturating_sub(NATS_HOP_HEADER_WIRE_BYTES)
-        })
+        self.sender.as_ref().map(NatsSender::payload_ceiling)
     }
 
     /// Connects if needed. A connection failure means nothing was sent on this

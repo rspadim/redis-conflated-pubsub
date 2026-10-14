@@ -100,11 +100,11 @@ It runs four scenarios and prints `echo_scenario` lines plus a summary. Current 
 | Scenario | Loop observed |
 | --- | --- |
 | separate connections, no guard | yes (~900 messages in 1.2 s) |
-| separate connections, `Relay-Hop` guard | no (1 message forwarded) |
+| separate connections, `ConflatedPS-Hop` guard | no (1 message forwarded) |
 | same connection, `no_echo` on | no (1 message) |
 | same connection, `no_echo` off | yes (~1000 messages) |
 
-Conclusion: Core NATS `no_echo` only suppresses messages published through the *same* client connection. The relay uses separate input/output connections, so `no_echo` cannot stop an output subject from matching an input subscription; a backend-aware loop guard is required. The probe demonstrates the intended `Relay-Hop: 1` header guard: messages already stamped by the relay are not forwarded again, while the payload bytes are never rewritten (verified byte-identical, including NUL/`0xff`).
+Conclusion: Core NATS `no_echo` only suppresses messages published through the *same* client connection. The relay uses separate input/output connections, so `no_echo` cannot stop an output subject from matching an input subscription; a backend-aware loop guard is required. The probe demonstrates the intended `ConflatedPS-Hop: 1` header guard: messages already stamped by the relay are not forwarded again, while the payload bytes are never rewritten (verified byte-identical, including NUL/`0xff`).
 
 ## Layout
 

@@ -39,7 +39,7 @@ fn concrete_subject_validation_matches_the_config_rule_set() {
 /// it stops the two sides from silently drifting apart.
 #[test]
 fn hop_header_name_is_stable() {
-    assert_eq!(NATS_HOP_HEADER, "Relay-Hop");
+    assert_eq!(NATS_HOP_HEADER, "ConflatedPS-Hop");
 }
 
 /// A relayed message carries exactly the hop header and no application headers,
@@ -49,7 +49,7 @@ fn only_the_hop_header_is_forwarded() {
     let debug = format!("{:?}", hop_headers());
     assert!(debug.contains(NATS_HOP_HEADER), "{debug}");
     // The only key present is the hop header: no application header leaks in.
-    assert_eq!(debug.matches("Relay-Hop").count(), 1, "{debug}");
+    assert_eq!(debug.matches("ConflatedPS-Hop").count(), 1, "{debug}");
 }
 
 /// Payloads above the server-advertised maximum are a definitive pre-send
@@ -59,9 +59,9 @@ fn only_the_hop_header_is_forwarded() {
 /// header is rejected here rather than by the client.
 #[test]
 fn oversized_payloads_are_rejected_before_publishing() {
-    // Pin the wire size of the relay's one-header publish; a header-format
-    // change in async-nats would silently shift the usable ceiling otherwise.
-    assert_eq!(NATS_HOP_HEADER_WIRE_BYTES, 26);
+    // Pin the wire size of the relay's one-header publish; a header-format or
+    // name change would silently shift the usable ceiling otherwise.
+    assert_eq!(NATS_HOP_HEADER_WIRE_BYTES, 32);
     let ceiling = 1024 - NATS_HOP_HEADER_WIRE_BYTES;
     assert!(check_payload_size("events", ceiling, 1024).is_ok());
     // Exactly the server max is too big once the header is counted.
