@@ -56,11 +56,26 @@ if (-not (Test-Path -LiteralPath $ExePath -PathType Leaf)) {
     exit 2
 }
 
-# The relay writes diagnostics to stderr; merge them with stdout so the report
-# shows the full reason a configuration was rejected.
-$output = & $ExePath --check-config --config $ConfigPath 2>&1
-$code = $LASTEXITCODE
-$text = ($output | Out-String).Trim()
+# The relay writes diagnostics to stderr; read both streams so the report shows
+# the full reason a configuration was rejected. The call goes through
+# ProcessStartInfo instead of PowerShell's own redirection: under
+# $ErrorActionPreference = 'Stop' a native command that writes to stderr raises a
+# NativeCommandError, and the script died there with an empty report - the exit
+# code was right, but the operator got "the relay rejected this configuration"
+# with nothing after it.
+$start = New-Object System.Diagnostics.ProcessStartInfo
+$start.FileName = $ExePath
+$start.Arguments = '--check-config --config "' + $ConfigPath + '"'
+$start.UseShellExecute = $false
+$start.RedirectStandardOutput = $true
+$start.RedirectStandardError = $true
+$start.CreateNoWindow = $true
+$process = [System.Diagnostics.Process]::Start($start)
+$stdout = $process.StandardOutput.ReadToEndAsync()
+$stderr = $process.StandardError.ReadToEnd()
+$process.WaitForExit()
+$code = $process.ExitCode
+$text = ($stdout.Result + $stderr).Trim()
 
 if ($code -eq 0) {
     Write-Host "Configuration is valid: $ConfigPath" -ForegroundColor Green
