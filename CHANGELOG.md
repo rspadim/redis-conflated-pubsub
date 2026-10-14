@@ -9,7 +9,7 @@
 - Applied the oversized-message policy against the server-advertised NATS `max_payload` (minus the loop-guard header bytes) and preflight each chunk against it, so the relay never hands the client a batch the server would reject; a NATS chunk that cannot fit fails fast instead of silently dropping.
 - Added NATS connection lifecycle to status: `nats_client_connects_total`, `nats_client_disconnects_total` and `nats_client_slow_consumers_total`, and fail fast when a referenced secret environment variable or file is missing instead of connecting unauthenticated.
 - Documented that Core NATS provides no per-message acknowledgement or subscriber count: a NATS output reports `0` subscribers, and the `flush` that follows each batch only drains the client's local write buffer (it does not wait for the server), so it is not a delivery guarantee.
-- The static release binary grew about 47% versus 0.2 (the `async-nats`/TLS/WebSocket client stack). The bundle image and the Redis-only path are otherwise unchanged; a Redis-only deployment ships the same code path as before.
+- The release binary grew from 3.9 MB (0.2.2) to 5.7 MB (0.3.0) — about **+49%** on the Windows x64 release build — because the `async-nats`/TLS/WebSocket client stack is an unconditional dependency and is linked into the binary even when only Redis endpoints are configured. The Redis runtime path itself is unchanged.
 
 ## 0.2.2 — 2026-10-08
 
