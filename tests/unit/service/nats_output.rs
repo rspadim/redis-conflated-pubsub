@@ -1,8 +1,11 @@
 //! NATS output sink tests that need no live server.
 
 use super::super::backend::{NATS_HOP_HEADER, NATS_HOP_HEADER_WIRE_BYTES};
-use super::super::nats::output::{NATS_NO_SUBSCRIBER_COUNT, PublishStep, check_payload_size};
+use super::super::nats::output::{
+    NATS_NO_SUBSCRIBER_COUNT, PublishStep, check_payload_size, preflight_chunk,
+};
 use crate::config::validate_nats_publish_subject;
+use crate::service::tests::pending_message;
 
 fn not_sent(step: PublishStep) -> String {
     match step {
@@ -56,4 +59,36 @@ fn oversized_payloads_are_rejected_before_publishing() {
     assert!(error.contains("exceeds the server maximum"), "{error}");
     let error = not_sent(check_payload_size("events", ceiling + 1, 1024).unwrap_err());
     assert!(error.contains("exceeds the server maximum"), "{error}");
+}
+
+/// `preflight_chunk` validates the whole chunk before anything is published, so
+/// a chunk whose last message is bad is rejected as `NotSent` without a partial
+/// send. This is what keeps the accounting honest.
+#[test]
+fn preflight_rejects_the_whole_chunk_before_any_publish() {
+    let max = 1024;
+    let ceiling = max - NATS_HOP_HEADER_WIRE_BYTES;
+    let good = pending_message("events.a", vec![0u8; 32]);
+
+    // All messages valid: the chunk is sendable.
+    let ok = vec![good.clone(), pending_message("events.b", vec![0u8; 64])];
+    assert!(preflight_chunk(&ok, max).is_ok());
+
+    // Last message oversized: the whole chunk is rejected up front, so the
+    // earlier (valid) messages are not published either.
+    let oversized = vec![
+        good.clone(),
+        pending_message("events.b", vec![0u8; ceiling + 1]),
+    ];
+    assert!(matches!(
+        preflight_chunk(&oversized, max),
+        Err(PublishStep::NotSent(_))
+    ));
+
+    // Last message maps to an invalid (wildcard) subject: also rejected up front.
+    let invalid = vec![good, pending_message("events.*.bad", vec![0u8; 8])];
+    assert!(matches!(
+        preflight_chunk(&invalid, max),
+        Err(PublishStep::NotSent(_))
+    ));
 }

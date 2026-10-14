@@ -90,6 +90,18 @@ impl NatsInput {
             !subscriptions.is_empty(),
             "NatsInput requires at least one `nats_subject` subscription"
         );
+        // The subject is the mapping identity; a duplicate would install two
+        // server subscriptions and only resolve the first mapping. `--check-config`
+        // rejects this, and the adapter re-checks so a directly-built instance
+        // cannot break `mapping_for`'s by-subject `.find()`.
+        let mut seen = std::collections::HashSet::with_capacity(subscriptions.len());
+        for subscription in &subscriptions {
+            anyhow::ensure!(
+                seen.insert(subscription.subject.as_str()),
+                "duplicate nats_subject {:?}; each nats_subject must be unique because it is the mapping identity",
+                subscription.subject
+            );
+        }
         let source_address = plan.servers.first().cloned().unwrap_or_default();
         Ok(Self {
             plan,

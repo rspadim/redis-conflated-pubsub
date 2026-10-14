@@ -123,3 +123,24 @@ fn the_adapter_rejects_a_non_nats_endpoint_and_redis_subscriptions() {
         .expect("a Redis subscription must not build a NATS input");
     assert!(error.to_string().contains("nats_subject"), "{error}");
 }
+
+#[test]
+fn the_adapter_rejects_duplicate_nats_subjects() {
+    // `mapping_for` resolves by subject string, so two identical subjects would
+    // collide; the adapter refuses them even when validation was bypassed.
+    let duplicate: InputConfig = serde_json::from_value(serde_json::json!({
+        "nats": {"servers": ["nats://localhost:4222"]},
+        "subscriptions": [
+            {"type": "nats_subject", "subject": "prices.>", "output_prefix": "a."},
+            {"type": "nats_subject", "subject": "prices.>", "output_prefix": "b."},
+        ],
+    }))
+    .unwrap();
+    let error = NatsInput::new(&duplicate)
+        .err()
+        .expect("duplicate subjects must not build a NATS input");
+    assert!(
+        error.to_string().contains("duplicate nats_subject"),
+        "{error}"
+    );
+}

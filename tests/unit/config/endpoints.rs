@@ -210,6 +210,21 @@ fn redis_and_nats_subscriptions_must_match_the_selected_input_backend() {
 }
 
 #[test]
+fn duplicate_nats_subjects_are_rejected() {
+    // The subject is the mapping identity, so a duplicate would deliver twice
+    // and only ever apply the first mapping. Reject it, and name the index.
+    let input = r#"{"nats":{"servers":["nats://localhost"]},"subscriptions":[{"type":"nats_subject","subject":"events.>","output_prefix":"a."},{"type":"nats_subject","subject":"events.>","output_prefix":"b."}]}"#;
+    let config: AppConfig = serde_json::from_str(&base_json(input, &redis_output())).unwrap();
+    let error = config.validate().unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.contains("input.subscriptions[1].subject"),
+        "{message}"
+    );
+    assert!(message.contains("more than once"), "{message}");
+}
+
+#[test]
 fn generated_schema_expresses_exactly_one_backend() {
     let schema = AppConfig::json_schema();
     for definition in ["InputConfig", "OutputConfig"] {

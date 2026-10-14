@@ -55,6 +55,10 @@ pub struct Metrics {
     /// connection count at startup.
     pub nats_client_connects_total: AtomicU64,
     pub nats_client_disconnects_total: AtomicU64,
+    /// `async-nats` `Event::SlowConsumer`: the client dropped input messages
+    /// because a subscription's delivery channel was full. Silent at the wire
+    /// level, so it needs its own counter.
+    pub nats_client_slow_consumers_total: AtomicU64,
     pub pending_keys: AtomicU64,
     last_input_at: AtomicU64,
     last_flush_at: Mutex<Option<String>>,
@@ -279,6 +283,7 @@ impl Metrics {
             output_reconnects_total: AtomicU64::new(0),
             nats_client_connects_total: AtomicU64::new(0),
             nats_client_disconnects_total: AtomicU64::new(0),
+            nats_client_slow_consumers_total: AtomicU64::new(0),
             pending_keys: AtomicU64::new(0),
             last_input_at: AtomicU64::new(0),
             last_flush_at: Mutex::new(None),
@@ -677,6 +682,17 @@ impl Metrics {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Records an `async-nats` slow-consumer event: input messages were dropped
+    /// because a subscription's delivery channel was full. Also surfaces it as
+    /// an error so it is visible, not silent.
+    pub fn record_nats_slow_consumer(&self) {
+        self.nats_client_slow_consumers_total
+            .fetch_add(1, Ordering::Relaxed);
+        self.record_error(
+            "NATS client reported a slow consumer; input messages were dropped because a subscription's delivery channel was full",
+        );
+    }
+
     pub fn record_output_uncertain(
         &self,
         output: &OutputMetrics,
@@ -745,6 +761,9 @@ impl Metrics {
             nats_client_disconnects_total: self
                 .nats_client_disconnects_total
                 .load(Ordering::Relaxed),
+            nats_client_slow_consumers_total: self
+                .nats_client_slow_consumers_total
+                .load(Ordering::Relaxed),
             pending_keys: self.pending_keys.load(Ordering::Relaxed),
             last_input_at: format_epoch_millis(self.last_input_at.load(Ordering::Relaxed)),
             last_flush_at: self.last_flush_at.lock().unwrap().clone(),
@@ -808,6 +827,9 @@ pub struct StatusSnapshot {
     /// NATS endpoints to detect reconnections.
     pub nats_client_connects_total: u64,
     pub nats_client_disconnects_total: u64,
+    /// NATS client slow-consumer events: input messages dropped because a
+    /// subscription's delivery channel was full.
+    pub nats_client_slow_consumers_total: u64,
     pub pending_keys: u64,
     pub last_input_at: Option<String>,
     pub last_flush_at: Option<String>,

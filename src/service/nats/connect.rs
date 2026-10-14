@@ -299,6 +299,7 @@ pub(in crate::service) fn connect_options_with_metrics(
                 match event {
                     async_nats::Event::Connected => metrics.record_nats_connect(),
                     async_nats::Event::Disconnected => metrics.record_nats_disconnect(),
+                    async_nats::Event::SlowConsumer(_) => metrics.record_nats_slow_consumer(),
                     _ => {}
                 }
             }

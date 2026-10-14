@@ -375,6 +375,10 @@ fn validate_subscriptions(config: &AppConfig) -> Result<()> {
         Endpoint::Redis(_) => (true, false),
         Endpoint::Nats(_) => (false, true),
     };
+    // A NATS subscription's subject is its mapping identity, so a duplicate
+    // subject would install two server subscriptions (double delivery) while
+    // only the first mapping could ever be resolved. Reject duplicates.
+    let mut seen_subjects: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for (index, subscription) in config.input.subscriptions.iter().enumerate() {
         match subscription {
             Subscription::Subscribe { channel, .. } => {
@@ -404,6 +408,11 @@ fn validate_subscriptions(config: &AppConfig) -> Result<()> {
                     );
                 }
                 validate_nats_subject(&format!("input.subscriptions[{index}].subject"), subject)?;
+                if !seen_subjects.insert(subject.as_str()) {
+                    bail!(
+                        "input.subscriptions[{index}].subject {subject:?} is configured more than once; each nats_subject must be unique because it is the mapping identity"
+                    );
+                }
             }
         }
     }

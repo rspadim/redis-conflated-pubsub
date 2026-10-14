@@ -149,12 +149,15 @@ fn nats_not_sent_does_not_reconnect_and_does_not_count_as_one() {
 
 #[test]
 fn prefixed_and_oversized_subject_failures_are_definitive() {
-    for (kind, expected_not_sent) in [
-        (PublishErrorKind::InvalidSubject, true),
-        (PublishErrorKind::MaxPayloadExceeded, true),
-        (PublishErrorKind::Send, false),
+    for (kind, index, expected_not_sent) in [
+        (PublishErrorKind::InvalidSubject, 0, true),
+        (PublishErrorKind::MaxPayloadExceeded, 0, true),
+        // `Send` at index 0: nothing was buffered, so it is definitive.
+        (PublishErrorKind::Send, 0, true),
+        // `Send` later in the chunk: earlier messages are queued, so ambiguous.
+        (PublishErrorKind::Send, 1, false),
     ] {
-        let step = classify_publish_step("archive.prices.a.v1", kind, "some client error");
+        let step = classify_publish_step("archive.prices.a.v1", kind, "some client error", index);
         match (step, expected_not_sent) {
             (PublishStep::NotSent(message), true) => {
                 assert!(message.contains("archive.prices.a.v1"), "{message}");
@@ -162,7 +165,7 @@ fn prefixed_and_oversized_subject_failures_are_definitive() {
             (PublishStep::Uncertain(message), false) => {
                 assert!(message.contains("archive.prices.a.v1"), "{message}");
             }
-            (step, _) => panic!("unexpected classification for {kind:?}: {step:?}"),
+            (step, _) => panic!("unexpected classification for {kind:?} at {index}: {step:?}"),
         }
     }
 }

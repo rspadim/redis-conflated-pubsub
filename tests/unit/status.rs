@@ -234,6 +234,28 @@ fn nats_client_connection_events_are_counted() {
 }
 
 #[test]
+fn nats_slow_consumer_events_are_counted() {
+    // A full subscription makes async-nats drop input messages silently; the
+    // event must be counted and surfaced as an error, not swallowed.
+    let metrics = Metrics::new();
+    let snapshot = serde_json::to_value(metrics.snapshot()).unwrap();
+    assert_eq!(snapshot["nats_client_slow_consumers_total"], 0);
+
+    metrics.record_nats_slow_consumer();
+
+    let snapshot = serde_json::to_value(metrics.snapshot()).unwrap();
+    assert_eq!(snapshot["nats_client_slow_consumers_total"], 1);
+    assert_eq!(snapshot["publish_errors_total"], 0);
+    assert!(
+        snapshot["last_error"]
+            .as_str()
+            .is_some_and(|error| error.contains("slow consumer")),
+        "{}",
+        snapshot["last_error"]
+    );
+}
+
+#[test]
 fn uncertain_transactions_are_counted_without_leaving_messages_pending() {
     let metrics = Metrics::new();
     let output = metrics.register_output("running-output");

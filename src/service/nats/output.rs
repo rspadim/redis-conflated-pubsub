@@ -250,16 +250,11 @@ async fn publish_chunk(
     // constant, so the headers are built once per chunk.
     let mut headers = HeaderMap::new();
     headers.insert(NATS_HOP_HEADER, HeaderValue::from("1"));
-    for message in messages {
-        // Reject non-concrete or malformed publish subjects with the same
-        // message `--check-config` uses, before the client would.
-        if let Err(error) = crate::config::validate_nats_publish_subject(
-            "NATS publish subject",
-            &message.output_channel,
-        ) {
-            return Err(PublishStep::NotSent(error.to_string()));
-        }
-        check_payload_size(&message.output_channel, message.payload.len(), max_payload)?;
+    // Validate the whole chunk before publishing any of it, so a definitive
+    // `NotSent` (invalid subject, oversized payload) means nothing was sent and
+    // the batch is not mis-reported as dropped after a partial send.
+    preflight_chunk(messages, max_payload)?;
+    for (index, message) in messages.iter().enumerate() {
         // `Bytes::from_owner` shares the `Arc<[u8]>` payload without copying.
         let payload = Bytes::from_owner(message.payload.clone());
         match client
@@ -270,9 +265,35 @@ async fn publish_chunk(
             Err(error) => {
                 let kind = error.kind();
                 let text = format!("{error}");
-                return Err(classify_publish_step(&message.output_channel, kind, &text));
+                return Err(classify_publish_step(
+                    &message.output_channel,
+                    kind,
+                    &text,
+                    index,
+                ));
             }
         }
+    }
+    Ok(())
+}
+
+/// Validates every message in a chunk before any is published, so a rejection
+/// is definitive (`NotSent`) and no message has reached the wire yet. Pure and
+/// unit-testable without a client.
+pub(in crate::service) fn preflight_chunk(
+    messages: &[PendingMessage],
+    max_payload: usize,
+) -> std::result::Result<(), PublishStep> {
+    for message in messages {
+        // Reject non-concrete or malformed publish subjects with the same
+        // message `--check-config` uses, before the client would.
+        if let Err(error) = crate::config::validate_nats_publish_subject(
+            "NATS publish subject",
+            &message.output_channel,
+        ) {
+            return Err(PublishStep::NotSent(error.to_string()));
+        }
+        check_payload_size(&message.output_channel, message.payload.len(), max_payload)?;
     }
     Ok(())
 }
@@ -281,19 +302,23 @@ async fn publish_chunk(
 ///
 /// `MaxPayloadExceeded` and `InvalidSubject` are rejected by the client before
 /// the command enters the wire buffer, so they are definitive (`NotSent`).
-/// `Send` means the command may already be buffered on the connection, so it is
-/// ambiguous (`Uncertain`) and the caller discards the client before retrying.
-/// Extracted so the mapping is unit-testable without a live client.
+/// `Send` means the client's command channel rejected the message: at index 0
+/// nothing was buffered, so it is definitive (`NotSent`); at a later index the
+/// earlier messages are already queued, so the chunk is ambiguous (`Uncertain`)
+/// and the caller discards the client before retrying. Extracted so the mapping
+/// is unit-testable without a live client.
 pub(in crate::service) fn classify_publish_step(
     subject: &str,
     kind: PublishErrorKind,
     error: &str,
+    index: usize,
 ) -> PublishStep {
     let text = format!("NATS publish to subject {subject:?} failed: {error}");
     match kind {
         PublishErrorKind::MaxPayloadExceeded | PublishErrorKind::InvalidSubject => {
             PublishStep::NotSent(text)
         }
+        PublishErrorKind::Send if index == 0 => PublishStep::NotSent(text),
         PublishErrorKind::Send => PublishStep::Uncertain(text),
     }
 }
