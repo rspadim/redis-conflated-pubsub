@@ -79,3 +79,7 @@ BadAuthType=Type d'authentification inconnu. Utilisez none, user_password, token
 SelectorMissing=Saisissez le motif ou le subject que cet abonnement doit recevoir. Le relay rejette un sélecteur vide.
 ModeInstallOnly=Installer uniquement l'exécutable (sans configuration)
 FinishedNoConfig=Aucune configuration n'a été créée et le service n'a pas été installé : partez de config.example.json ou config.nats.example.json et exécutez scripts\service.ps1 depuis le dossier d'installation lorsque vous serez prêt.
+SecretValueLabel=Valeur du mot de passe (enregistrée dans l'environnement du service lui-même ; laissez vide pour définir la variable vous-même)
+SecretsStored=Enregistré dans l'environnement du service : %1
+SecretsFailed=L'environnement du service n'a pas pu être mis à jour :%n%n%1
+SecretNotSetWarning=Aucune valeur n'a été saisie pour %1, donc l'installateur ne l'enregistrera pas. Le relay lit ses identifiants dans l'environnement du service lui-même, où cette variable n'existe pas encore : le service quittera au démarrage tant que vous ne l'aurez pas définie. Continuer ?

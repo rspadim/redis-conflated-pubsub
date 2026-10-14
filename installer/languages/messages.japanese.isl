@@ -81,3 +81,7 @@ BadAuthType=不明な認証タイプです。none、user_password、token、cred
 SelectorMissing=このサブスクリプションが受信するパターンまたはサブジェクトを入力してください。relay は空のセレクターを拒否します。
 ModeInstallOnly=実行可能ファイルのみをインストールする (構成なし)
 FinishedNoConfig=構成は作成されず、サービスもインストールされませんでした。準備ができたら、config.example.json または config.nats.example.json から始め、インストールディレクトリで scripts\service.ps1 を実行してください。
+SecretValueLabel=パスワードの値 (サービス自身の環境に保存されます。変数を自分で設定する場合は空のままにしてください)
+SecretsStored=サービスの環境に保存しました: %1
+SecretsFailed=サービスの環境を更新できませんでした:%n%n%1
+SecretNotSetWarning=%1 に値が入力されなかったため、インストーラーはこの値を保存しません。relay は認証情報をサービス自身の環境から読み取りますが、そこにこの変数はまだ存在しません。この変数を設定するまで、サービスは起動時に終了します。続行しますか？

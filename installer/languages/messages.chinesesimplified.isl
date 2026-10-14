@@ -81,3 +81,9 @@ BadAuthType=未知的认证方式。请使用 none、user_password、token 或 c
 SelectorMissing=请输入此订阅应接收的匹配模式或主题。relay 拒绝空的选择器。
 ModeInstallOnly=仅安装可执行文件（不创建配置）
 FinishedNoConfig=未创建任何配置，服务也未安装：准备就绪后，请从 config.example.json 或 config.nats.example.json 开始，并在安装目录中运行 scripts\service.ps1。
+
+; --- password storage in the service's own environment ---
+SecretValueLabel=密码值（存储在服务自身的环境中；留空则由您自行设置该变量）
+SecretsStored=已存储到服务环境中：%1
+SecretsFailed=无法更新服务环境：%n%n%1
+SecretNotSetWarning=您未为 %1 输入任何值，因此安装程序不会存储它。relay 从服务自身的环境中读取凭据，而该变量在其中尚不存在：在您设置它之前，服务会在启动时退出。要继续吗？

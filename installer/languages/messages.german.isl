@@ -81,3 +81,9 @@ BadAuthType=Unbekannter Authentifizierungstyp. Verwenden Sie none, user_password
 SelectorMissing=Geben Sie das Muster oder Subject ein, das dieses Abonnement empfangen soll. Das Relay lehnt einen leeren Selektor ab.
 ModeInstallOnly=Nur die ausführbare Datei installieren (ohne Konfiguration)
 FinishedNoConfig=Es wurde keine Konfiguration erstellt und der Dienst wurde nicht installiert: Gehen Sie von config.example.json oder config.nats.example.json aus und führen Sie scripts\service.ps1 im Installationsordner aus, sobald Sie bereit sind.
+
+; --- Passwortwert und Dienstumgebung ---
+SecretValueLabel=Wert des Passworts (wird in der eigenen Umgebung des Dienstes gespeichert; leer lassen, um die Variable selbst festzulegen)
+SecretsStored=In der Umgebung des Dienstes gespeichert: %1
+SecretsFailed=Die Umgebung des Dienstes konnte nicht aktualisiert werden:%n%n%1
+SecretNotSetWarning=Für %1 wurde kein Wert eingegeben, daher speichert das Setup ihn nicht. Das Relay liest seine Anmeldedaten aus der eigenen Umgebung des Dienstes, in der diese Variable noch nicht existiert: Der Dienst beendet sich beim Start, bis Sie die Variable festlegen. Fortfahren?
