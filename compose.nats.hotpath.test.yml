@@ -16,10 +16,9 @@
 #   # then: transport-compare e2e-verify  /  transport-compare e2e-publish
 #   docker compose -p nats-hotpath -f compose.nats.hotpath.test.yml down --volumes --remove-orphans
 #
-# The relay config mounted below must select `nats` input/output. Use
-# `spikes/compare/e2e-nats-nats.json` as the starting point; the checked-in
-# `tests/docker-nats-hotpath-config.json` is not present yet, so set
-# NATS_HOTPATH_CONFIG_FILE to a real NATS config before starting the service.
+# The relay config mounted below selects `nats` input/output and points at the
+# broker service (`nats://nats-hotpath:4222`). Override it with
+# NATS_HOTPATH_CONFIG_FILE if needed.
 
 services:
   nats-hotpath:
@@ -42,7 +41,7 @@ services:
     command: ["--config", "/config/nats-hotpath-config.json"]
     working_dir: /state
     volumes:
-      - ${NATS_HOTPATH_CONFIG_FILE:-./spikes/compare/e2e-nats-nats.json}:/config/nats-hotpath-config.json:ro
+      - ${NATS_HOTPATH_CONFIG_FILE:-./tests/docker-nats-hotpath-config.json}:/config/nats-hotpath-config.json:ro
       - nats-hotpath-state:/state
     networks:
       nats-hotpath: {}

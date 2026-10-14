@@ -2,10 +2,16 @@
 set -eu
 umask 077
 
+# See generate-auth-material.sh: relax permissions for the host-side test user.
+relax_permissions() {
+  chmod -R a+rX /auth 2>/dev/null || true
+}
+
 mkdir -p /auth/certs
 if [ -s /auth/certs/ca-cert.pem ] && [ -s /auth/certs/server-cert.pem ] \
   && [ -s /auth/certs/server-key.pem ] && [ -s /auth/certs/client-cert.pem ] \
   && [ -s /auth/certs/client-key.pem ]; then
+  relax_permissions
   exit 0
 fi
 
@@ -47,3 +53,4 @@ openssl x509 -req -in /auth/certs/client.csr \
 
 rm /auth/certs/ca-key.pem /auth/certs/server.csr /auth/certs/server-ext.cnf \
   /auth/certs/client.csr /auth/certs/client-ext.cnf /auth/certs/ca-cert.srl
+relax_permissions

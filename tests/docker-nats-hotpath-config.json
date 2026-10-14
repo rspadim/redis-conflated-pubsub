@@ -1,0 +1,52 @@
+{
+  "max_bytes_per_exec": 4194304,
+  "oversized_message_policy": "send",
+  "input": {
+    "nats": {
+      "servers": ["nats://nats-hotpath:4222"],
+      "name": "nats-hotpath-in",
+      "connect_timeout_ms": 5000,
+      "auth": { "type": "none" }
+    },
+    "filters": [],
+    "filter_cache_max_entries": 16384,
+    "filter_default": "accept",
+    "subscriptions": [
+      {
+        "type": "nats_subject",
+        "subject": "bench.>",
+        "output_prefix": "out.",
+        "output_suffix": ""
+      }
+    ]
+  },
+  "outputs": {
+    "nats-out": {
+      "nats": {
+        "servers": ["nats://nats-hotpath:4222"],
+        "name": "nats-hotpath-out",
+        "connect_timeout_ms": 5000,
+        "auth": { "type": "none" }
+      },
+      "channel_prefix": "",
+      "channel_suffix": "",
+      "filters": [],
+      "filter_cache_max_entries": 16384,
+      "channel_policy_cache_max_entries": 16384,
+      "filter_default": "accept",
+      "conflation": {
+        "interval_ms": 0,
+        "max_commands_per_exec": 256,
+        "max_in_flight_commands": 256,
+        "oversized_message_policy": "send"
+      },
+      "deduplication": { "ttl_ms": 0 }
+    }
+  },
+  "instance_lock": { "path": "nats-hotpath.lock" },
+  "status": {
+    "update_interval_ms": 500,
+    "http": { "bind": "0.0.0.0", "port": 9090 }
+  },
+  "logging": { "enabled": false }
+}

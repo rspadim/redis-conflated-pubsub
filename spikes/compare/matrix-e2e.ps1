@@ -41,7 +41,7 @@ New-Item -ItemType Directory -Force -Path $work | Out-Null
 $redisUrl = "redis://127.0.0.1:16390"
 $redisVerifyUrl = "redis://127.0.0.1:16390"
 $natsUrl = "nats://127.0.0.1:14230"
-$natsMonitor = "http://127.0.0.1:18222"
+$natsMonitor = "http://127.0.0.1:18252"
 $statusBasePort = 19300
 
 # Native commands (docker, cargo) can write to stderr, which PowerShell 5.1

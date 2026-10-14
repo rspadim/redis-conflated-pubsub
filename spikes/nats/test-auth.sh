@@ -8,7 +8,7 @@ root="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$root/spikes/nats"
 
 env_file="certs/auth/runtime.env"
-mkdir -p certs/auth
+mkdir -p certs/auth certs/auth/certs
 if [ ! -f "$env_file" ]; then
   {
     echo "NATS_SPIKE_USER=relay-spike"
