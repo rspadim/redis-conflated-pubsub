@@ -8,7 +8,7 @@ The 0.2 runtime design is documented in [`src/DESIGN.md`](src/DESIGN.md). The ex
 
 Allow Redis or Core NATS as the single input backend, and independently select Redis or Core NATS for each output. The supported combinations are Redis→Redis, Redis→NATS, NATS→Redis, and NATS→NATS. Keep the existing message-processing behavior—mapping, filters, queues, conflation, deduplication, and status—common to both backends.
 
-NATS scope is **Core NATS Pub/Sub**, not JetStream. JetStream persistence, consumer acknowledgements, and durable replay require a separate design because their delivery model differs from the relay's current ephemeral Pub/Sub contract.
+NATS scope is **Core NATS Pub/Sub**, not JetStream. JetStream persistence, consumer acknowledgements, and durable replay are **permanently out of scope** for this project, as are Redis Streams: the relay is an ephemeral Pub/Sub conflator, and adding a durable/replayable log would change its contract and is not planned for any future version.
 
 Throughput is an explicit 0.3 goal: the relay must be measured under heavy sustained load for every input/output combination, not only smoke-tested. Correct routing, credentials, and reconnect behavior are prerequisites, but the release also needs reference numbers (rate, latency percentiles, publish reduction, backlog) with the same rigor as the Redis hot-path benchmarks.
 

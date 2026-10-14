@@ -122,8 +122,11 @@ function Wait-ForNats([int]$TimeoutSec = 60) {
 # Waits until the relay is up (status HTTP reachable, state running) and its
 # input subscription is installed on the broker, so no published message can be
 # lost to a late subscribe.
-function Wait-RelayReady([int]$Port, [string]$InputBackend, [string]$InputPattern, [int]$TimeoutSec = 30) {
+function Wait-RelayReady([int]$Port, [string]$InputBackend, [string]$InputPattern, [string]$NatsMonitorUrl = "", [int]$TimeoutSec = 30) {
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    # PowerShell is case-insensitive, so a parameter named like the script
+    # variable would shadow it; use `$script:` explicitly for the default.
+    $monitor = if ($NatsMonitorUrl) { $NatsMonitorUrl } else { $script:natsMonitor }
     $httpReady = $false
     while ((Get-Date) -lt $deadline) {
         if (-not $httpReady) {
@@ -138,7 +141,7 @@ function Wait-RelayReady([int]$Port, [string]$InputBackend, [string]$InputPatter
                 if ([int]$result.Output.Trim() -ge 1) { return }
             } else {
                 try {
-                    $subsz = Invoke-RestMethod "$natsMonitor/subsz?subs=1" -TimeoutSec 2
+                    $subsz = Invoke-RestMethod "$monitor/subsz?subs=1" -TimeoutSec 2
                     $found = @($subsz.subscriptions_list | Where-Object { $_.subject -eq $InputPattern }).Count
                     if ($found -ge 1) { return }
                 } catch { }
@@ -192,7 +195,10 @@ function Invoke-Run {
         [int]$ExpectedLoops = 0,
         [int]$Rate = 0,
         [string]$InPrefix = "in",
-        [string]$OutPrefix = "out"
+        [string]$OutPrefix = "out",
+        [string]$NatsUrl = "",
+        [string]$NatsCa = "",
+        [string]$NatsMonitor = ""
     )
 
     Stop-Harness
@@ -207,7 +213,7 @@ function Invoke-Run {
 
     $inputSubject = "$ns.$InPrefix"
     $inputPattern = if ($InputEngine -eq "redis") { "$inputSubject.*" } else { "$inputSubject.>" }
-    Wait-RelayReady -Port $Port -InputBackend $InputEngine -InputPattern $inputPattern
+    Wait-RelayReady -Port $Port -InputBackend $InputEngine -InputPattern $inputPattern -NatsMonitorUrl $NatsMonitor
 
     $verifyPrefix = "$ns.$OutPrefix"
     $verifyPrefixes = ($VerifyEngines.Split(",") | ForEach-Object { $verifyPrefix }) -join ","
@@ -225,7 +231,8 @@ function Invoke-Run {
     $env:COMPARE_FILTER_DENY_EVERY = "$DenyEvery"
     $env:REDIS_URL = $redisUrl
     $env:REDIS_VERIFY_URL = $redisVerifyUrl
-    $env:NATS_URL = $natsUrl
+    $env:NATS_URL = if ($NatsUrl) { $NatsUrl } else { $natsUrl }
+    if ($NatsCa) { $env:NATS_ROOT_CERT_FILE = $NatsCa } else { Remove-Item Env:NATS_ROOT_CERT_FILE -ErrorAction SilentlyContinue }
 
     $verifyOut = Join-Path $work "$ns.verify"
     $verifyErr = Join-Path $work "$ns.verify.err"
@@ -352,7 +359,7 @@ $failures = @()
 
 try {
     Write-Section "Starting brokers (compose project $Project)"
-    Invoke-Compose @("up", "-d", "redis", "nats")
+    Invoke-Compose @("up", "-d", "redis", "nats", "nats-ws", "nats-wss")
     Wait-ForRedis
     Wait-ForNats
     Write-Host "brokers ready"
@@ -390,6 +397,15 @@ try {
     $acceptance += Invoke-Run -Name "loop-guard-nats" -Template "loop-guard.json" -InputEngine "nats" `
         -VerifyEngines "nats" -Total 1 -ExpectedPerOutput 1 -Port $port -ExpectedLoops 1 `
         -InPrefix "loop" -OutPrefix "loop.replay"
+    $port++
+
+    # WSS transport: input and output both dial the WebSocket-TLS listener, so
+    # the whole relay path (subscribe, publish) runs over wss://. The server
+    # certificate is the generated local CA.
+    $acceptance += Invoke-Run -Name "wss-nats-nats" -Template "nats-wss.json" -InputEngine "nats" `
+        -VerifyEngines "nats" -Total $SmokeTotal -ExpectedPerOutput $SmokeTotal -Port $port `
+        -NatsUrl "wss://127.0.0.1:18490" -NatsCa (Join-Path $PSScriptRoot "certs/ca-cert.pem") `
+        -NatsMonitor "http://127.0.0.1:18232"
     $port++
 
     if (-not $SkipLoad) {
