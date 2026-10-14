@@ -1,0 +1,132 @@
+# nFPM configuration for the Linux packages published with each release.
+#
+# nFPM (https://nfpm.goreleaser.com/) turns this single file into Debian, RPM,
+# Alpine and Arch packages without a distro build environment. That fits this
+# project because the Linux binary is statically linked against musl: the
+# packages declare no runtime dependencies and the same .deb installs on every
+# supported Ubuntu release (the compatibility matrix in .github/workflows/ci.yml
+# runs that binary on 20.04, 22.04, 24.04 and 26.04).
+#
+# Usage, from the repository root with the musl binary in dist/:
+#
+#   VERSION=0.3.0 nfpm package --config nfpm.yaml --packager deb --target dist/
+#   VERSION=0.3.0 nfpm package --config nfpm.yaml --packager rpm --target dist/
+#   VERSION=0.3.0 nfpm package --config nfpm.yaml --packager apk --target dist/
+#   VERSION=0.3.0 nfpm package --config nfpm.yaml --packager archlinux --target dist/
+#
+# VERSION is required and holds the bare version (no leading "v"); the release
+# workflow derives it from Cargo.toml. See ci/README.md and packaging/README.md.
+
+name: redis-conflated-pubsub
+arch: amd64
+platform: linux
+version: ${VERSION}
+release: 1
+
+section: net
+priority: optional
+maintainer: Roberto Spadim <rspadim@gmail.com>
+vendor: Roberto Spadim
+homepage: https://github.com/rspadim/redis-conflated-pubsub
+license: MIT
+description: |-
+  Redis Pub/Sub fan-out bridge with per-output conflation
+  Forwards raw Redis Pub/Sub messages, or Core NATS subjects, to independently
+  configured outputs, publishing immediately or conflating to the latest value
+  per mapped channel. The service binary is statically linked against musl and
+  needs no runtime dependencies.
+
+contents:
+  - src: dist/redis-conflated-pubsub
+    dst: /usr/bin/redis-conflated-pubsub
+    file_info:
+      mode: 0755
+
+  # Starting point for the deployment: localhost input and one localhost output.
+  - src: packaging/config.json
+    dst: /etc/redis-conflated-pubsub/config.json
+    type: config|noreplace
+    file_info:
+      mode: 0644
+
+  # Secret holder for the *_env configuration fields; systemd reads it as root.
+  - src: packaging/redis.env
+    dst: /etc/redis-conflated-pubsub/redis.env
+    type: config|noreplace
+    file_info:
+      mode: 0600
+
+  # Files shared by the three systemd-based packagers (Debian, RPM family and
+  # Arch). Alpine ships no systemd at all: it gets the OpenRC script below.
+  #
+  # /usr/lib/systemd/system is in systemd's search path and is the path Debian
+  # and RPM-based distributions accept today; /lib/systemd/system is the same
+  # file on merged-/usr systems (Ubuntu 20.04+), but naming /lib would make the
+  # package claim that directory and dpkg warns about it on removal.
+  - &systemd-unit
+    src: packaging/systemd/redis-conflated-pubsub.service
+    dst: /usr/lib/systemd/system/redis-conflated-pubsub.service
+    packager: deb
+    file_info:
+      mode: 0644
+  - <<: *systemd-unit
+    packager: rpm
+  - <<: *systemd-unit
+    packager: archlinux
+
+  # Declarative service account; the post-install script applies it and systemd
+  # falls back to it at boot, so no shadow-utils is required.
+  - &sysusers
+    src: packaging/sysusers/redis-conflated-pubsub.conf
+    dst: /usr/lib/sysusers.d/redis-conflated-pubsub.conf
+    packager: deb
+    file_info:
+      mode: 0644
+  - <<: *sysusers
+    packager: rpm
+  - <<: *sysusers
+    packager: archlinux
+
+  - src: packaging/openrc/redis-conflated-pubsub
+    dst: /etc/init.d/redis-conflated-pubsub
+    packager: apk
+    file_info:
+      mode: 0755
+
+  - &license
+    src: LICENSE
+    dst: /usr/share/doc/redis-conflated-pubsub/copyright
+    packager: deb
+    file_info:
+      mode: 0644
+  - <<: *license
+    dst: /usr/share/licenses/redis-conflated-pubsub/LICENSE
+    packager: rpm
+  - <<: *license
+    dst: /usr/share/licenses/redis-conflated-pubsub/LICENSE
+    packager: archlinux
+
+scripts:
+  postinstall: packaging/scripts/postinstall.sh
+  preremove: packaging/scripts/preremove.sh
+  postremove: packaging/scripts/postremove.sh
+
+overrides:
+  # Alpine has no systemd and no shadow-utils: it gets its own scripts. The
+  # generic postremove still applies there, and every branch of it is guarded
+  # (`getent`, `userdel` and `rm -rf` only run for a Debian `purge`), so it is a
+  # no-op on Alpine.
+  apk:
+    scripts:
+      postinstall: packaging/apk/post-install.sh
+      preremove: packaging/apk/pre-deinstall.sh
+
+# No dependencies on any packager: the binary is static, and the service
+# integration is optional. The maintainer scripts guard every systemctl,
+# rc-service and user management call, so the packages also install on systems
+# that boot without either init system.
+rpm:
+  group: Applications/Internet
+
+archlinux:
+  packager: Roberto Spadim <rspadim@gmail.com>

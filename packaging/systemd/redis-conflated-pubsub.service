@@ -1,0 +1,29 @@
+[Unit]
+Description=Redis Conflated Pub/Sub
+Documentation=https://github.com/rspadim/redis-conflated-pubsub
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=redis-conflated-pubsub
+Group=redis-conflated-pubsub
+ExecStart=/usr/bin/redis-conflated-pubsub --config /etc/redis-conflated-pubsub/config.json
+WorkingDirectory=/var/lib/redis-conflated-pubsub
+EnvironmentFile=-/etc/redis-conflated-pubsub/redis.env
+StateDirectory=redis-conflated-pubsub
+LogsDirectory=redis-conflated-pubsub
+StateDirectoryMode=0750
+LogsDirectoryMode=0750
+UMask=0027
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=5min
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

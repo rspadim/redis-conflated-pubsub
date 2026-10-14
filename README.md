@@ -538,4 +538,26 @@ sudo systemctl enable --now redis-conflated-pubsub.service
 sudo systemctl status redis-conflated-pubsub.service
 ```
 
+### Linux packages
+
+Releases also ship packages for the four families, all built with [nFPM](https://nfpm.goreleaser.com/) from the same static musl binary. None of them declares dependencies, so one package per family covers every supported release (CI installs and runs them on Ubuntu 20.04, 22.04, 24.04 and 26.04, plus Fedora, Alpine and Arch):
+
+| Family | Package | Install |
+| --- | --- | --- |
+| Debian/Ubuntu | `redis-conflated-pubsub_<version>-1_amd64.deb` | `sudo apt install ./redis-conflated-pubsub_0.3.0-1_amd64.deb` |
+| RHEL/Fedora/SUSE | `redis-conflated-pubsub-<version>-1.x86_64.rpm` | `sudo dnf install ./redis-conflated-pubsub-0.3.0-1.x86_64.rpm` |
+| Alpine | `redis-conflated-pubsub_<version>-r1_x86_64.apk` | `sudo apk add --allow-untrusted ./redis-conflated-pubsub_0.3.0-r1_x86_64.apk` |
+| Arch | `redis-conflated-pubsub-<version>-1-x86_64.pkg.tar.zst` | `sudo pacman -U redis-conflated-pubsub-0.3.0-1-x86_64.pkg.tar.zst` |
+
+The packages are unsigned, like the release archives, so each package manager asks for confirmation (or needs `--allow-untrusted` on Alpine). Then edit the configuration and start the service:
+
+```sh
+sudo editor /etc/redis-conflated-pubsub/config.json
+sudo systemctl enable --now redis-conflated-pubsub.service   # Debian, RPM family, Arch
+sudo rc-update add redis-conflated-pubsub default            # Alpine (OpenRC)
+sudo rc-service redis-conflated-pubsub start
+```
+
+Each package installs `/usr/bin/redis-conflated-pubsub`, the systemd unit at `/usr/lib/systemd/system/redis-conflated-pubsub.service` (Alpine gets an OpenRC script in `/etc/init.d` instead), a `sysusers.d` drop-in that defines the `redis-conflated-pubsub` system user, and the configuration files `/etc/redis-conflated-pubsub/config.json` plus `/etc/redis-conflated-pubsub/redis.env` (mode `0600`, for the `*_env` secret fields). Logs and state live in `/var/log/redis-conflated-pubsub` and `/var/lib/redis-conflated-pubsub`; installation never enables or starts the service, and a Debian `purge` removes the user, the state and the configuration. See [`nfpm.yaml`](nfpm.yaml) and [`packaging/`](packaging) for the layout.
+
 See [Docker build, run, and integration-test instructions](docker/README.md) and [CI/release details](ci/README.md).

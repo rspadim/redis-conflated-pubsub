@@ -1,0 +1,42 @@
+{
+  "client_name": "ConflatedPS-{version}-{role}::{user}::{host}",
+  "input": {
+    "redis": {
+      "host": "localhost",
+      "port": 6379,
+      "database": 0
+    },
+    "subscriptions": [
+      {
+        "type": "psubscribe",
+        "pattern": "*"
+      }
+    ]
+  },
+  "outputs": {
+    "output0": {
+      "redis": {
+        "host": "localhost",
+        "port": 6379,
+        "database": 0
+      },
+      "channel_prefix": "db0:",
+      "conflation": {
+        "interval_ms": 250
+      }
+    }
+  },
+  "instance_lock": {
+    "path": "/var/lib/redis-conflated-pubsub/redis-conflated-pubsub.lock"
+  },
+  "status": {
+    "http": {
+      "bind": "127.0.0.1",
+      "port": 9090
+    }
+  },
+  "logging": {
+    "directory": "/var/log/redis-conflated-pubsub",
+    "level": "info"
+  }
+}

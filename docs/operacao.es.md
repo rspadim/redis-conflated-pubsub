@@ -14,6 +14,40 @@ sudo systemctl status redis-conflated-pubsub.service
 El archivo `redis-conflated-pubsub.service.example` está en la raíz del repositorio;
 ajusta `User`, `ExecStart` y las rutas antes de instalar en producción.
 
+## Paquetes Debian/Ubuntu (.deb), RPM, Alpine (.apk) y Arch
+
+Cada release publica paquetes para las cuatro familias, todos generados con
+[nFPM](https://nfpm.goreleaser.com/) a partir del mismo binario estático (musl):
+
+```sh
+sudo apt install ./redis-conflated-pubsub_0.3.0-1_amd64.deb                     # Debian/Ubuntu
+sudo dnf install ./redis-conflated-pubsub-0.3.0-1.x86_64.rpm                    # RHEL/Fedora/SUSE
+sudo apk add --allow-untrusted ./redis-conflated-pubsub_0.3.0-r1_x86_64.apk     # Alpine
+sudo pacman -U redis-conflated-pubsub-0.3.0-1-x86_64.pkg.tar.zst                # Arch
+```
+
+Los paquetes no están firmados, como el resto de los artefactos del release, así
+que cada gestor pide confirmación. Después, edita la configuración e inicia el
+servicio:
+
+```sh
+sudo editor /etc/redis-conflated-pubsub/config.json
+sudo systemctl enable --now redis-conflated-pubsub.service   # Debian, RPM, Arch
+sudo rc-update add redis-conflated-pubsub default            # Alpine (OpenRC)
+sudo rc-service redis-conflated-pubsub start
+```
+
+Ningún paquete declara dependencias (el binario es estático) y todos instalan
+`/usr/bin/redis-conflated-pubsub`, la cuenta de servicio definida vía
+`sysusers.d`, `/etc/redis-conflated-pubsub/config.json` y
+`/etc/redis-conflated-pubsub/redis.env` (modo `0600`, para los campos `*_env`).
+Las familias con systemd instalan la unit en
+`/usr/lib/systemd/system/redis-conflated-pubsub.service`; en Alpine un script
+OpenRC ocupa `/etc/init.d` en su lugar. Los logs y el estado quedan en
+`/var/log/redis-conflated-pubsub` y `/var/lib/redis-conflated-pubsub`. El
+servicio no se habilita ni se inicia al instalar, y un `purge` en Debian elimina
+la cuenta, el estado y la configuración.
+
 ## Recargar la configuración en Unix
 
 Envía `SIGHUP` para recargar el JSON configurado sin reiniciar la unit:

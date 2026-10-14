@@ -14,6 +14,39 @@ sudo systemctl status redis-conflated-pubsub.service
 O arquivo `redis-conflated-pubsub.service.example` está na raiz do repositório;
 ajuste `User`, `ExecStart` e os caminhos antes de instalar em produção.
 
+## Pacotes Debian/Ubuntu (.deb), RPM, Alpine (.apk) e Arch
+
+Cada release publica pacotes para as quatro famílias, todos gerados com o
+[nFPM](https://nfpm.goreleaser.com/) a partir do mesmo binário estático (musl):
+
+```sh
+sudo apt install ./redis-conflated-pubsub_0.3.0-1_amd64.deb                     # Debian/Ubuntu
+sudo dnf install ./redis-conflated-pubsub-0.3.0-1.x86_64.rpm                    # RHEL/Fedora/SUSE
+sudo apk add --allow-untrusted ./redis-conflated-pubsub_0.3.0-r1_x86_64.apk     # Alpine
+sudo pacman -U redis-conflated-pubsub-0.3.0-1-x86_64.pkg.tar.zst                # Arch
+```
+
+Os pacotes são não assinados, como os demais artefatos do release, então cada
+gerenciador pede confirmação. Depois, edite a configuração e inicie o serviço:
+
+```sh
+sudo editor /etc/redis-conflated-pubsub/config.json
+sudo systemctl enable --now redis-conflated-pubsub.service   # Debian, RPM, Arch
+sudo rc-update add redis-conflated-pubsub default            # Alpine (OpenRC)
+sudo rc-service redis-conflated-pubsub start
+```
+
+Nenhum pacote declara dependências (o binário é estático) e todos instalam
+`/usr/bin/redis-conflated-pubsub`, o usuário de sistema definido via
+`sysusers.d`, `/etc/redis-conflated-pubsub/config.json` e
+`/etc/redis-conflated-pubsub/redis.env` (modo `0600`, para os campos `*_env`).
+Nas famílias com systemd a unit fica em
+`/usr/lib/systemd/system/redis-conflated-pubsub.service`; no Alpine um script
+OpenRC ocupa `/etc/init.d` no lugar dela. Logs e estado ficam em
+`/var/log/redis-conflated-pubsub` e `/var/lib/redis-conflated-pubsub`. O serviço
+não é habilitado nem iniciado na instalação, e um `purge` no Debian remove
+usuário, estado e configuração.
+
 ## Recarregar configuração no Unix
 
 Envie `SIGHUP` para recarregar o JSON configurado sem reiniciar a unit:

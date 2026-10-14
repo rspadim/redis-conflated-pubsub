@@ -14,6 +14,40 @@ sudo systemctl status redis-conflated-pubsub.service
 The `redis-conflated-pubsub.service.example` file is at the repository root;
 adjust `User`, `ExecStart` and the paths before installing it in production.
 
+## Debian/Ubuntu (.deb), RPM, Alpine (.apk) and Arch packages
+
+Each release publishes packages for the four families, all built with
+[nFPM](https://nfpm.goreleaser.com/) from the same static musl binary:
+
+```sh
+sudo apt install ./redis-conflated-pubsub_0.3.0-1_amd64.deb                     # Debian/Ubuntu
+sudo dnf install ./redis-conflated-pubsub-0.3.0-1.x86_64.rpm                    # RHEL/Fedora/SUSE
+sudo apk add --allow-untrusted ./redis-conflated-pubsub_0.3.0-r1_x86_64.apk     # Alpine
+sudo pacman -U redis-conflated-pubsub-0.3.0-1-x86_64.pkg.tar.zst                # Arch
+```
+
+The packages are unsigned, like the other release artifacts, so each package
+manager asks for confirmation. Then edit the configuration and start the
+service:
+
+```sh
+sudo editor /etc/redis-conflated-pubsub/config.json
+sudo systemctl enable --now redis-conflated-pubsub.service   # Debian, RPM, Arch
+sudo rc-update add redis-conflated-pubsub default            # Alpine (OpenRC)
+sudo rc-service redis-conflated-pubsub start
+```
+
+No package declares dependencies (the binary is static) and all of them install
+`/usr/bin/redis-conflated-pubsub`, the service account declared through
+`sysusers.d`, `/etc/redis-conflated-pubsub/config.json` and
+`/etc/redis-conflated-pubsub/redis.env` (mode `0600`, for the `*_env` fields).
+The systemd families install the unit at
+`/usr/lib/systemd/system/redis-conflated-pubsub.service`; Alpine uses an OpenRC
+script in `/etc/init.d` instead. Logs and state live in
+`/var/log/redis-conflated-pubsub` and `/var/lib/redis-conflated-pubsub`. The
+service is not enabled or started during installation, and a Debian `purge`
+removes the account, the state and the configuration.
+
 ## Reload configuration on Unix
 
 Send `SIGHUP` to reload the configured JSON without restarting the unit:

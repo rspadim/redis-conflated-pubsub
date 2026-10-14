@@ -154,6 +154,100 @@ jobs:
       - name: Run static binary in Ubuntu container
         run: docker run --rm --platform linux/amd64 -v "$PWD/dist:/dist:ro" ubuntu:${{ matrix.ubuntu }} /dist/redis-conflated-pubsub --version
 
+  # Building the packages here on every run keeps a broken nfpm.yaml, maintainer
+  # script or unit file from being found only on a release tag.
+  linux-packages:
+    name: Build and install the deb/rpm/apk/pkg packages
+    needs: linux-static
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      NFPM_VERSION: "2.48.0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: redis-conflated-pubsub-linux-x86_64-musl
+          path: dist
+      - run: chmod +x dist/redis-conflated-pubsub
+      - name: Install nFPM
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}"
+          curl -fsSL -o "$RUNNER_TEMP/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" "$base/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/checksums.txt" "$base/checksums.txt"
+          (cd "$RUNNER_TEMP" && grep "nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz\$" checksums.txt | sha256sum --check)
+          sudo tar -xzf "$RUNNER_TEMP/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" -C /usr/local/bin nfpm
+          nfpm --version
+      - name: Build the packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Placeholder version, like the installer job: releases take the real
+          # version from Cargo.toml.
+          export VERSION=0.0.0
+          for packager in deb rpm apk archlinux; do
+            nfpm package --config nfpm.yaml --packager "$packager" --target dist/
+          done
+          ls -l dist/
+      - name: Install the packages in distribution containers
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The same release list the compatibility matrix above uses.
+          for release in 20.04 22.04 24.04 26.04; do
+            echo "::group::dpkg install on Ubuntu $release"
+            docker run --rm --platform linux/amd64 -v "$PWD/dist:/dist:ro" "ubuntu:$release" bash -c '
+              set -euo pipefail
+              apt-get update -qq
+              apt-get install -y -qq /dist/redis-conflated-pubsub_*_amd64.deb
+              redis-conflated-pubsub --version
+              redis-conflated-pubsub --config /etc/redis-conflated-pubsub/config.json --check-config
+              id redis-conflated-pubsub
+              test -f /usr/lib/systemd/system/redis-conflated-pubsub.service
+              test -f /usr/lib/sysusers.d/redis-conflated-pubsub.conf
+              dpkg --purge redis-conflated-pubsub
+              ! id redis-conflated-pubsub
+            '
+            echo "::endgroup::"
+          done
+
+          echo "::group::rpm install on Fedora"
+          docker run --rm --platform linux/amd64 -v "$PWD/dist:/dist:ro" fedora:latest bash -c '
+            set -euo pipefail
+            rpm -ivh /dist/*.rpm
+            redis-conflated-pubsub --version
+            redis-conflated-pubsub --config /etc/redis-conflated-pubsub/config.json --check-config
+            id redis-conflated-pubsub
+            test -f /usr/lib/systemd/system/redis-conflated-pubsub.service
+            rpm -e redis-conflated-pubsub
+          '
+          echo "::endgroup::"
+
+          echo "::group::apk install on Alpine"
+          docker run --rm --platform linux/amd64 -v "$PWD/dist:/dist:ro" alpine:3.22 sh -c '
+            set -eu
+            apk add --allow-untrusted /dist/redis-conflated-pubsub_*_x86_64.apk
+            redis-conflated-pubsub --version
+            redis-conflated-pubsub --config /etc/redis-conflated-pubsub/config.json --check-config
+            id redis-conflated-pubsub
+            test -f /etc/init.d/redis-conflated-pubsub
+            apk del redis-conflated-pubsub
+          '
+          echo "::endgroup::"
+
+          echo "::group::pacman install on Arch"
+          docker run --rm --platform linux/amd64 -v "$PWD/dist:/dist:ro" archlinux:latest bash -c '
+            set -euo pipefail
+            pacman -U --noconfirm /dist/*.pkg.tar.zst
+            redis-conflated-pubsub --version
+            redis-conflated-pubsub --config /etc/redis-conflated-pubsub/config.json --check-config
+            id redis-conflated-pubsub
+            pacman -R --noconfirm redis-conflated-pubsub
+          '
+          echo "::endgroup::"
+
   windows-installer:
     name: Compile the Windows installer (unsigned)
     runs-on: windows-latest

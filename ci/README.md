@@ -7,6 +7,7 @@ Workflow definitions are in [`../.github/workflows/ci.yml`](../.github/workflows
 The CI workflow runs on pushes to `main`, pull requests, and manual dispatch. It pins Rust 1.99.0 and checks formatting, Clippy with warnings denied, unit tests, and release builds on Ubuntu 22.04/24.04/26.04, Windows, and macOS. Additional jobs:
 
 - Build the static Linux x86_64 musl image with the root `Dockerfile`, smoke-test `--version`, and upload the extracted binary as a workflow artifact; run that binary in Ubuntu 20.04/22.04/24.04/26.04 containers.
+- Build the Linux deb, rpm, apk and Arch packages with nFPM (`nfpm.yaml` plus `packaging/`), install them in Ubuntu 20.04/22.04/24.04/26.04, Fedora, Alpine and Arch containers, validate the shipped `/etc/redis-conflated-pubsub/config.json` with `--check-config` and remove each package again, so a broken package layout fails on a pull request instead of on a release tag.
 - Run Compose E2Es for Pub/Sub, fault handling, RESP limits/oversized-message policies, and TTL/conflation. Run the TTL stack command from the repository root, where `compose.ttl.test.yml` lives:
 
   ```sh
@@ -39,3 +40,20 @@ The workflow builds four targets and publishes the archives and SHA-256 sidecar 
 | macOS Apple Silicon | `macos-aarch64.tar.gz` | `.tar.gz.sha256` |
 
 Each archive contains the corresponding service executable. The Linux release binary is built for the `x86_64-unknown-linux-musl` target; the separate CI image smoke test also extracts and tests this static binary.
+
+The same workflow builds Linux packages with [nFPM](https://nfpm.goreleaser.com/) from that binary and publishes them with per-file SHA-256 sidecars:
+
+| Package | Name |
+| --- | --- |
+| Debian/Ubuntu | `redis-conflated-pubsub_<version>-1_amd64.deb` |
+| RHEL/Fedora/SUSE family | `redis-conflated-pubsub-<version>-1.x86_64.rpm` |
+| Alpine | `redis-conflated-pubsub_<version>-r1_x86_64.apk` |
+| Arch | `redis-conflated-pubsub-<version>-1-x86_64.pkg.tar.zst` |
+
+None of them declares dependencies (the binary is static). The systemd families install the unit at `/usr/lib/systemd/system/redis-conflated-pubsub.service`, a `sysusers.d` drop-in, `/etc/redis-conflated-pubsub/config.json` and `/etc/redis-conflated-pubsub/redis.env` (mode `0600` for the `*_env` secret fields); Alpine installs an OpenRC script in `/etc/init.d` instead of the unit. Installation never enables or starts the service. The packaging job then runs `--check-config` on the shipped configuration and removes the package again, inside Ubuntu 20.04, 22.04, 24.04 and 26.04 containers plus Fedora, Alpine and Arch containers. To build the packages locally, put the static binary at `dist/redis-conflated-pubsub` and run from the repository root:
+
+```sh
+for packager in deb rpm apk archlinux; do
+  VERSION=0.3.0 nfpm package --config nfpm.yaml --packager "$packager" --target dist/
+done
+```
