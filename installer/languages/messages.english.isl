@@ -88,3 +88,6 @@ SecretsFailed=The service environment could not be updated:%n%n%1
 SecretNotSetWarning=No value was entered for %1, so the installer will not store it. The relay reads its credentials from the service's own environment, where that variable does not exist yet: the service will exit at startup until you set it. Continue?
 ModeInstallOnly=Install the executable only (no configuration)
 FinishedNoConfig=No configuration was created and the service was not installed: start from config.example.json or config.nats.example.json and run scripts\service.ps1 from the install directory when you are ready.
+BadServiceParam=/SERVICE accepts only 0 or 1, but got "%1".
+BadStartupParam=/SERVICESTART accepts only auto, delayed-auto or demand, but got "%1".
+ConfigRejected=The relay rejected this configuration:%n%n%1

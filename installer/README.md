@@ -20,6 +20,22 @@ Silent mode, for a scripted deployment:
 .\ConflatedPubSubSetup-0.3.0.exe /VERYSILENT /CONFIG=C:\relay\config.json /SERVICE=1 /SERVICESTART=auto
 ```
 
+| Parameter | Meaning |
+| --- | --- |
+| `/CONFIG=<file>` | Use a configuration that already exists. It must exist: the setup refuses to start otherwise, and nothing is generated. |
+| `/SERVICE=0\|1` | `1` (default) registers and starts the service; `0` only drops the files, for an operator who will finish by hand. |
+| `/SERVICESTART=auto\|delayed-auto\|demand` | Startup type. Defaults to `auto`, or `demand` when the wizard's "start automatically" task is unchecked. |
+
+Without `/CONFIG` the configuration is generated from the wizard's default answers
+(Redis input to Redis output); to change those, run the wizard or edit
+`config.json` afterwards.
+
+An invalid value aborts before anything is written, and **nothing is shown** in
+silent mode — a dialog would wait for a click that never comes. The non-zero exit
+code is the signal, and `/LOG=<file>` keeps Inno's own log. Failures after the
+files are copied (the relay rejecting the configuration, the service refusing to
+start) abort the install the same way instead of showing a message box.
+
 ## What the wizard does
 
 1. **Input, output and tuning pages** (after the tasks page). The wizard asks the

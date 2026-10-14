@@ -17,10 +17,18 @@
 ; The uninstaller stops and removes the service, then asks whether to keep
 ; config.json and the logs.
 ;
-; Silent mode: /VERYSILENT, plus Inno's own switches such as /DIR=..., runs the
+; Silent mode: /VERYSILENT (plus Inno's own switches such as /DIR=...) runs the
 ; wizard's default answers — Redis input to Redis output, the service installed and
-; started. The answers are NOT settable from the command line; change them in the
-; wizard, or in config.json afterwards.
+; started. Three parameters make it usable for an unattended deployment:
+;
+;   /CONFIG=<file>                  use a configuration that already exists
+;   /SERVICE=0|1                    register the service, or only drop the files
+;   /SERVICESTART=auto|delayed-auto|demand
+;
+; An invalid value aborts before anything is written, and nothing is shown in
+; silent mode: the non-zero exit code is the signal. Without /CONFIG the
+; configuration is generated from the wizard defaults; to change those answers,
+; run the wizard or edit config.json afterwards.
 
 #define AppName "Conflated Pub/Sub"
 #define AppExeName "redis-conflated-pubsub"
@@ -164,35 +172,185 @@ var
   ServiceWasInstalled: Boolean;
   ServiceWasStopped: Boolean;
   ServiceVerification: String;
+  SilentConfigPath: String;
+  SilentServiceSet: Boolean;
+  SilentInstallService: Boolean;
+  SilentStartupType: String;
 
 { --- mode helpers ------------------------------------------------------- }
 { Declared before the functions that use them: Pascal Script resolves
   identifiers in order. They read a page that exists by the time they run. }
 
+{ The mode lives on a wizard page; a silent install may reach the code below
+  before the pages exist, and the first entry is the default. }
+function ModeIndex(): Integer;
+begin
+  if ModePage = nil then
+    Result := 0
+  else
+    Result := ModePage.SelectedValueIndex;
+end;
+
 function UsesExistingFile(): Boolean;
 begin
-  Result := ModePage.SelectedValueIndex = 4;
+  Result := ModeIndex() = 4;
 end;
 
 function InstallsOnly(): Boolean;
 begin
-  Result := ModePage.SelectedValueIndex = 5;
+  Result := ModeIndex() = 5;
 end;
 
 { True when the wizard collects answers and writes a configuration file. }
 function WantsConfiguration(): Boolean;
 begin
-  Result := ModePage.SelectedValueIndex < 4;
+  Result := ModeIndex() < 4;
 end;
 
 function InputIsRedis(): Boolean;
 begin
-  Result := (ModePage.SelectedValueIndex = 0) or (ModePage.SelectedValueIndex = 2);
+  Result := (ModeIndex() = 0) or (ModeIndex() = 2);
 end;
 
 function OutputIsRedis(): Boolean;
 begin
-  Result := (ModePage.SelectedValueIndex = 0) or (ModePage.SelectedValueIndex = 3);
+  Result := (ModeIndex() = 0) or (ModeIndex() = 3);
+end;
+
+{ --- unattended install --------------------------------------------------- }
+{ /CONFIG=<file> uses a configuration that already exists, /SERVICE=0|1 decides
+  whether the service is registered, and /SERVICESTART=auto|delayed-auto|demand
+  overrides its startup type. An invalid value aborts before anything is written;
+  in silent mode nothing is shown, because a dialog would wait for a click that
+  never comes — the non-zero exit code is the signal automation can act on. }
+
+function StripQuotes(const Value: String): String;
+begin
+  Result := Trim(Value);
+  if (Length(Result) >= 2) and (Result[1] = '"') and (Result[Length(Result)] = '"') then
+    Result := Copy(Result, 2, Length(Result) - 2);
+end;
+
+function ParamValue(const Name: String): String;
+var
+  I: Integer;
+  Prefix: String;
+begin
+  Result := '';
+  Prefix := '/' + Name + '=';
+  for I := 1 to ParamCount do
+    if CompareText(Copy(ParamStr(I), 1, Length(Prefix)), Prefix) = 0 then
+    begin
+      Result := StripQuotes(Copy(ParamStr(I), Length(Prefix) + 1, Length(ParamStr(I))));
+      exit;
+    end;
+end;
+
+function IsStartupType(const Value: String): Boolean;
+var
+  Normalized: String;
+begin
+  Normalized := LowerCase(Trim(Value));
+  Result := (Normalized = 'auto') or (Normalized = 'delayed-auto') or
+            (Normalized = 'demand');
+end;
+
+function InitializeSetup(): Boolean;
+var
+  Value: String;
+begin
+  Result := True;
+  SilentConfigPath := '';
+  SilentServiceSet := False;
+  SilentInstallService := True;
+  SilentStartupType := '';
+
+  Value := ParamValue('CONFIG');
+  if Value <> '' then
+  begin
+    if not FileExists(Value) then
+    begin
+      if not WizardSilent() then
+        MsgBox(FmtMessage(CustomMessage('ConfigMissing'), [Value]), mbError, MB_OK);
+      Result := False;
+      exit;
+    end;
+    SilentConfigPath := Value;
+  end;
+
+  Value := ParamValue('SERVICE');
+  if Value <> '' then
+  begin
+    if (Value <> '0') and (Value <> '1') then
+    begin
+      if not WizardSilent() then
+        MsgBox(FmtMessage(CustomMessage('BadServiceParam'), [Value]), mbError, MB_OK);
+      Result := False;
+      exit;
+    end;
+    SilentServiceSet := True;
+    SilentInstallService := Value = '1';
+  end;
+
+  Value := ParamValue('SERVICESTART');
+  if Value <> '' then
+  begin
+    if not IsStartupType(Value) then
+    begin
+      if not WizardSilent() then
+        MsgBox(FmtMessage(CustomMessage('BadStartupParam'), [Value]), mbError, MB_OK);
+      Result := False;
+      exit;
+    end;
+    SilentStartupType := LowerCase(Trim(Value));
+  end;
+end;
+
+{ Where the configuration comes from, whichever way the setup was started. }
+function EffectiveConfigPath(): String;
+begin
+  if SilentConfigPath <> '' then
+    Result := SilentConfigPath
+  else if ConfigPage.Values[0] <> '' then
+    Result := ConfigPage.Values[0]
+  else
+    Result := ExpandConstant('{app}\config.json');
+end;
+
+function ShouldInstallService(): Boolean;
+begin
+  if SilentServiceSet then
+    Result := SilentInstallService
+  else
+    Result := WizardIsTaskSelected('service');
+end;
+
+function ServiceStartupType(): String;
+begin
+  if SilentStartupType <> '' then
+    Result := SilentStartupType
+  else if WizardIsTaskSelected('serviceauto') then
+    Result := 'auto'
+  else
+    Result := 'demand';
+end;
+
+{ /CONFIG points at a file that must already exist, so there is nothing to
+  generate; otherwise the wizard's own mode decides. }
+function ShouldGenerateConfig(): Boolean;
+begin
+  if SilentConfigPath <> '' then
+    Result := False
+  else
+    Result := WantsConfiguration();
+end;
+
+procedure FailOrReport(const Message: String);
+begin
+  if WizardSilent() then
+    RaiseException(Message)
+  else
+    SuppressibleMsgBox(Message, mbError, MB_OK, IDOK);
 end;
 
 function PowerShellExe(): String;
@@ -839,7 +997,7 @@ end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 var
-  ScriptPath, Params, ReportPath, Report, StartupType, ExePath: String;
+  ScriptPath, Params, ReportPath, Report, StartupType, ExePath, ConfigPath: String;
   ExitCode: Integer;
 begin
   if CurStep <> ssPostInstall then
@@ -847,6 +1005,7 @@ begin
 
   ReportPath := ExpandConstant('{tmp}\postinstall-report.txt');
   ExePath := ExpandConstant('{app}\{#AppExeName}.exe');
+  ConfigPath := EffectiveConfigPath();
 
   { config.json from the wizard answers, with absolute paths. An existing file is
     kept, which is what an upgrade wants; the draft was already validated by the
@@ -861,18 +1020,30 @@ begin
     exit;
   end;
 
-  if WantsConfiguration() then
+  if ShouldGenerateConfig() then
   begin
-    if not BuildConfig(ConfigPage.Values[0], False) then
+    if not BuildConfig(ConfigPath, False) then
     begin
       Report := ReadTextFile(NewConfigReportPath());
       if Report = '' then
         Report := 'New-Config.ps1 produced no output';
-      MsgBox(FmtMessage(CustomMessage('GenerateFailed'), [Report]), mbError, MB_OK);
+      FailOrReport(FmtMessage(CustomMessage('GenerateFailed'), [Report]));
     end;
   end;
 
-  if not WizardIsTaskSelected('service') then
+  { An unattended install never went through the wizard's validation, so the file
+    the service is about to use is checked here instead. }
+  if WizardSilent() then
+  begin
+    ScriptPath := ExpandConstant('{app}\scripts\validate-config.ps1');
+    Params := '-ConfigPath ' + Quote(ConfigPath) + ' -ExePath ' + Quote(ExePath) +
+              ' -ReportFile ' + Quote(ReportPath);
+    DeleteFile(ReportPath);
+    if (not RunScript(ScriptPath, Params, ExitCode)) or (ExitCode <> 0) then
+      FailOrReport(FmtMessage(CustomMessage('ConfigRejected'), [ReadTextFile(ReportPath)]));
+  end;
+
+  if not ShouldInstallService() then
   begin
     { A service stopped for the upgrade is still registered, so put the machine
       back the way we found it instead of silently leaving the relay down. }
@@ -886,23 +1057,19 @@ begin
     exit;
   end;
 
-  if WizardIsTaskSelected('serviceauto') then
-    StartupType := 'auto'
-  else
-    StartupType := 'demand';
+  StartupType := ServiceStartupType();
 
   ScriptPath := ExpandConstant('{app}\scripts\service.ps1');
-  Params := '-Action install -ExePath "' + ExePath +
-            '" -ConfigPath "' + ConfigPage.Values[0] +
-            '" -StartupType ' + StartupType +
-            ' -ReportFile "' + ReportPath + '"';
+  Params := '-Action install -ExePath ' + Quote(ExePath) +
+            ' -ConfigPath ' + Quote(ConfigPath) +
+            ' -StartupType ' + StartupType +
+            ' -ReportFile ' + Quote(ReportPath);
   DeleteFile(ReportPath);
 
   if (not RunScript(ScriptPath, Params, ExitCode)) or (ExitCode <> 0) then
   begin
     Report := ReadTextFile(ReportPath);
-    MsgBox(FmtMessage(CustomMessage('ServiceInstallFailed'), [Report]), mbError, MB_OK);
-    exit;
+    FailOrReport(FmtMessage(CustomMessage('ServiceInstallFailed'), [Report]));
   end;
 
   Params := '-Action start -ReportFile "' + ReportPath + '"';
@@ -910,8 +1077,7 @@ begin
   if (not RunScript(ScriptPath, Params, ExitCode)) or (ExitCode <> 0) then
   begin
     Report := ReadTextFile(ReportPath);
-    MsgBox(FmtMessage(CustomMessage('ServiceStartFailed'), [Report]), mbError, MB_OK);
-    exit;
+    FailOrReport(FmtMessage(CustomMessage('ServiceStartFailed'), [Report]));
   end;
 
   ServiceWasInstalled := True;
@@ -920,14 +1086,14 @@ begin
     injected when the service starts below — and are visible to nothing else on
     the machine. }
   if not StoreSecrets('{#ServiceName}') then
-    MsgBox(FmtMessage(CustomMessage('SecretsFailed'), [SecretsMessage]), mbError, MB_OK);
+    FailOrReport(FmtMessage(CustomMessage('SecretsFailed'), [SecretsMessage]));
 
   { `sc start` only proves that the service manager accepted the request. Ask the
     relay whether it actually came up: a service that exits during startup would
     otherwise be reported as a success. }
   ScriptPath := ExpandConstant('{app}\scripts\verify-service.ps1');
-  Params := '-ConfigPath "' + ConfigPage.Values[0] +
-            '" -TimeoutSeconds 20 -ReportFile "' + ReportPath + '"';
+  Params := '-ConfigPath ' + Quote(ConfigPath) +
+            ' -TimeoutSeconds 20 -ReportFile ' + Quote(ReportPath);
   DeleteFile(ReportPath);
   if RunScript(ScriptPath, Params, ExitCode) and (ExitCode = 0) then
     ServiceVerification := CustomMessage('ServiceAlive')
@@ -945,6 +1111,10 @@ begin
       the directory page has been passed. Re-suggested when the directory
       changes, as long as the user has not typed a path of their own. }
     Suggested := ExpandConstant('{app}\config.json');
+    { /CONFIG points at a file that already exists: show that one, so an
+      interactive run and an unattended one agree on the source. }
+    if SilentConfigPath <> '' then
+      Suggested := SilentConfigPath;
     if (ConfigPage.Values[0] = '') or (ConfigPage.Values[0] = ConfigDefault) then
       ConfigPage.Values[0] := Suggested;
     ConfigDefault := Suggested;
