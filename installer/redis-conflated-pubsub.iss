@@ -59,6 +59,7 @@ DefaultGroupName={#AppName}
 DisableDirPage=no
 AllowNoIcons=yes
 LicenseFile={#RepoRoot}\LICENSE
+SetupIconFile={#RepoRoot}\installer\{#AppExeName}.ico
 ; Registering and controlling a service requires elevation.
 PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible
@@ -217,11 +218,11 @@ Name: "{app}\logs"; Flags: uninsneveruninstall
 [Icons]
 ; Shortcut FILE names stay English and stable: a localized file name created a
 ; second shortcut on a reinstall in another language and orphaned the first.
-Name: "{group}\Validate configuration"; Filename: "{app}\Validate-Config.cmd"; Comment: "{cm:IconValidate}"; WorkingDir: "{app}"
+Name: "{group}\Validate configuration"; Filename: "{app}\Validate-Config.cmd"; Comment: "{cm:IconValidate}"; WorkingDir: "{app}"; IconFilename: "{app}\{#AppExeName}.exe"
 Name: "{group}\Edit config.json"; Filename: "{sys}\notepad.exe"; Parameters: """{app}\config.json"""; Comment: "{cm:IconConfig}"
 Name: "{group}\Project documentation"; Filename: "{#AppUrl}"; Comment: "{cm:IconDocs}"
 Name: "{group}\Uninstall {#AppName}"; Filename: "{uninstallexe}"; Comment: "{cm:IconUninstall}"
-Name: "{autodesktop}\{#AppName} - Validate configuration"; Filename: "{app}\Validate-Config.cmd"; Comment: "{cm:IconValidate}"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{autodesktop}\{#AppName} - Validate configuration"; Filename: "{app}\Validate-Config.cmd"; Comment: "{cm:IconValidate}"; WorkingDir: "{app}"; IconFilename: "{app}\{#AppExeName}.exe"; Tasks: desktopicon
 
 [Run]
 Filename: "{sys}\notepad.exe"; Parameters: """{app}\config.json"""; Description: "{cm:RunEditConfig}"; Flags: postinstall nowait skipifsilent unchecked
@@ -235,6 +236,7 @@ var
   ConfigPage: TInputFileWizardPage;
   KeepConfig: Boolean;
   ServiceWasInstalled: Boolean;
+  ServiceWasStopped: Boolean;
 
 function PowerShellExe(): String;
 begin
@@ -331,6 +333,37 @@ begin
     MsgBox(CustomMessage('ValidateOk'), mbInformation, MB_OK);
 end;
 
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ScriptPath, Params, ReportPath: String;
+  ExitCode: Integer;
+begin
+  Result := '';
+  NeedsRestart := False;
+  ServiceWasStopped := False;
+
+  { An upgrade replaces the executable of a service that is still running.
+    Windows lets a running image be renamed but not overwritten, so the copy
+    would be deferred to the next reboot and the service would keep executing the
+    old binary while the wizard reports success. Stop it before the files are
+    copied; CurStepChanged starts it again. On a fresh install the scripts do not
+    exist yet, which is exactly the case where there is nothing to stop. }
+  ScriptPath := ExpandConstant('{app}\scripts\service.ps1');
+  if not FileExists(ScriptPath) then
+    exit;
+
+  ReportPath := ExpandConstant('{tmp}\preinstall-report.txt');
+  Params := '-Action status -ReportFile "' + ReportPath + '"';
+  DeleteFile(ReportPath);
+  if (not RunScript(ScriptPath, Params, ExitCode)) or (ExitCode <> 0) then
+    exit;
+
+  Params := '-Action stop -ReportFile "' + ReportPath + '"';
+  DeleteFile(ReportPath);
+  if RunScript(ScriptPath, Params, ExitCode) and (ExitCode = 0) then
+    ServiceWasStopped := True;
+end;
+
 procedure InitializeWizard();
 begin
   ConfigPage := CreateInputFilePage(wpSelectTasks,
@@ -370,7 +403,18 @@ begin
   RunScript(ScriptPath, Params, ExitCode);
 
   if not WizardIsTaskSelected('service') then
+  begin
+    { A service stopped for the upgrade is still registered, so put the machine
+      back the way we found it instead of silently leaving the relay down. }
+    if ServiceWasStopped then
+    begin
+      ScriptPath := ExpandConstant('{app}\scripts\service.ps1');
+      Params := '-Action start -ReportFile "' + ReportPath + '"';
+      DeleteFile(ReportPath);
+      RunScript(ScriptPath, Params, ExitCode);
+    end;
     exit;
+  end;
 
   if WizardIsTaskSelected('serviceauto') then
     StartupType := 'auto'
