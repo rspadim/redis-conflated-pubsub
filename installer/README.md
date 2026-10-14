@@ -114,6 +114,61 @@ Every script is idempotent and reports through its exit code, which is what the
 wizard reacts to. `New-Config.ps1` can also be run by hand to regenerate a
 configuration: it accepts the same answers as parameters.
 
+## Credentials
+
+The relay reads credentials from environment variables (`password_env`,
+`token_env`), and a Windows service does **not** see the user variables of
+whoever installed it: a variable set in the operator's profile is invisible to the
+service, which then exits at startup.
+
+The wizard therefore asks for the secret value on the same page that asks for the
+variable name, and stores it in the service's **own** environment block: a
+`REG_MULTI_SZ` value named `Environment` under the service's registry key, which
+the service control manager injects into that service's process and nothing else.
+The secret stays readable only by administrators.
+
+- Leaving the value empty is supported: the wizard then warns that the variable
+  must already exist in the service environment, because the relay will exit at
+  startup until it does.
+- Type the value as ASCII if you can. `SaveStringToFile` is a byte-oriented API,
+  so a password with accents may not survive the temporary file the installer
+  writes. Setting the variable yourself avoids the question entirely.
+- The temporary file holding the values is deleted right after the write, and the
+  values never reach a command line.
+
+`Set-ServiceSecrets.ps1` does the work and can also be run by hand:
+
+```powershell
+# what is already there, and what is missing
+.\scripts\Set-ServiceSecrets.ps1 -Verify -ServiceName redis-conflated-pubsub -Names 'REDIS_PASSWORD,NATS_TOKEN'
+
+# store a value
+'set REDIS_PASSWORD=secret' | Set-Content secrets.txt
+.\scripts\Set-ServiceSecrets.ps1 -ServiceName redis-conflated-pubsub -SecretFile secrets.txt
+Remove-Item secrets.txt
+```
+
+It merges instead of replacing, so variables added by hand survive a reinstall.
+
+## The service account
+
+The service runs under the passwordless virtual account
+`NT SERVICE\redis-conflated-pubsub`, not LocalSystem: the relay needs the network
+and its own directory, nothing else. The installer grants that account write
+access to the install directory (logs, lock file, status snapshot) and leaves
+LocalSystem only if the machine refuses the account, saying so in the wizard.
+
+Two details worth knowing:
+
+- `icacls` cannot resolve a virtual account before the service control manager has
+  registered it — it fails with error 1332, "no mapping between account names and
+  security IDs". The installer therefore grants the access and, when that fails,
+  starts the service once (which registers the account), grants, and lets the
+  wizard start it again.
+- The uninstaller stops and deletes the service, then removes the access entry
+  from the directory, so a kept install directory does not carry a grant for an
+  account that will not exist again.
+
 ## Upgrades
 
 `PrepareToInstall` stops an existing service before the files are copied. Windows

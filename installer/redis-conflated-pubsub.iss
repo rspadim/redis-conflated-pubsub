@@ -121,6 +121,7 @@ Source: "{#RepoRoot}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#RepoRoot}\config.schema.json"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 ; Helper scripts: configuration bootstrap, service control, configuration check.
 Source: "{#RepoRoot}\installer\New-Config.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
+Source: "{#RepoRoot}\installer\Set-ServiceSecrets.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
 Source: "{#RepoRoot}\installer\service.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
 Source: "{#RepoRoot}\installer\validate-config.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
 Source: "{#RepoRoot}\installer\verify-service.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
@@ -157,6 +158,7 @@ var
   RedisInPage, RedisOutPage, NatsInPage, NatsOutPage, TuningPage: TInputQueryWizardPage;
   ConfigPage: TInputFileWizardPage;
   ConfigDefault: String;
+  SecretsMessage: String;
   KeepConfig: Boolean;
   ServiceWasInstalled: Boolean;
   ServiceWasStopped: Boolean;
@@ -296,6 +298,134 @@ begin
             (Normalized = 'token') or (Normalized = 'credentials_file');
 end;
 
+{ --- service secrets ---------------------------------------------------- }
+{ The relay reads credentials from environment variables, and a service does not
+  see the user variables of whoever installed it. The SCM supports injecting an
+  environment block into one service, which is what these functions fill in. }
+
+function SecretPair(const Name, Value: String; var Lines, Names: String): Integer;
+begin
+  Result := 0;
+  if (Trim(Name) = '') or (Value = '') then
+    exit;
+
+  Lines := Lines + Trim(Name) + '=' + Value + #13#10;
+  if Names <> '' then
+    Names := Names + ', ';
+  Names := Names + Trim(Name);
+  Result := 1;
+end;
+
+{ Collects the secrets the wizard is going to store, as NAME=value lines. }
+function CollectSecrets(var Lines, Names: String): Integer;
+var
+  Auth: String;
+begin
+  Lines := '';
+  Names := '';
+  Result := 0;
+
+  if InputIsRedis() then
+    Result := Result + SecretPair(RedisInPage.Values[2], RedisInPage.Values[4], Lines, Names)
+  else
+  begin
+    Auth := LowerCase(Trim(NatsInPage.Values[1]));
+    if Auth = 'user_password' then
+      Result := Result + SecretPair(NatsInPage.Values[3], NatsInPage.Values[7], Lines, Names)
+    else if Auth = 'token' then
+      Result := Result + SecretPair(NatsInPage.Values[4], NatsInPage.Values[7], Lines, Names);
+  end;
+
+  if OutputIsRedis() then
+    Result := Result + SecretPair(RedisOutPage.Values[2], RedisOutPage.Values[5], Lines, Names)
+  else
+  begin
+    Auth := LowerCase(Trim(NatsOutPage.Values[1]));
+    if Auth = 'user_password' then
+      Result := Result + SecretPair(NatsOutPage.Values[3], NatsOutPage.Values[8], Lines, Names)
+    else if Auth = 'token' then
+      Result := Result + SecretPair(NatsOutPage.Values[4], NatsOutPage.Values[8], Lines, Names);
+  end;
+end;
+
+{ Names the configuration will reference but the wizard is not storing: those
+  have to exist in the service environment already. }
+function ReferencedWithoutValue(): String;
+var
+  Auth: String;
+begin
+  Result := '';
+
+  if InputIsRedis() then
+  begin
+    if (Trim(RedisInPage.Values[2]) <> '') and (RedisInPage.Values[4] = '') then
+      Result := Result + Trim(RedisInPage.Values[2]) + ', ';
+  end
+  else
+  begin
+    Auth := LowerCase(Trim(NatsInPage.Values[1]));
+    if (Auth = 'user_password') and (Trim(NatsInPage.Values[3]) <> '') and (NatsInPage.Values[7] = '') then
+      Result := Result + Trim(NatsInPage.Values[3]) + ', ';
+    if (Auth = 'token') and (Trim(NatsInPage.Values[4]) <> '') and (NatsInPage.Values[7] = '') then
+      Result := Result + Trim(NatsInPage.Values[4]) + ', ';
+  end;
+
+  if OutputIsRedis() then
+  begin
+    if (Trim(RedisOutPage.Values[2]) <> '') and (RedisOutPage.Values[5] = '') then
+      Result := Result + Trim(RedisOutPage.Values[2]) + ', ';
+  end
+  else
+  begin
+    Auth := LowerCase(Trim(NatsOutPage.Values[1]));
+    if (Auth = 'user_password') and (Trim(NatsOutPage.Values[3]) <> '') and (NatsOutPage.Values[8] = '') then
+      Result := Result + Trim(NatsOutPage.Values[3]) + ', ';
+    if (Auth = 'token') and (Trim(NatsOutPage.Values[4]) <> '') and (NatsOutPage.Values[8] = '') then
+      Result := Result + Trim(NatsOutPage.Values[4]) + ', ';
+  end;
+
+  Result := Trim(Result);
+  if (Result <> '') and (Result[Length(Result)] = ',') then
+    Result := Trim(Copy(Result, 1, Length(Result) - 1));
+end;
+
+function StoreSecrets(const ServiceName: String): Boolean;
+var
+  Lines, Names, SecretFile, ScriptPath, ReportPath, Params: String;
+  Count, ExitCode: Integer;
+begin
+  Result := True;
+  SecretsMessage := '';
+
+  Count := CollectSecrets(Lines, Names);
+  if Count = 0 then
+    exit;
+
+  SecretFile := ExpandConstant('{tmp}\service-secrets.txt');
+  if not SaveStringToFile(SecretFile, Lines, False) then
+  begin
+    SecretsMessage := SecretFile;
+    Result := False;
+    exit;
+  end;
+
+  ScriptPath := ExpandConstant('{app}\scripts\Set-ServiceSecrets.ps1');
+  ReportPath := ExpandConstant('{tmp}\secrets-report.txt');
+  DeleteFile(ReportPath);
+  Params := '-ServiceName ' + Quote(ServiceName) +
+            ' -SecretFile ' + Quote(SecretFile) +
+            ' -ReportFile ' + Quote(ReportPath);
+  Result := RunScript(ScriptPath, Params, ExitCode) and (ExitCode = 0);
+
+  { The file held plaintext secrets: remove it either way. }
+  DeleteFile(SecretFile);
+
+  if Result then
+    SecretsMessage := FmtMessage(CustomMessage('SecretsStored'), [Names])
+  else
+    SecretsMessage := ReadTextFile(ReportPath);
+end;
+
 function NewConfigReportPath(): String;
 begin
   Result := ExpandConstant('{tmp}\newconfig-report.txt');
@@ -374,7 +504,7 @@ end;
 
 function ValidateChosenConfig(): Boolean;
 var
-  ExePath, ScriptPath, TargetPath, ValidatePath, ReportPath, Params, Report: String;
+  ExePath, ScriptPath, TargetPath, ValidatePath, ReportPath, Params, Report, Unstored: String;
   ExitCode: Integer;
   IsDraft: Boolean;
 begin
@@ -386,6 +516,20 @@ begin
     MsgBox(CustomMessage('ValidateMissing'), mbError, MB_OK);
     Result := False;
     exit;
+  end;
+
+  { A referenced credential that the wizard is not going to store has to exist in
+    the service environment already, otherwise the relay exits at startup. That
+    is worth a stop, not a surprise in the event log. }
+  if WantsConfiguration() then
+  begin
+    Unstored := ReferencedWithoutValue();
+    if (Unstored <> '') and
+       (MsgBox(FmtMessage(CustomMessage('SecretNotSetWarning'), [Unstored]), mbConfirmation, MB_YESNO) = IDNO) then
+    begin
+      Result := False;
+      exit;
+    end;
   end;
 
   if UsesExistingFile() and (not FileExists(TargetPath)) then
@@ -497,6 +641,9 @@ begin
   RedisInPage.Add(CustomMessage('InDatabaseLabel'), False);
   RedisInPage.Add(CustomMessage('InPasswordEnvLabel'), False);
   RedisInPage.Add(CustomMessage('InPatternLabel'), False);
+  { Masked field: the value is stored in the service's own environment, not in
+    the configuration file, and not on a command line. }
+  RedisInPage.Add(CustomMessage('SecretValueLabel'), True);
   RedisInPage.Values[0] := 'localhost:6379';
   RedisInPage.Values[1] := '0';
   RedisInPage.Values[3] := '*';
@@ -508,6 +655,7 @@ begin
   RedisOutPage.Add(CustomMessage('OutPasswordEnvLabel'), False);
   RedisOutPage.Add(CustomMessage('OutChannelPrefixLabel'), False);
   RedisOutPage.Add(CustomMessage('OutChannelSuffixLabel'), False);
+  RedisOutPage.Add(CustomMessage('SecretValueLabel'), True);
   RedisOutPage.Values[0] := 'localhost:6379';
   RedisOutPage.Values[1] := '0';
   { Defaulted, not left empty: with the input and the output on the same Redis
@@ -524,6 +672,7 @@ begin
   NatsInPage.Add(CustomMessage('NatsTokenEnvLabel'), False);
   NatsInPage.Add(CustomMessage('NatsCredentialsLabel'), False);
   NatsInPage.Add(CustomMessage('NatsSubjectLabel'), False);
+  NatsInPage.Add(CustomMessage('SecretValueLabel'), True);
   NatsInPage.Values[0] := 'nats://localhost:4222';
   NatsInPage.Values[1] := 'none';
   NatsInPage.Values[6] := '>';
@@ -538,6 +687,7 @@ begin
   NatsOutPage.Add(CustomMessage('NatsCredentialsLabel'), False);
   NatsOutPage.Add(CustomMessage('OutChannelPrefixLabel'), False);
   NatsOutPage.Add(CustomMessage('OutChannelSuffixLabel'), False);
+  NatsOutPage.Add(CustomMessage('SecretValueLabel'), True);
   NatsOutPage.Values[0] := 'nats://localhost:4222';
   NatsOutPage.Values[1] := 'none';
 
@@ -606,6 +756,14 @@ begin
     begin
       MsgBox(FmtMessage(CustomMessage('BadNumber'), [CustomMessage('InDatabaseLabel')]), mbError, MB_OK);
       Result := False;
+      exit;
+    end;
+    { An empty selector would be rejected by the relay at startup, so it is
+      caught here where the user can still fix it. }
+    if Trim(RedisInPage.Values[3]) = '' then
+    begin
+      MsgBox(CustomMessage('SelectorMissing'), mbError, MB_OK);
+      Result := False;
     end;
     exit;
   end;
@@ -625,6 +783,12 @@ begin
     if not IsAuthType(NatsInPage.Values[1]) then
     begin
       MsgBox(CustomMessage('BadAuthType'), mbError, MB_OK);
+      Result := False;
+      exit;
+    end;
+    if Trim(NatsInPage.Values[6]) = '' then
+    begin
+      MsgBox(CustomMessage('SelectorMissing'), mbError, MB_OK);
       Result := False;
     end;
     exit;
@@ -751,6 +915,12 @@ begin
 
   ServiceWasInstalled := True;
 
+  { The credentials go into the service's own environment block, so they are
+    injected when the service starts below — and are visible to nothing else on
+    the machine. }
+  if not StoreSecrets('{#ServiceName}') then
+    MsgBox(FmtMessage(CustomMessage('SecretsFailed'), [SecretsMessage]), mbError, MB_OK);
+
   { `sc start` only proves that the service manager accepted the request. Ask the
     relay whether it actually came up: a service that exits during startup would
     otherwise be reported as a success. }
@@ -786,6 +956,8 @@ begin
   Extra := CustomMessage('FinishedLine');
   if InstallsOnly() then
     Extra := CustomMessage('FinishedNoConfig') + #13#10 + #13#10 + Extra;
+  if SecretsMessage <> '' then
+    Extra := SecretsMessage + #13#10 + #13#10 + Extra;
   if ServiceVerification <> '' then
     Extra := ServiceVerification + #13#10 + #13#10 + Extra;
   if ServiceWasInstalled then
