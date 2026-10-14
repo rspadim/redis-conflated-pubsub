@@ -88,11 +88,12 @@ The status endpoint is `GET /`; configure `base_url` with the HTTP(S) origin, su
 | `uncertain_transactions_total`, `uncertain_messages_total` | Same field name | Uncertain publish transactions and affected messages |
 | `input_reconnects_total`, `output_reconnects_total` | Same field name | Redis reconnect counts |
 | `nats_client_connects_total`, `nats_client_disconnects_total` | Same field name | NATS client connection events. Core NATS reconnects internally, so a node failover appears here rather than in the reconnect counters; `connects` includes the first connect |
+| `nats_client_slow_consumers_total` | `nats_client_slow_consumers_total` | NATS client queue-full drops: messages discarded because a subscription's consumer could not keep up. A value above zero means real message loss |
 | `loop_suppressed_messages_total` | `loop_suppressed_messages_total` | Unsigned integer, NATS-to-NATS loop-guard drops |
 | `pending_keys` | `pending_keys` | Unsigned integer |
 | `outputs` | `outputs_json` | Compact JSON text map of per-output metrics |
 
-The deduplication counters are additive; **`schema_version` remains `5`**. Both templates now carry 34 items (the three NATS/loop counters were added). The per-output JSON includes destination-level published, conflated, deduplicated, and payload-byte metrics. Its deduplication byte counts use the same raw-input-payload semantics as the global counters. The default item keys use the `redis_conflated_pubsub.` prefix; if you change `key_prefix`, update the imported template's item keys to match. Error text is limited to 2,048 characters and line breaks are normalized for sender input.
+The deduplication counters are additive; **`schema_version` remains `5`**. Both templates now carry 35 items (the four NATS/loop counters were added). The per-output JSON includes destination-level published, conflated, deduplicated, and payload-byte metrics. Its deduplication byte counts use the same raw-input-payload semantics as the global counters. The default item keys use the `redis_conflated_pubsub.` prefix; if you change `key_prefix`, update the imported template's item keys to match. Error text is limited to 2,048 characters and line breaks are normalized for sender input.
 
 ## Run on a schedule
 

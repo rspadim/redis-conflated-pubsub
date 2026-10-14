@@ -2,6 +2,7 @@ import json
 import subprocess
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import patch
 
@@ -323,6 +324,35 @@ class ZabbixSenderTests(unittest.TestCase):
             '"monitored-host" redis_conflated_pubsub.health 0\n',
             1,
         )
+
+
+class TemplateParityTests(unittest.TestCase):
+    """The shipped templates must expose exactly the keys the sender emits.
+
+    Status counters are added over time; without this check a new counter can be
+    collected by the sender yet have no matching template item, so it would be
+    silently dropped by Zabbix.
+    """
+
+    def emitted_keys(self):
+        prefix = zabbix_sender.DEFAULT_KEY_PREFIX
+        return (
+            {prefix + "health", prefix + zabbix_sender.OUTPUTS_JSON_FIELD}
+            | {prefix + field for field in zabbix_sender.COUNTER_FIELDS}
+            | {prefix + field for field in zabbix_sender.TEXT_FIELDS}
+        )
+
+    def test_templates_match_the_sender_key_set(self):
+        for template in ("zabbix_template_5.0.xml", "zabbix_template_7.0.xml"):
+            with self.subTest(template=template):
+                path = Path(__file__).with_name(template)
+                keys = {
+                    element.text
+                    for element in ET.parse(path).iter("key")
+                    if element.text
+                }
+
+                self.assertEqual(keys, self.emitted_keys())
 
 
 if __name__ == "__main__":

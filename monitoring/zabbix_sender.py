@@ -38,6 +38,7 @@ COUNTER_FIELDS = (
     "output_reconnects_total",
     "nats_client_connects_total",
     "nats_client_disconnects_total",
+    "nats_client_slow_consumers_total",
     "loop_suppressed_messages_total",
     "pending_keys",
     "uptime_seconds",
