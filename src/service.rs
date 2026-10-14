@@ -108,6 +108,10 @@ pub struct ShutdownSignals {
     terminate: tokio::signal::unix::Signal,
     #[cfg(unix)]
     hangup: tokio::signal::unix::Signal,
+    /// Set when the process runs as a Windows service: the service control
+    /// manager, not a console signal, is what stops it.
+    #[cfg(windows)]
+    service_stop: Option<tokio::sync::watch::Receiver<bool>>,
 }
 
 impl ShutdownSignals {
@@ -124,10 +128,23 @@ impl ShutdownSignals {
                 hangup: signal(SignalKind::hangup()).context("failed to install SIGHUP handler")?,
             })
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            Ok(Self { service_stop: None })
+        }
+        #[cfg(all(not(unix), not(windows)))]
         {
             Ok(Self {})
         }
+    }
+
+    /// Builds the signals for a process the service control manager started: a
+    /// stop control arrives through `service_stop` instead of a console signal.
+    #[cfg(windows)]
+    pub fn with_service_stop(service_stop: tokio::sync::watch::Receiver<bool>) -> Result<Self> {
+        Ok(Self {
+            service_stop: Some(service_stop),
+        })
     }
 
     async fn recv(&mut self) -> Result<ServiceSignal> {
@@ -139,7 +156,27 @@ impl ShutdownSignals {
                 _ = self.hangup.recv() => Ok(ServiceSignal::Reload),
             }
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            // A service is stopped by the service control manager; a console run
+            // still answers Ctrl-C.
+            match self.service_stop.as_mut() {
+                Some(stop) => tokio::select! {
+                    _ = stop.changed() => Ok(ServiceSignal::Shutdown),
+                    result = tokio::signal::ctrl_c() => {
+                        result.context("failed to listen for Ctrl-C")?;
+                        Ok(ServiceSignal::Shutdown)
+                    }
+                },
+                None => {
+                    tokio::signal::ctrl_c()
+                        .await
+                        .context("failed to listen for Ctrl-C")?;
+                    Ok(ServiceSignal::Shutdown)
+                }
+            }
+        }
+        #[cfg(all(not(unix), not(windows)))]
         {
             tokio::signal::ctrl_c()
                 .await

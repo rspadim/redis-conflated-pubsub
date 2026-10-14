@@ -12,6 +12,8 @@ mod config;
 mod http_status;
 mod logging;
 mod service;
+#[cfg(windows)]
+mod service_host;
 mod status;
 
 use std::path::PathBuf;
@@ -62,6 +64,13 @@ struct Args {
 }
 
 fn main() {
+    // A process the service control manager started has to speak the service
+    // protocol; a console run falls straight through.
+    #[cfg(windows)]
+    if let service_host::Dispatch::RanAsService = service_host::dispatch() {
+        return;
+    }
+
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_name_fn(runtime_worker_name)
@@ -69,7 +78,7 @@ fn main() {
         .expect("failed to initialize Tokio runtime");
 
     runtime.block_on(async {
-        if let Err(error) = run().await {
+        if let Err(error) = run(None).await {
             eprintln!("error: {error:#}");
             std::process::exit(1);
         }
@@ -84,7 +93,12 @@ fn runtime_worker_name() -> String {
     )
 }
 
-async fn run() -> Result<()> {
+/// Runs the relay until it is told to stop.
+///
+/// `service_stop` is the Windows service host's stop trigger: the service control
+/// manager, not a console signal, stops a service. Every other caller passes
+/// `None`.
+async fn run(service_stop: Option<tokio::sync::watch::Receiver<bool>>) -> Result<()> {
     let args = Args::parse();
     if args.config_json_schema {
         println!(
@@ -112,7 +126,16 @@ async fn run() -> Result<()> {
     let _instance_lock = config.instance_lock.acquire()?;
     // `None` when logging is disabled; tracing events then have no subscriber and are no-ops.
     let _logging_guard = logging::init(&config.logging)?;
-    let mut shutdown_signals = service::ShutdownSignals::new()?;
+    #[cfg(windows)]
+    let mut shutdown_signals = match service_stop {
+        Some(receiver) => service::ShutdownSignals::with_service_stop(receiver)?,
+        None => service::ShutdownSignals::new()?,
+    };
+    #[cfg(not(windows))]
+    let mut shutdown_signals = {
+        let _ = service_stop;
+        service::ShutdownSignals::new()?
+    };
     #[cfg(unix)]
     {
         let mut active_config = config;

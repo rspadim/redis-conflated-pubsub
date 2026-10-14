@@ -44,12 +44,12 @@ function Write-Report {
 }
 
 function Get-ServiceState {
-    $output = & sc.exe query $ServiceName 2>&1
-    if ($LASTEXITCODE -ne 0) { return $null }
-    foreach ($line in ($output -split "`r?`n")) {
-        if ($line -match 'STATE\s+:\s+\d+\s+(\w+)') { return $Matches[1] }
-    }
-    return 'unknown'
+    # Get-Service, not the text of "sc query": the field names are localized
+    # ("ESTADO" instead of "STATE" on a Portuguese machine) and a service that
+    # does not exist is $null either way.
+    $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    if (-not $service) { return $null }
+    return $service.Status.ToString().ToUpper()
 }
 
 function Get-ConfigValue {
@@ -91,15 +91,20 @@ if ($state -ne 'RUNNING') {
 # The strongest available signal: the runtime's own status snapshot.
 $statusPath = Get-ConfigValue -Name 'status.path'
 if ($statusPath) {
-    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    # The file has to be written after this check began: a snapshot left behind by
+    # an earlier run would otherwise pass for a relay that is up right now.
+    $started = Get-Date
+    $deadline = $started.AddSeconds($TimeoutSeconds)
     while ((Get-Date) -lt $deadline) {
         if (Test-Path -LiteralPath $statusPath -PathType Leaf) {
             try {
+                $written = (Get-Item -LiteralPath $statusPath).LastWriteTime
                 $status = Get-Content -LiteralPath $statusPath -Raw -Encoding UTF8 | ConvertFrom-Json
             } catch {
                 $status = $null
+                $written = $started.AddSeconds(-1)
             }
-            if ($status -and $status.state -eq 'running') {
+            if ($written -ge $started -and $status -and $status.state -eq 'running') {
                 $message = "the relay is running (status: $statusPath)"
                 if ($status.last_error) { $message += "; last error: $($status.last_error)" }
                 Write-Host $message -ForegroundColor Green

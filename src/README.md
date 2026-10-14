@@ -10,4 +10,4 @@ cargo build --release --locked
 ./target/release/redis-conflated-pubsub --config config.json
 ```
 
-On Windows, use `target\release\redis-conflated-pubsub.exe` with the same arguments.
+On Windows, use `target\release\redis-conflated-pubsub.exe` with the same arguments. The executable is also a Windows service: when the service control manager starts it, it speaks the service protocol (see [`DESIGN.md`](DESIGN.md)); started any other way it is a console program.

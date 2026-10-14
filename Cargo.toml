@@ -42,6 +42,12 @@ tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 url = "2.5"
 
+[target.'cfg(windows)'.dependencies]
+# Implements the Windows service protocol (control handler, status reporting), so
+# the service the installer registers can be started and stopped by the service
+# control manager. See src/service_host.rs; other targets do not compile it.
+windows-service = "0.8"
+
 [profile.release]
 codegen-units = 1
 lto = "thin"

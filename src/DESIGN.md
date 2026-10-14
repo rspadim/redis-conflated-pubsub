@@ -116,6 +116,10 @@ Shed messages are counted per output and globally (`shed_messages_total`/`shed_p
 
 On Unix, `SIGHUP` parses and validates the new file before switching; invalid files leave the running configuration in place. An accepted reload drains pending output queues and restarts input/output workers in-process, which creates a brief input gap and resets status counters. Logging changes still require a full restart; a changed `instance_lock.path` is acquired during the reload (the new lock before the old one is released) and the reload is rejected when the new lock is unavailable. Shutdown stops input, drains workers, and flushes the remaining conflated buckets.
 
+### Windows service host
+
+On Windows the same executable is a service and a console program. `main` asks the service dispatcher first: when the process was started by the service control manager, `service_host.rs` registers a control handler, reports `Running` before anything is connected — the relay retries a missing Redis forever, so a start that waited for a connection would always fail with error 1053 — and maps a stop control onto the same shutdown path Ctrl-C uses. When the process was not started by the manager (`ERROR_FAILED_SERVICE_CONTROLLER_CONNECT`, 1063) it falls through to the console path, so `--check-config`, tests and manual runs are unaffected. The status handle lives in a `OnceLock` because the handler must be registered before the handle exists; the handler uses it to report `StopPending` while the drain runs.
+
 ### Observability
 
 The status snapshot (`schema_version` 5) exposes global and per-output counters for inputs, published/conflated/deduplicated/dropped/truncated/shed messages and bytes, deduplication evictions, publish errors, uncertain operations, reconnects, loop-suppressed messages (`loop_suppressed_messages_total`, NATS only) and pending messages/bytes/keys. Per output it also exposes:
