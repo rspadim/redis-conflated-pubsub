@@ -70,6 +70,9 @@ OutputBaseFilename=ConflatedPubSubSetup-{#AppVersion}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+; The wizard ships ten languages, so the choice is presented instead of being
+; guessed from the system locale; Inno pre-selects the matching one.
+ShowLanguageDialog=yes
 SetupLogging=yes
 UninstallDisplayName={#AppName} {#AppVersion}
 UninstallDisplayIcon={app}\{#AppExeName}.exe
@@ -148,6 +151,7 @@ Type: filesandordirs; Name: "{app}\scripts"
 [Code]
 var
   ConfigPage: TInputFileWizardPage;
+  ConfigDefault: String;
   KeepConfig: Boolean;
   ServiceWasInstalled: Boolean;
   ServiceWasStopped: Boolean;
@@ -221,8 +225,10 @@ begin
 
   if not FileExists(ConfigPath) then
   begin
-    MsgBox(FmtMessage(CustomMessage('ConfigMissing'), [ConfigPath]), mbError, MB_OK);
-    Result := False;
+    { A path that does not exist yet is the normal case on a fresh install: the
+      post-install step writes it from config.example.json with absolute paths.
+      There is nothing to validate, and blocking here would make the default
+      answer to this page impossible to accept. }
     exit;
   end;
 
@@ -287,7 +293,9 @@ begin
     CustomMessage('PageConfigDesc'));
   ConfigPage.Add(CustomMessage('ConfigPathLabel'),
     'JSON configuration files|*.json|All files|*.*', '.json');
-  ConfigPage.Values[0] := ExpandConstant('{app}\config.json');
+  { The default value is NOT set here: the app directory constant only exists
+    after the user has passed the directory page, and expanding it this early
+    aborts the wizard with a runtime error. CurPageChanged fills it in. }
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
@@ -376,8 +384,20 @@ end;
 
 procedure CurPageChanged(CurPageID: Integer);
 var
-  Extra: String;
+  Extra, Suggested: String;
 begin
+  if CurPageID = ConfigPage.ID then
+  begin
+    { Computed here, not in InitializeWizard: the app constant only exists once
+      the directory page has been passed. Re-suggested when the directory
+      changes, as long as the user has not typed a path of their own. }
+    Suggested := ExpandConstant('{app}\config.json');
+    if (ConfigPage.Values[0] = '') or (ConfigPage.Values[0] = ConfigDefault) then
+      ConfigPage.Values[0] := Suggested;
+    ConfigDefault := Suggested;
+    exit;
+  end;
+
   if CurPageID <> wpFinished then
     exit;
 
