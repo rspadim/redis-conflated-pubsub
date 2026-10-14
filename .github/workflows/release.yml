@@ -187,77 +187,9 @@ jobs:
             dist/*.pkg.tar.zst.sha256
           if-no-files-found: error
 
-  # The executable is signed BEFORE the installer packs it. The installer embeds
-  # and compresses the executable, so a signature applied afterwards could never
-  # reach the inner file. See SIGNING.md.
-  sign-windows-exe:
-    name: Sign the Windows executable
-    needs: build
-    # Skipped until the SignPath certificate exists; see SIGNING.md.
-    if: vars.SIGNPATH_ENABLED == 'true'
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: windows-x86_64
-          path: dist
-      - name: Unpack the executable
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd dist
-          unzip -o windows-x86_64.zip
-          # The unsigned package and its checksum are replaced at the end of this
-          # job, so they must not survive as they are.
-          rm -f windows-x86_64.zip windows-x86_64.zip.sha256
-          test -f redis-conflated-pubsub.exe
-      - name: Upload the unsigned executable
-        id: upload
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-exe-unsigned
-          path: dist/redis-conflated-pubsub.exe
-          if-no-files-found: error
-      - name: Submit the signing request
-        uses: SignPath/github-action-submit-signing-request@v2
-        with:
-          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
-          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
-          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
-          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
-          artifact-configuration-slug: ${{ vars.SIGNPATH_ARTIFACT_CONFIG_EXE }}
-          github-artifact-id: ${{ steps.upload.outputs.artifact-id }}
-          wait-for-completion: true
-          output-artifact-directory: signed
-      - name: Repack the signed executable
-        shell: bash
-        run: |
-          set -euo pipefail
-          # The service may return the file under a different name, so take
-          # whatever .exe came back and restore the released file name.
-          signed="$(find signed -name '*.exe' -type f | head -n 1)"
-          test -n "$signed"
-          cp "$signed" dist/redis-conflated-pubsub.exe
-          cd dist
-          zip -q -9 windows-x86_64.zip redis-conflated-pubsub.exe
-          # Checksums cover the signed bytes: they are recomputed here and never
-          # carried over from the unsigned build.
-          shasum -a 256 windows-x86_64.zip > windows-x86_64.zip.sha256
-          shasum -a 256 redis-conflated-pubsub.exe > windows-x86_64.exe.sha256
-      - name: Replace the release artifact with the signed package
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-x86_64
-          path: |
-            dist/windows-x86_64.zip
-            dist/windows-x86_64.zip.sha256
-            dist/windows-x86_64.exe.sha256
-          overwrite: true
-          if-no-files-found: error
-
   build-installer:
     name: Build the Windows installer
-    needs: [build, sign-windows-exe]
+    needs: [build]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -294,37 +226,11 @@ jobs:
           $exe = "installer\output\ConflatedPubSubSetup-$numeric.exe"
           if (-not (Test-Path -LiteralPath $exe)) { throw "installer was not produced: $exe" }
           Write-Host "installer built: $exe"
-      - name: Upload the unsigned installer
-        id: upload
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-installer-unsigned
-          path: installer/output/*.exe
-          if-no-files-found: error
-      - name: Submit the signing request
-        if: vars.SIGNPATH_ENABLED == 'true'
-        uses: SignPath/github-action-submit-signing-request@v2
-        with:
-          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
-          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
-          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
-          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
-          artifact-configuration-slug: ${{ vars.SIGNPATH_ARTIFACT_CONFIG_INSTALLER }}
-          github-artifact-id: ${{ steps.upload.outputs.artifact-id }}
-          wait-for-completion: true
-          output-artifact-directory: signed
       - name: Checksum the installer
         shell: pwsh
         run: |
           $exe = Get-ChildItem installer\output\*.exe | Select-Object -First 1
           if (-not $exe) { throw "no installer in installer\output" }
-
-          if ("${{ vars.SIGNPATH_ENABLED }}" -eq 'true') {
-            # Publish the signed bytes, never the unsigned ones.
-            $signed = Get-ChildItem signed -Recurse -Filter *.exe | Select-Object -First 1
-            if (-not $signed) { throw "the signing service returned no installer" }
-            Copy-Item $signed.FullName $exe.FullName -Force
-          }
 
           $hash = (Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLower()
           "$hash  $($exe.Name)" | Set-Content -Encoding utf8 "$($exe.FullName).sha256"
@@ -336,7 +242,7 @@ jobs:
 
   publish:
     name: Publish GitHub Release
-    needs: [build, package-linux, sign-windows-exe, build-installer]
+    needs: [build, package-linux, build-installer]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

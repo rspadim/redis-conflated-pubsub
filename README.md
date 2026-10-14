@@ -2,7 +2,7 @@
 
 A Rust relay that forwards Pub/Sub messages between Redis and Core NATS. The `input` selects one backend and every output independently selects Redis or Core NATS; mapping, filters, conflation and deduplication run the same way for either backend.
 
-Current release: **v0.3.0**. [Download a platform binary](https://github.com/rspadim/redis-conflated-pubsub/releases) or see the [developer build instructions](src/README.md). The project site is at <https://rspadim.github.io/redis-conflated-pubsub/> (pt-BR). Free code signing for the Windows installer and executable provided by [SignPath.io](https://signpath.io/), certificate by [SignPath Foundation](https://signpath.org/).
+Current release: **v0.3.0**. [Download a platform binary](https://github.com/rspadim/redis-conflated-pubsub/releases) or see the [developer build instructions](src/README.md). The project site is at <https://rspadim.github.io/redis-conflated-pubsub/> (pt-BR).
 
 ## Quick start
 

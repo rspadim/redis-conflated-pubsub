@@ -1,13 +1,9 @@
 //! Embeds the Windows VERSIONINFO resource into the executable.
 //!
-//! Two things depend on this:
-//!
-//! * SignPath Foundation requires every binary it signs to carry product
-//!   metadata: "Set all product name attributes to your project's name" and
-//!   "Set all product version attributes to the same value in each build".
-//! * Windows itself reads these fields in the file properties dialog, in
-//!   SmartScreen and in Apps & features, so an executable without them looks
-//!   anonymous even before any reputation question comes up.
+//! Windows reads these fields in the file properties dialog, in SmartScreen and
+//! in Apps & features. An executable without them looks anonymous: no product
+//! name, no publisher, no version. The installer's `VersionInfo*` directives
+//! carry the same values, so one build reports one version everywhere.
 //!
 //! The resource is compiled only when the **target** is Windows. The check uses
 //! `CARGO_CFG_TARGET_OS` rather than `#[cfg(windows)]`, because a build script's
