@@ -13,7 +13,7 @@ jobs:
     name: Verify release tag
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Require the tag to match Cargo.toml
         shell: bash
         run: |
@@ -45,7 +45,7 @@ jobs:
             binary: redis-conflated-pubsub
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.99.0
         with:
           targets: ${{ matrix.target }}
@@ -69,7 +69,7 @@ jobs:
           Compress-Archive -Path "dist/${{ matrix.binary }}" -DestinationPath "${{ matrix.artifact }}.zip"
           $hash = (Get-FileHash "${{ matrix.artifact }}.zip" -Algorithm SHA256).Hash.ToLower()
           "$hash  ${{ matrix.artifact }}.zip" | Set-Content "${{ matrix.artifact }}.zip.sha256"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: |
@@ -89,8 +89,8 @@ jobs:
       # Pinned so the package layout cannot change under a release.
       NFPM_VERSION: "2.48.0"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           name: linux-x86_64-musl
           path: dist
@@ -173,7 +173,7 @@ jobs:
             pacman -R --noconfirm redis-conflated-pubsub
           '
           echo "::endgroup::"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux-packages
           path: |
@@ -192,9 +192,9 @@ jobs:
     needs: [build]
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Fetch the packaged executable
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: windows-x86_64
           path: dist
@@ -234,7 +234,7 @@ jobs:
 
           $hash = (Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLower()
           "$hash  $($exe.Name)" | Set-Content -Encoding utf8 "$($exe.FullName).sha256"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows-installer
           path: installer/output/*
@@ -247,10 +247,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: dist/*
