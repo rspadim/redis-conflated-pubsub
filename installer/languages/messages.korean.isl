@@ -79,3 +79,9 @@ BadAuthType=알 수 없는 인증 유형입니다. none, user_password, token �
 SelectorMissing=이 구독이 받을 패턴 또는 subject를 입력하세요. relay는 빈 선택자를 거부합니다.
 ModeInstallOnly=실행 파일만 설치 (구성 없음)
 FinishedNoConfig=구성이 만들어지지 않았고 서비스도 설치되지 않았습니다. 준비가 되면 config.example.json 또는 config.nats.example.json에서 시작하고 설치 디렉터리에서 scripts\service.ps1을 실행하세요.
+
+; --- 자격 증명을 서비스 환경에 저장 ---
+SecretValueLabel=암호 값 (서비스 자체의 환경에 저장됩니다; 변수를 직접 설정하려면 비워 두세요)
+SecretsStored=서비스 환경에 저장됨: %1
+SecretsFailed=서비스 환경을 업데이트할 수 없습니다:%n%n%1
+SecretNotSetWarning=%1에 값을 입력하지 않았으므로 설치 프로그램이 값을 저장하지 않습니다. relay는 자격 증명을 서비스 자체의 환경에서 읽지만, 그 환경에는 해당 변수가 아직 존재하지 않습니다. 변수를 설정할 때까지 서비스는 시작할 때 종료됩니다. 계속하시겠습니까?
