@@ -1,0 +1,20 @@
+{#-
+  Extra <head> tags. Material does not emit link previews by itself, and a
+  project page is mostly discovered through chat and social links, so the card
+  and the iOS icon are added here.
+
+  og:image has to be absolute: crawlers do not resolve relative paths, so the
+  URL is built from site_url instead of the `url` filter.
+-#}
+{% extends "base.html" %}
+
+{% block extrahead %}
+  <link rel="apple-touch-icon" href="{{ config.site_url }}assets/apple-touch-icon.png">
+  <meta property="og:type" content="website">
+  <meta property="og:image" content="{{ config.site_url }}assets/social-card.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Conflated Pub/Sub — Redis and Core NATS Pub/Sub relay with per-output conflation and deduplication">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="{{ config.site_url }}assets/social-card.png">
+{% endblock %}
