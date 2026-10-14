@@ -225,23 +225,30 @@ Provisional verdict: **start with `sqlx`**. The decisive test — release **musl
 binary size for both — was never run, and build cost is real: the throwaway harness
 took 5m42s to compile with `sqlx` on Windows.
 
-## Open items that were never answered
+## Decisions taken while parking this
 
-1. `channels: []` **and** a blank query: error at `--check-config`? Proposed yes,
-   with `validate.rs` already rejecting an empty subscription list as the
-   precedent. Starting up listening to nothing is the worst failure mode.
-2. `oversized_message_policy: "send"` on a **PostgreSQL output**: reject at
-   validation? Proposed yes, since above 8.000 bytes it can only fail.
-3. Channel name over 63 bytes — static, discovered, or the mapped output — reject
-   with a log and a counter, never truncate (truncating collides silently).
-   Discovered channels can only be checked at runtime.
-4. A documented floor for `query_refresh_ms`, since it is polling against the
-   database.
-5. Server-side identity: no field exists yet. The candidate was to reuse the
-   existing `client_name` template as libpq's `application_name`, so no new field
-   is invented.
-6. Certificates, when they matter: libpq's own names, `sslrootcert`, `sslcert`,
-   `sslkey` — same criterion as `dbname`/`sslmode`.
+These were the open questions. They are recorded as answered so nobody has to
+re-derive them, with the reasoning attached. Nothing is implemented.
+
+1. **`channels: []` and a blank query is an error at `--check-config`.** Starting
+   up listening to nothing is the worst failure mode: the service looks healthy and
+   receives nothing. `validate.rs` already rejects an empty subscription list, so
+   this is the same rule applied inside the subscription.
+2. **`oversized_message_policy: "send"` is rejected on a PostgreSQL output.** Above
+   8.000 bytes it can only fail, and with all-or-nothing transactions that failure
+   would take its whole batch down. `truncate` and `drop` remain available.
+3. **A channel name over 63 bytes is rejected, never truncated** — whether it comes
+   from `channels`, from the discovery query, or from the output mapping. Truncating
+   collides silently with another channel. Static and mapped names can be caught by
+   `--check-config`; discovered ones only at runtime, with a log and a counter.
+4. **`query_refresh_ms` has a documented floor of 1000 ms**, with `0` meaning "run
+   once". It is polling against the database, and the relay's own status cadence is
+   one second; anything faster would be abusive.
+5. **Server-side identity reuses the existing `client_name` template as libpq's
+   `application_name`** — no new field, and the relay identifies itself the same way
+   it already does in Redis's `CLIENT LIST`.
+6. **Certificates use libpq's own names**: `sslrootcert`, `sslcert`, `sslkey`, the
+   same criterion that produced `dbname` and `sslmode`.
 
 ## Load test plan, if this is ever picked up
 
