@@ -5,10 +5,11 @@ use tracing::debug;
 
 use crate::status::{Metrics, OutputMetrics};
 
+use super::super::backend::OutputSink;
 #[cfg(test)]
 use super::super::batch::passthrough_batch_length;
 use super::super::batch::{pending_batch_length, prepare_output_message};
-use super::super::publish::{BatchPublisher, PublishFailure, publish_once};
+use super::super::publish::{PublishFailure, publish_once};
 use super::super::{
     DeduplicationCache, InboundMessage, OutputMessageContext, OutputPublishContext,
     PendingByInterval, PendingMessage, pending_message_count, pending_message_queue_bytes,
@@ -130,7 +131,7 @@ pub(super) fn settle_failed_batch(
 }
 
 #[cfg(test)]
-pub(in crate::service) async fn publish_conflated_pending<P: BatchPublisher>(
+pub(in crate::service) async fn publish_conflated_pending<P: OutputSink>(
     publisher: &mut P,
     pending: &mut PendingByInterval,
     max_commands_per_exec: usize,
@@ -169,7 +170,7 @@ pub(in crate::service) async fn publish_conflated_pending<P: BatchPublisher>(
 /// whether the bucket still has work plus the current pending-key count. One
 /// chunk per call lets the worker turn return to completions, timers, and the
 /// receiver between chunks.
-pub(in crate::service) async fn publish_conflated_interval_pending<P: BatchPublisher>(
+pub(in crate::service) async fn publish_conflated_interval_pending<P: OutputSink>(
     publisher: &mut P,
     pending: &mut PendingByInterval,
     passthrough: &mut VecDeque<PendingMessage>,
@@ -190,7 +191,7 @@ pub(in crate::service) async fn publish_conflated_interval_pending<P: BatchPubli
     .await
 }
 
-async fn publish_interval_bucket<P: BatchPublisher>(
+async fn publish_interval_bucket<P: OutputSink>(
     publisher: &mut P,
     pending: &mut PendingByInterval,
     passthrough: &mut VecDeque<PendingMessage>,
@@ -210,6 +211,7 @@ async fn publish_interval_bucket<P: BatchPublisher>(
     let candidate_batch_length = pending_batch_length(
         max_commands_per_exec,
         max_bytes_per_exec,
+        context.nats_payload_ceiling,
         interval_pending,
         &candidate_channels,
     );
@@ -305,7 +307,7 @@ async fn publish_interval_bucket<P: BatchPublisher>(
 }
 
 #[cfg(test)]
-pub(in crate::service) async fn publish_passthrough_pending<P: BatchPublisher>(
+pub(in crate::service) async fn publish_passthrough_pending<P: OutputSink>(
     publisher: &mut P,
     pending: &mut PendingByInterval,
     passthrough: &mut VecDeque<PendingMessage>,
@@ -321,7 +323,7 @@ pub(in crate::service) async fn publish_passthrough_pending<P: BatchPublisher>(
 }
 
 #[cfg(test)]
-pub(in crate::service) async fn publish_passthrough_one<P: BatchPublisher>(
+pub(in crate::service) async fn publish_passthrough_one<P: OutputSink>(
     publisher: &mut P,
     pending: &mut PendingByInterval,
     passthrough: &mut VecDeque<PendingMessage>,
@@ -366,7 +368,7 @@ pub(in crate::service) async fn publish_passthrough_one<P: BatchPublisher>(
 }
 
 #[cfg(test)]
-pub(in crate::service) async fn publish_passthrough_batch<P: BatchPublisher>(
+pub(in crate::service) async fn publish_passthrough_batch<P: OutputSink>(
     publisher: &mut P,
     pending: &mut PendingByInterval,
     passthrough: &mut VecDeque<PendingMessage>,
@@ -377,6 +379,7 @@ pub(in crate::service) async fn publish_passthrough_batch<P: BatchPublisher>(
     let (batch_length, atomic, _) = passthrough_batch_length(
         max_commands_per_exec,
         max_bytes_per_exec,
+        context.nats_payload_ceiling,
         passthrough.iter(),
     );
     if batch_length == 0 {

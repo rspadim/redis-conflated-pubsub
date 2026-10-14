@@ -80,6 +80,7 @@ services:
       HOTPATH_PIPELINE: ${HOTPATH_PIPELINE:-64}
       HOTPATH_CONNECTIONS: ${HOTPATH_CONNECTIONS:-1}
       HOTPATH_OUTPUTS: ${HOTPATH_OUTPUTS:-2}
+      HOTPATH_MIN_NUMPAT: ${HOTPATH_MIN_NUMPAT:-1}
     volumes:
       - ./tests:/tests:ro
     networks:

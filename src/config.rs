@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::{env, fs, path::PathBuf, time::Duration};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use redis::{Client, ConnectionInfo};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -9,6 +9,271 @@ use url::Url;
 
 mod schema;
 mod validate;
+
+// NATS subject helpers used by `--check-config` and by the NATS adapter.
+pub(crate) use validate::validate_nats_publish_subject;
+#[cfg(test)]
+pub(crate) use validate::validate_nats_subject;
+
+/// The wire protocol a NATS server URL selects. `async-nats` reads these from
+/// the URL scheme; grouping the schemes lets validation reject a server list
+/// that mixes WebSocket and raw-TCP transports before any connection is made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NatsTransport {
+    /// `nats://`: plain Core NATS over TCP.
+    Tcp,
+    /// `tls://`: Core NATS over TLS.
+    Tls,
+    /// `ws://`: Core NATS over WebSocket.
+    WebSocket,
+    /// `wss://`: Core NATS over WebSocket with TLS.
+    WebSocketTls,
+}
+
+impl NatsTransport {
+    fn from_scheme(scheme: &str) -> Option<Self> {
+        match scheme {
+            "nats" => Some(Self::Tcp),
+            "tls" => Some(Self::Tls),
+            "ws" => Some(Self::WebSocket),
+            "wss" => Some(Self::WebSocketTls),
+            _ => None,
+        }
+    }
+
+    /// `true` for the WebSocket transports; `async-nats` refuses to mix these
+    /// with `nats://`/`tls://` in one connection's server pool.
+    pub fn is_websocket(self) -> bool {
+        matches!(self, Self::WebSocket | Self::WebSocketTls)
+    }
+
+    /// The URL scheme that selects this transport.
+    pub fn scheme(self) -> &'static str {
+        match self {
+            Self::Tcp => "nats",
+            Self::Tls => "tls",
+            Self::WebSocket => "ws",
+            Self::WebSocketTls => "wss",
+        }
+    }
+}
+
+/// Redacts any `userinfo@` embedded in a URL so it is safe to place in an error
+/// message or a log line. If the string contains an `@`, everything from just
+/// after the scheme separator (`://`, or the start of the string when there is
+/// none) through the **last** `@` is replaced with `***`, regardless of `/`,
+/// `?`, or `#` in the password. This also covers malformed URLs that never
+/// parse, and URLs with no scheme at all.
+pub fn redact_url_userinfo(value: &str) -> String {
+    let Some(at) = value.rfind('@') else {
+        return value.to_owned();
+    };
+    let start = value.find("://").map(|index| index + 3).unwrap_or(0);
+    // Nothing between the start of the authority and the last `@` to hide.
+    if at <= start {
+        return value.to_owned();
+    }
+    format!("{}***{}", &value[..start], &value[at..])
+}
+
+/// Redacts a NATS server URL that could not be split into scheme, authority and
+/// host — either because [`Url::parse`] rejected it, or because it parsed
+/// without an authority.
+///
+/// The parse failure is exactly what makes the string untrustworthy: `admin:s3cr3t`
+/// might be a host and a bad port, or a password, and an `@` may sit before *or*
+/// after the secret. So nothing after the scheme is echoed. Only `scheme://` is
+/// kept, and only when what precedes the `://` really is a scheme (`[A-Za-z][A-Za-z0-9+.-]*`);
+/// otherwise — including a password that itself contains `://` — the whole
+/// string is masked. This is deliberately blunter than [`redact_url_userinfo`],
+/// which is safe only once the URL has parsed.
+fn redact_malformed_nats_url(value: &str) -> String {
+    if let Some(index) = value.find("://") {
+        let scheme = &value[..index];
+        let looks_like_scheme = scheme
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_alphabetic())
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+        if looks_like_scheme {
+            return format!("{scheme}://***");
+        }
+    }
+    "***".to_owned()
+}
+
+/// Decodes percent-encoded userinfo (`url` returns the encoded serialization).
+/// Falls back to the raw value when the bytes are not valid UTF-8.
+fn decode_userinfo(encoded: &str) -> String {
+    percent_encoding::percent_decode_str(encoded)
+        .decode_utf8()
+        .map(|decoded| decoded.into_owned())
+        .unwrap_or_else(|_| encoded.to_owned())
+}
+
+/// Credentials embedded directly in a NATS server URL (`nats://user:pass@host`).
+///
+/// Extracted so the URL stored in the connection plan can be credential-free:
+/// `async-nats` does not consume URL userinfo, and its debug logging prints the
+/// `ServerAddr` (including any password) verbatim.
+#[derive(Clone, PartialEq, Eq)]
+pub enum NatsInlineAuth {
+    /// `nats://user:password@host`.
+    UserPassword { username: String, password: String },
+    /// `nats://token@host` (a lone userinfo value, no colon).
+    Token(String),
+}
+
+// Manual `Debug` so the secret never reaches a log line even if a containing
+// struct derives `Debug`.
+impl std::fmt::Debug for NatsInlineAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UserPassword { username, .. } => f
+                .debug_struct("NatsInlineAuth::UserPassword")
+                .field("username", username)
+                .field("password", &"***")
+                .finish(),
+            Self::Token(_) => f.write_str("NatsInlineAuth::Token(***)"),
+        }
+    }
+}
+
+/// Parses one NATS server URL into its credential-free form, transport, and any
+/// inline credentials. The scheme is mandatory here (unlike `async-nats`, which
+/// defaults a bare `host:port` to `nats://`) so the transport is never guessed.
+///
+/// Error text is redacted, so a malformed URL carrying a password never echoes
+/// it through `--check-config`.
+pub fn parse_nats_server(server: &str) -> Result<(String, NatsTransport, Option<NatsInlineAuth>)> {
+    let url = Url::parse(server).with_context(|| {
+        format!(
+            "invalid NATS server URL {:?}: expected nats://, tls://, ws://, or wss://",
+            redact_malformed_nats_url(server)
+        )
+    })?;
+    let transport = NatsTransport::from_scheme(url.scheme()).ok_or_else(|| {
+        anyhow::anyhow!(
+            "invalid NATS server URL {:?}: unsupported scheme {:?}; use nats://, tls://, ws://, or wss://",
+            redact_url_userinfo(server),
+            url.scheme()
+        )
+    })?;
+    // A URL with no authority (`nats:user:pass@host:4222`) parses as a
+    // *cannot-be-a-base* URL: it has no host and no `userinfo`, so the checks
+    // below would treat it as credential-free and store the raw string. The
+    // `async-nats` client then prepends `nats://` and reads `user:pass` as
+    // credentials, which would leak the secret through `ConnectionPlan.servers`
+    // and its debug logging. Reject it before any of that.
+    if url.cannot_be_a_base() || url.host_str().is_none() {
+        bail!(
+            "invalid NATS server URL {:?}: missing host; use nats://[user:password@]host:port",
+            redact_malformed_nats_url(server)
+        );
+    }
+    // Userinfo presence is `username OR password`: `nats://:secret@host` has an
+    // empty username but a real password, and must not fall through to the raw
+    // URL (which would leak the password and drop the auth).
+    let has_userinfo = !url.username().is_empty() || url.password().is_some();
+    let inline = if has_userinfo {
+        match url.password() {
+            // A password is present: user + password (username may be empty).
+            Some(password) => Some(NatsInlineAuth::UserPassword {
+                username: decode_userinfo(url.username()),
+                password: decode_userinfo(password),
+            }),
+            // A lone userinfo value with no colon is a token, matching the
+            // common NATS convention.
+            None => Some(NatsInlineAuth::Token(decode_userinfo(url.username()))),
+        }
+    } else {
+        None
+    };
+    // Store a credential-free URL. `async-nats` does not consume URL userinfo,
+    // and its debug logging would print any password in the `ServerAddr`.
+    let clean = if inline.is_some() {
+        let mut stripped = url.clone();
+        stripped
+            .set_username("")
+            .expect("a host-backed URL accepts an empty username");
+        stripped
+            .set_password(None)
+            .expect("a host-backed URL accepts a cleared password");
+        stripped.to_string()
+    } else {
+        server.to_owned()
+    };
+    Ok((clean, transport, inline))
+}
+
+/// Result of normalizing a NATS `servers` list: credential-free URLs, the
+/// transport family, and any credentials that were embedded in the URLs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NormalizedNatsServers {
+    /// Server URLs with any inline credentials stripped.
+    pub servers: Vec<String>,
+    /// Transport scheme (`nats`, `tls`, `ws`, `wss`) shared by the whole list.
+    pub transport: String,
+    /// `true` for the WebSocket transports.
+    pub websocket: bool,
+    /// Credentials found inline in the URLs, if any. All entries must agree.
+    pub inline_auth: Option<NatsInlineAuth>,
+}
+
+/// Validates and normalizes a NATS `servers` list.
+///
+/// Every URL must parse, use a supported scheme, and share a single transport
+/// family (one connection cannot mix `ws`/`wss` with `nats`/`tls`). Credentials
+/// embedded in the URL are extracted and returned; all entries in one list must
+/// carry the same credentials (or none), because they form a single auth hand.
+/// Error text is redacted so a password never leaks through `--check-config`.
+pub fn normalize_nats_servers(path: &str, servers: &[String]) -> Result<NormalizedNatsServers> {
+    if servers.is_empty() {
+        bail!("{path}.servers must contain at least one NATS server URL");
+    }
+    let mut transport: Option<NatsTransport> = None;
+    let mut inline_auth: Option<NatsInlineAuth> = None;
+    let mut cleaned = Vec::with_capacity(servers.len());
+    for (index, server) in servers.iter().enumerate() {
+        if server.trim().is_empty() {
+            bail!("{path}.servers[{index}] must not be empty");
+        }
+        let (clean, parsed, inline) = parse_nats_server(server)
+            .map_err(|error| anyhow::anyhow!("{path}.servers[{index}]: {error}"))?;
+        match transport {
+            None => transport = Some(parsed),
+            Some(first) if first == parsed => {}
+            Some(first) => {
+                bail!(
+                    "{path}.servers mixes {} and {} transports ({:?} and {:?}); one NATS connection requires a single transport family",
+                    first.scheme(),
+                    parsed.scheme(),
+                    first,
+                    parsed
+                );
+            }
+        }
+        if let Some(inline) = inline {
+            match &inline_auth {
+                None => inline_auth = Some(inline),
+                Some(existing) if *existing == inline => {}
+                Some(_) => bail!(
+                    "{path}.servers has inconsistent inline credentials; every seed must use the same credentials or none"
+                ),
+            }
+        }
+        cleaned.push(clean);
+    }
+    let transport = transport.expect("a non-empty server list has a transport");
+    Ok(NormalizedNatsServers {
+        servers: cleaned,
+        transport: transport.scheme().to_owned(),
+        websocket: transport.is_websocket(),
+        inline_auth,
+    })
+}
 
 pub const MAX_RUNTIME_DURATION_MS: i64 = 31_536_000_000;
 pub const MAX_DEDUPLICATION_GROUP_MEMBERS: usize = 100_000;
@@ -150,6 +415,55 @@ pub fn same_pubsub_server(left: &RedisConfig, right: &RedisConfig) -> bool {
     left.host.eq_ignore_ascii_case(&right.host) && left.port == right.port && left.tls == right.tls
 }
 
+/// A single selected backend for an input or output.
+///
+/// The JSON keeps the Redis-compatible shape: exactly one of the keys `redis`
+/// or `nats` is present on `input` and on each output. This enum is the runtime
+/// view resolved from those keys rather than the serde representation, because a
+/// literal untagged enum silently accepts the "both keys" case and cannot report
+/// the "no backend" case with a useful message. See `InputConfig::endpoint` and
+/// `OutputConfig::endpoint`.
+#[derive(Clone, Copy, Debug)]
+pub enum Endpoint<'a> {
+    Redis(&'a RedisConfig),
+    Nats(&'a NatsConfig),
+}
+
+impl<'a> Endpoint<'a> {
+    /// Borrows the Redis settings, or `None` when NATS is selected.
+    pub fn as_redis(self) -> Option<&'a RedisConfig> {
+        match self {
+            Endpoint::Redis(redis) => Some(redis),
+            Endpoint::Nats(_) => None,
+        }
+    }
+
+    /// Borrows the NATS settings, or `None` when Redis is selected.
+    pub fn as_nats(self) -> Option<&'a NatsConfig> {
+        match self {
+            Endpoint::Nats(nats) => Some(nats),
+            Endpoint::Redis(_) => None,
+        }
+    }
+}
+
+/// Resolves the exactly-one-backend selection shared by `input` and outputs.
+/// `path` is the JSON path used in the error message.
+pub(crate) fn select_endpoint<'a>(
+    path: &str,
+    redis: Option<&'a RedisConfig>,
+    nats: Option<&'a NatsConfig>,
+) -> Result<Endpoint<'a>> {
+    match (redis, nats) {
+        (Some(redis), None) => Ok(Endpoint::Redis(redis)),
+        (None, Some(nats)) => Ok(Endpoint::Nats(nats)),
+        (Some(_), Some(_)) => bail!(
+            "{path} must select exactly one backend, but both `redis` and `nats` are configured"
+        ),
+        (None, None) => bail!("{path} must select one backend with `redis` or `nats`"),
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum FilterAction {
@@ -182,7 +496,13 @@ pub struct ChannelFilterRule {
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InputConfig {
-    pub redis: RedisConfig,
+    /// Redis backend. Exactly one of `redis`/`nats` must be present; `redis`
+    /// keeps its 0.2 fields and semantics unchanged.
+    #[serde(default)]
+    pub redis: Option<RedisConfig>,
+    /// Core NATS backend. Exactly one of `redis`/`nats` must be present.
+    #[serde(default)]
+    pub nats: Option<NatsConfig>,
     #[schemars(length(min = 1))]
     pub subscriptions: Vec<Subscription>,
     #[serde(default)]
@@ -199,6 +519,14 @@ pub struct InputConfig {
     pub exclude_output_echoes: bool,
     #[serde(default = "default_exclude_sentinel_pubsub")]
     pub exclude_sentinel_pubsub: bool,
+}
+
+impl InputConfig {
+    /// Resolves the single configured backend, rejecting zero or two. `path`
+    /// names the JSON location for error messages.
+    pub fn endpoint(&self, path: &str) -> Result<Endpoint<'_>> {
+        select_endpoint(path, self.redis.as_ref(), self.nats.as_ref())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
@@ -220,6 +548,18 @@ pub enum Subscription {
         #[serde(default)]
         output_suffix: String,
     },
+    /// Native Core NATS subscription. `*` matches one token and `>` matches one
+    /// or more trailing tokens; these use NATS semantics and are not translated
+    /// from Redis globs.
+    #[serde(rename = "nats_subject")]
+    NatsSubject {
+        #[schemars(length(min = 1))]
+        subject: String,
+        #[serde(default)]
+        output_prefix: String,
+        #[serde(default)]
+        output_suffix: String,
+    },
 }
 
 impl Subscription {
@@ -234,6 +574,11 @@ impl Subscription {
                 output_prefix,
                 output_suffix,
                 ..
+            }
+            | Self::NatsSubject {
+                output_prefix,
+                output_suffix,
+                ..
             } => (output_prefix.as_str(), output_suffix.as_str()),
         }
     }
@@ -242,7 +587,12 @@ impl Subscription {
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OutputConfig {
-    pub redis: RedisConfig,
+    /// Redis backend. Exactly one of `redis`/`nats` must be present.
+    #[serde(default)]
+    pub redis: Option<RedisConfig>,
+    /// Core NATS backend. Exactly one of `redis`/`nats` must be present.
+    #[serde(default)]
+    pub nats: Option<NatsConfig>,
     #[serde(default)]
     pub channel_prefix: String,
     #[serde(default)]
@@ -288,6 +638,22 @@ pub struct OutputConfig {
     #[serde(default, alias = "default_filter")]
     #[schemars(default)]
     pub filter_default: FilterAction,
+}
+
+impl OutputConfig {
+    /// Resolves the single configured backend, rejecting zero or two. `path`
+    /// names the JSON location for error messages.
+    pub fn endpoint(&self, path: &str) -> Result<Endpoint<'_>> {
+        select_endpoint(path, self.redis.as_ref(), self.nats.as_ref())
+    }
+
+    /// Redis settings for the runtime publish path, which is only reached after
+    /// the endpoint selection has resolved to Redis.
+    pub(crate) fn redis_endpoint(&self) -> &RedisConfig {
+        self.redis
+            .as_ref()
+            .expect("runtime publish path requires a Redis output endpoint")
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
@@ -572,6 +938,97 @@ impl RedisConfig {
     }
 }
 
+/// Core NATS backend settings.
+///
+/// The `servers` list holds one or more seed URLs; the URL scheme selects the
+/// transport (`nats://`, `tls://`, `ws://`, `wss://`). Every URL in one list
+/// must use the same transport family. The runtime adapter in
+/// `src/service/nats` consumes these settings: seed pool, connection
+/// name/timeout, server discovery, authentication, and TLS.
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NatsConfig {
+    /// One or more NATS server URLs used as cluster seeds.
+    #[schemars(length(min = 1))]
+    pub servers: Vec<String>,
+    /// Optional connection name reported in NATS server `CONNZ` listings.
+    #[serde(default)]
+    #[schemars(length(min = 1))]
+    pub name: Option<String>,
+    /// Optional connect timeout in milliseconds.
+    #[serde(default = "default_nats_connect_timeout_ms")]
+    #[schemars(range(min = 1))]
+    pub connect_timeout_ms: u64,
+    /// When true, only the configured `servers` are used and servers advertised
+    /// by the cluster are ignored. Useful behind proxies or WebSocket ingress.
+    #[serde(default)]
+    pub ignore_discovered_servers: bool,
+    /// Authentication method; defaults to none.
+    #[serde(default)]
+    pub auth: NatsAuth,
+    /// Optional TLS transport settings (trusted roots and client identity).
+    #[serde(default)]
+    #[schemars(default)]
+    pub tls: Option<NatsTlsConfig>,
+}
+
+impl NatsConfig {
+    pub fn connect_timeout(&self) -> Duration {
+        Duration::from_millis(self.connect_timeout_ms)
+    }
+}
+
+/// Secret reference for NATS authentication. Secrets are always referenced by
+/// environment variable name or file path; values are never read from JSON.
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum NatsAuth {
+    /// No authentication (development only).
+    #[default]
+    None,
+    /// Username plus a password read from `password_env`.
+    UserPassword {
+        #[schemars(length(min = 1))]
+        username: String,
+        #[schemars(length(min = 1))]
+        password_env: String,
+    },
+    /// Token read from `token_env`.
+    Token {
+        #[schemars(length(min = 1))]
+        token_env: String,
+    },
+    /// NKey seed read from `seed_file`.
+    Nkey {
+        #[schemars(length(min = 1))]
+        seed_file: PathBuf,
+    },
+    /// NATS credentials file (user JWT plus its NKey seed) at `path`.
+    CredentialsFile {
+        #[schemars(length(min = 1))]
+        path: PathBuf,
+    },
+}
+
+/// Optional NATS TLS settings. The server URL scheme selects TLS; these fields
+/// extend it with a custom trusted root and/or a client identity for mTLS.
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NatsTlsConfig {
+    /// Additional trusted root certificate file.
+    #[serde(default)]
+    #[schemars(length(min = 1))]
+    pub root_cert_file: Option<PathBuf>,
+    /// Client certificate file for mTLS; requires `client_key_file`.
+    #[serde(default)]
+    #[schemars(length(min = 1))]
+    pub client_cert_file: Option<PathBuf>,
+    /// Client private key file for mTLS; requires `client_cert_file`.
+    #[serde(default)]
+    #[schemars(length(min = 1))]
+    pub client_key_file: Option<PathBuf>,
+}
+
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ConflationConfig {
@@ -736,6 +1193,10 @@ fn default_port() -> u16 {
 }
 
 fn default_connect_timeout_ms() -> u64 {
+    5000
+}
+
+fn default_nats_connect_timeout_ms() -> u64 {
     5000
 }
 

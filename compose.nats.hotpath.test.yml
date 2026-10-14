@@ -1,0 +1,57 @@
+# NATS hot-path stack.
+#
+# The relay runtime supports NATS input/output now (`src/service/nats/`), so the
+# `service-nats-hotpath` container is runnable against the NATS broker using the
+# existing `Dockerfile`. It mirrors `compose.hotpath.test.yml` (broker, service
+# with a mounted config and status endpoint, benchmark harness).
+#
+# The benchmark harness is NOT containerized here. `spikes/compare` runs its
+# publisher and subscriber as **separate host processes**, which is what makes
+# the latency numbers meaningful; an in-process harness inflates them. Build and
+# run it from the host instead (see spikes/compare/README.md):
+#
+#   docker compose -p nats-hotpath -f compose.nats.hotpath.test.yml up -d nats-hotpath service-nats-hotpath
+#   $env:CARGO_TARGET_DIR="$PWD/spikes/compare/.target"
+#   cargo build --release --locked --manifest-path spikes/compare/Cargo.toml
+#   # then: transport-compare e2e-verify  /  transport-compare e2e-publish
+#   docker compose -p nats-hotpath -f compose.nats.hotpath.test.yml down --volumes --remove-orphans
+#
+# The relay config mounted below selects `nats` input/output and points at the
+# broker service (`nats://nats-hotpath:4222`). Override it with
+# NATS_HOTPATH_CONFIG_FILE if needed.
+
+services:
+  nats-hotpath:
+    image: ${NATS_HOTPATH_IMAGE:-nats:2.15-alpine}
+    command: ["-p", "4222", "-m", "8222"]
+    ports:
+      - "127.0.0.1:14240:4222"
+    networks:
+      nats-hotpath: {}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8222/healthz | grep -q ok"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+
+  service-nats-hotpath:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["--config", "/config/nats-hotpath-config.json"]
+    working_dir: /state
+    volumes:
+      - ${NATS_HOTPATH_CONFIG_FILE:-./tests/docker-nats-hotpath-config.json}:/config/nats-hotpath-config.json:ro
+      - nats-hotpath-state:/state
+    networks:
+      nats-hotpath: {}
+    depends_on:
+      nats-hotpath:
+        condition: service_healthy
+
+volumes:
+  nats-hotpath-state: {}
+
+networks:
+  nats-hotpath:
+    driver: bridge

@@ -1,8 +1,8 @@
 ﻿# Redis Conflated Pub/Sub
 
-A Rust relay that forwards Redis Pub/Sub messages to independently configured Redis outputs.
+A Rust relay that forwards Pub/Sub messages between Redis and Core NATS. The `input` selects one backend and every output independently selects Redis or Core NATS; mapping, filters, conflation and deduplication run the same way for either backend.
 
-Current release: **v0.2.2**. [Download a platform binary](https://github.com/rspadim/redis-conflated-pubsub/releases) or see the [developer build instructions](src/README.md).
+Current release: **v0.3.0**. [Download a platform binary](https://github.com/rspadim/redis-conflated-pubsub/releases) or see the [developer build instructions](src/README.md). The project site is at <https://rspadim.github.io/redis-conflated-pubsub/> (pt-BR).
 
 ## Quick start
 
@@ -286,6 +286,228 @@ This example forwards `test-feed:*` from a remote Redis input to local Redis at 
 
 Here, `test-feed:alpha` becomes `local:remote:test-feed:alpha`. Verify with `redis-cli -h 127.0.0.1 -p 16379 -n 1 PSUBSCRIBE 'local:*'`. `subscribe` uses `channel`; `psubscribe` uses `pattern`. Credentials use `password_env`; set `tls` to `true` to enable TLS.
 
+## Core NATS backend
+
+Input and each output select exactly one backend. Add a `nats` object next to the existing `redis` one; existing Redis configurations are unchanged and still parse and validate verbatim, because the keys are additive.
+
+- Either key alone is valid: `redis` keeps its 0.2 fields and semantics, `nats` selects Core NATS.
+- Exactly one backend is required per side. Omitting both, or setting both, fails `--check-config` and startup with a path-qualified message:
+
+  ```text
+  input must select exactly one backend, but both `redis` and `nats` are configured
+  input must select one backend with `redis` or `nats`
+  ```
+
+- The generated JSON Schema encodes the same rule with a `oneOf` on `required: ["redis"]` / `required: ["nats"]` for `input` and for each output.
+
+Core NATS here means **Core NATS Pub/Sub only**, not JetStream: no persistence and no replay.
+
+`nats` endpoint fields:
+
+| Field | Meaning |
+| --- | --- |
+| `servers` | One or more seed URLs. Required, non-empty. The scheme is mandatory and selects the transport: `nats://` (TCP), `tls://` (TLS), `ws://`/`wss://` (WebSocket); a bare `host:port` is rejected. |
+| `name` | Optional connection name reported in the NATS server client listing. |
+| `connect_timeout_ms` | Connect and handshake timeout, default `5000`. |
+| `ignore_discovered_servers` | When `true`, only the configured `servers` are used and cluster-advertised servers are ignored; useful behind a proxy or WebSocket ingress whose internal addresses are unreachable. |
+| `auth` | Authentication variant; defaults to `none`. |
+| `tls` | Optional trusted root and/or client identity; see below. |
+
+### The one-transport-per-list rule
+
+Every URL in a single `servers` list must use the same transport family, and `ws`/`wss` cannot be mixed with `nats`/`tls` in one list (one NATS connection requires one family). Different inputs and outputs may use different families, though. Validation rejects a mixed list, for example:
+
+```sh
+input.servers mixes nats and wss transports (Tcp and WebSocketTls); one NATS connection requires a single transport family
+```
+
+### Authentication
+
+Secrets are always referenced by environment variable name or file path, never written into JSON. Provide the value through the environment or a mounted secret file.
+
+| `auth.type` | Secret reference | Notes |
+| --- | --- | --- |
+| omitted or `none` | none | Development only; use a protected network. |
+| `user_password` | `username` + `password_env` | Username plus the environment variable holding the password. |
+| `token` | `token_env` | Environment variable holding the token. |
+| `nkey` | `seed_file` | Path to the NKey seed file. |
+| `credentials_file` | `path` | Path to the NATS `.creds` file (user JWT **plus its NKey seed**), not a bearer JWT. |
+
+```json
+"auth": { "type": "user_password", "username": "relay", "password_env": "NATS_PASSWORD" }
+```
+
+```json
+"auth": { "type": "token", "token_env": "NATS_TOKEN" }
+```
+
+```json
+"auth": { "type": "nkey", "seed_file": "/run/secrets/relay.nk" }
+```
+
+```json
+"auth": { "type": "credentials_file", "path": "/run/secrets/relay.creds" }
+```
+
+TLS is separate from `auth` and is selected by the URL scheme; `tls` only extends it with trusted roots or a client identity. For remote password or token connections use `tls://` or `wss://` so the secret is not sent in cleartext.
+
+```json
+"tls": {
+  "root_cert_file": "/run/secrets/nats-ca.pem",
+  "client_cert_file": "/run/secrets/relay-cert.pem",
+  "client_key_file": "/run/secrets/relay-key.pem"
+}
+```
+
+mTLS requires `client_cert_file` and `client_key_file` together (`--check-config` rejects one without the other). Treat `.creds`, NKey seeds, passwords, tokens, and private keys as secrets.
+
+> **Warning:** never inline a password, token, NKey seed, or key material in the JSON. Reference it through an environment variable name (`password_env`, `token_env`) or a file path (`seed_file`, `path`, and the `tls` files), and mount or inject the value at deployment time. Keep secret values out of Git, logs, and process arguments.
+
+### Subjects and wildcards
+
+NATS input subscriptions use the native `nats_subject` type and NATS semantics; Redis `SUBSCRIBE`/`PSUBSCRIBE` globs are **not** translated for you. Use the syntax the selected input actually needs:
+
+- A Redis input uses `{"type": "subscribe", "channel": "prices:EURUSD"}` or `{"type": "psubscribe", "pattern": "prices:*"}` with Redis glob semantics.
+- A NATS input uses `{"type": "nats_subject", "subject": "prices.EURUSD"}` or `{"type": "nats_subject", "subject": "prices.>"}`.
+
+In a NATS subject, `.` separates tokens, `*` matches exactly one token, and `>` matches one or more trailing tokens and must be the last token. `prices:*` (Redis) and `prices.>` (NATS) are different patterns; the relay never rewrites one into the other. `--check-config` rejects empty subjects, whitespace, empty tokens, partial wildcards such as `pric*`, and a `>` that is not final.
+
+For NATS outputs, channel mapping keeps its usual meaning: the subscription `output_prefix`/`output_suffix`, then the output `channel_prefix`/`channel_suffix`, are concatenated around the source subject, and the final mapped string is used directly as the publish subject. There is no automatic renaming or escaping, so the mapped result must be a concrete, valid subject (no `*` or `>`); an invalid mapped subject is rejected with a definitive pre-send error instead of being published.
+
+Core NATS has **no per-message acknowledgement and no subscriber count**. A successful publish means the command was accepted by the local client buffer; the `flush` that follows each batch drains that **local write buffer** to the socket, and `async-nats` `flush` does **not** wait for the server to process the commands. So it is neither a server round-trip barrier nor a guarantee that a subscriber received anything. The relay therefore reports a subscriber count of `0` for NATS outputs, so the `subscribers` field in the `output_batch_published` log line is only meaningful for Redis, and the status snapshot exposes no subscriber count at all. Read `publish_errors_total`, `uncertain_messages_total`, `input_reconnects_total` and `output_reconnects_total` for a NATS output, and do not read `0` subscribers as "nobody is listening".
+
+### Loop guard
+
+A relay output published on one connection can match its own input subscription on another, so NATS-to-NATS loops are broken with a `ConflatedPS-Hop: 1` header (vendor-namespaced so it cannot collide with an application header): every NATS output stamps it on each forwarded message, and the NATS input drops any message that already carries it. The payload is never modified, so the guard is invisible to subscribers that ignore headers. **Only the payload is forwarded, not NATS application headers**: the output sets just `ConflatedPS-Hop`, so inbound headers (content-type, tracing, `Nats-Msg-Id`, …) are dropped when a message crosses the relay. Suppressed messages are counted in `loop_suppressed_messages_total`. The guard is NATS-specific: a Redis input has no headers to stamp or read and keeps its existing same-server echo handling, and a Redis input never receives NATS output traffic.
+
+### Example: NATS input to NATS output
+
+Forward `market.>` from a NATS cluster to a NATS archive endpoint, mapping `market.EURUSD` to `archive.market.EURUSD.v1`:
+
+```json
+{
+  "max_bytes_per_exec": 4194304,
+  "oversized_message_policy": "send",
+  "client_name": "ConflatedPS-{version}-{role}::{user}::{host}",
+  "input": {
+    "nats": {
+      "servers": ["nats://nats-1:4222", "nats://nats-2:4222"],
+      "name": "conflated-input",
+      "connect_timeout_ms": 5000,
+      "ignore_discovered_servers": false,
+      "auth": {
+        "type": "user_password",
+        "username": "relay",
+        "password_env": "NATS_INPUT_PASSWORD"
+      }
+    },
+    "subscriptions": [
+      {
+        "type": "nats_subject",
+        "subject": "market.>",
+        "output_prefix": "",
+        "output_suffix": ""
+      }
+    ]
+  },
+  "outputs": {
+    "nats-archive": {
+      "nats": {
+        "servers": ["tls://nats.example.net:4222"],
+        "name": "conflated-archive",
+        "auth": {
+          "type": "credentials_file",
+          "path": "/run/secrets/relay.creds"
+        },
+        "tls": {
+          "root_cert_file": "/run/secrets/nats-ca.pem"
+        }
+      },
+      "channel_prefix": "archive.",
+      "channel_suffix": ".v1",
+      "conflation": {
+        "interval_ms": 250,
+        "max_commands_per_exec": 256
+      },
+      "deduplication": {
+        "ttl_ms": 5000
+      }
+    }
+  },
+  "instance_lock": {
+    "path": "redis-conflated-pubsub.lock"
+  },
+  "status": {
+    "http": {
+      "bind": "127.0.0.1",
+      "port": 9090
+    }
+  },
+  "logging": {
+    "directory": "logs",
+    "prefix": "redis-conflated-pubsub",
+    "enabled": true,
+    "level": "info",
+    "retention_days": 14,
+    "max_total_size_mb": 1024
+  }
+}
+```
+
+### Example: Redis input to NATS output
+
+Forward `feed:*` from a Redis input to NATS over WebSocket TLS, mapping `feed:alpha` to `nats.feed:alpha`, using the `token` auth variant:
+
+```json
+{
+  "input": {
+    "redis": {
+      "host": "redis.example.net",
+      "port": 6379,
+      "username": null,
+      "password_env": "REDIS_PASSWORD",
+      "tls": false,
+      "database": 0,
+      "connect_timeout_ms": 5000
+    },
+    "subscriptions": [
+      {
+        "type": "psubscribe",
+        "pattern": "feed:*",
+        "output_prefix": "",
+        "output_suffix": ""
+      }
+    ]
+  },
+  "outputs": {
+    "nats-out": {
+      "nats": {
+        "servers": ["wss://nats.example.net:443"],
+        "ignore_discovered_servers": true,
+        "auth": {
+          "type": "token",
+          "token_env": "NATS_TOKEN"
+        }
+      },
+      "channel_prefix": "nats.",
+      "channel_suffix": "",
+      "conflation": {
+        "interval_ms": 100
+      }
+    }
+  },
+  "instance_lock": {
+    "path": "redis-conflated-pubsub.lock"
+  }
+}
+```
+
+A complete NATS configuration example is in [`config.nats.example.json`](config.nats.example.json): a NATS input using `credentials_file`, a NATS output using a token, and a Redis copy output. Validate it before running:
+
+```sh
+./redis-conflated-pubsub --check-config --config config.nats.example.json
+```
+
 ## Verify and monitor
 
 In separate terminals, subscribe to an output and publish to an input channel:
@@ -315,5 +537,27 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now redis-conflated-pubsub.service
 sudo systemctl status redis-conflated-pubsub.service
 ```
+
+### Linux packages
+
+Releases also ship packages for the four families, all built with [nFPM](https://nfpm.goreleaser.com/) from the same static musl binary. None of them declares dependencies, so one package per family covers every supported release (CI installs and runs them on Ubuntu 20.04, 22.04, 24.04 and 26.04, plus Fedora, Alpine and Arch):
+
+| Family | Package | Install |
+| --- | --- | --- |
+| Debian/Ubuntu | `redis-conflated-pubsub_<version>-1_amd64.deb` | `sudo apt install ./redis-conflated-pubsub_0.3.0-1_amd64.deb` |
+| RHEL/Fedora/SUSE | `redis-conflated-pubsub-<version>-1.x86_64.rpm` | `sudo dnf install ./redis-conflated-pubsub-0.3.0-1.x86_64.rpm` |
+| Alpine | `redis-conflated-pubsub_<version>-r1_x86_64.apk` | `sudo apk add --allow-untrusted ./redis-conflated-pubsub_0.3.0-r1_x86_64.apk` |
+| Arch | `redis-conflated-pubsub-<version>-1-x86_64.pkg.tar.zst` | `sudo pacman -U redis-conflated-pubsub-0.3.0-1-x86_64.pkg.tar.zst` |
+
+The packages are unsigned, like the release archives, so each package manager asks for confirmation (or needs `--allow-untrusted` on Alpine). Then edit the configuration and start the service:
+
+```sh
+sudo editor /etc/redis-conflated-pubsub/config.json
+sudo systemctl enable --now redis-conflated-pubsub.service   # Debian, RPM family, Arch
+sudo rc-update add redis-conflated-pubsub default            # Alpine (OpenRC)
+sudo rc-service redis-conflated-pubsub start
+```
+
+Each package installs `/usr/bin/redis-conflated-pubsub`, the systemd unit at `/usr/lib/systemd/system/redis-conflated-pubsub.service` (Alpine gets an OpenRC script in `/etc/init.d` instead), a `sysusers.d` drop-in that defines the `redis-conflated-pubsub` system user, and the configuration files `/etc/redis-conflated-pubsub/config.json` plus `/etc/redis-conflated-pubsub/redis.env` (mode `0600`, for the `*_env` secret fields). Logs and state live in `/var/log/redis-conflated-pubsub` and `/var/lib/redis-conflated-pubsub`; installation never enables or starts the service, and a Debian `purge` removes the user, the state and the configuration. See [`nfpm.yaml`](nfpm.yaml) and [`packaging/`](packaging) for the layout.
 
 See [Docker build, run, and integration-test instructions](docker/README.md) and [CI/release details](ci/README.md).

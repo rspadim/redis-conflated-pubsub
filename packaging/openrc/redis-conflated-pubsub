@@ -1,0 +1,27 @@
+#!/sbin/openrc-run
+# OpenRC service used by the Alpine Linux package; the Debian, RPM and Arch
+# packages ship the systemd unit instead.
+
+name="redis-conflated-pubsub"
+description="Redis Conflated Pub/Sub"
+
+command="/usr/bin/redis-conflated-pubsub"
+command_args="--config /etc/redis-conflated-pubsub/config.json"
+command_user="redis-conflated-pubsub:redis-conflated-pubsub"
+command_background="yes"
+pidfile="/run/redis-conflated-pubsub.pid"
+directory="/var/lib/redis-conflated-pubsub"
+
+# Optional secrets for the *_env configuration fields. Keep the file 0600:
+# OpenRC exports these before dropping to command_user.
+if [ -r /etc/redis-conflated-pubsub/redis.env ]; then
+	set -a
+	# shellcheck disable=SC1091
+	. /etc/redis-conflated-pubsub/redis.env
+	set +a
+fi
+
+depend() {
+	need net
+	after firewall
+}

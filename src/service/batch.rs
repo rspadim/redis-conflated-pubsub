@@ -14,6 +14,7 @@ pub(super) fn pending_batch(
     interval_ms: i64,
     max_commands_per_exec: usize,
     max_bytes_per_exec: usize,
+    nats_payload_ceiling: Option<usize>,
     pending: &HashMap<String, PendingMessage>,
     passthrough: &VecDeque<PendingMessage>,
 ) -> Vec<PendingMessage> {
@@ -23,6 +24,7 @@ pub(super) fn pending_batch(
         let batch_length = pending_batch_length(
             max_commands_per_exec,
             max_bytes_per_exec,
+            nats_payload_ceiling,
             pending,
             &candidates,
         );
@@ -41,9 +43,17 @@ pub(super) fn pending_batch(
     }
 }
 
+/// A payload above the live NATS server ceiling can never be published on this
+/// connection, so batching keeps it alone: a definitive `NotSent` would
+/// otherwise drop every unrelated channel sharing its batch.
+fn exceeds_nats_ceiling(message: &PendingMessage, ceiling: Option<usize>) -> bool {
+    ceiling.is_some_and(|ceiling| message.payload.len() > ceiling)
+}
+
 pub(super) fn pending_batch_length(
     max_commands_per_exec: usize,
     max_bytes_per_exec: usize,
+    nats_payload_ceiling: Option<usize>,
     pending: &HashMap<String, PendingMessage>,
     candidate_channels: &[String],
 ) -> usize {
@@ -53,6 +63,15 @@ pub(super) fn pending_batch_length(
         let message = pending
             .get(channel)
             .expect("pending channel snapshot must remain present");
+        if exceeds_nats_ceiling(message, nats_payload_ceiling) {
+            // Keep an unsendable payload in a batch of its own: it can only
+            // fail with `NotSent`, and that must not take the channels that
+            // merely shared its batch down with it.
+            if batch_length == 0 {
+                return 1;
+            }
+            break;
+        }
         let message_bytes = publish_command_frame_bytes(message);
         let transaction_bytes = batch_bytes
             .saturating_add(message_bytes)
@@ -69,12 +88,21 @@ pub(super) fn pending_batch_length(
 pub(super) fn passthrough_batch_length<'a>(
     max_commands_per_exec: usize,
     max_bytes_per_exec: usize,
+    nats_payload_ceiling: Option<usize>,
     candidates: impl Iterator<Item = &'a PendingMessage>,
 ) -> (usize, bool, usize) {
     let mut batch_length = 0usize;
     let mut batch_bytes = 0usize;
     for message in candidates.take(max_commands_per_exec) {
         let message_bytes = publish_command_frame_bytes(message);
+        if exceeds_nats_ceiling(message, nats_payload_ceiling) {
+            // A payload past the live server ceiling is unsendable here; keep it
+            // as a singleton so a `NotSent` drops only it, not its neighbours.
+            if batch_length == 0 {
+                return (1, false, message_bytes);
+            }
+            break;
+        }
         if batch_length == 0 {
             if message_bytes > max_bytes_per_exec {
                 // Preserve the existing oversized-message `Send` behavior;
@@ -260,6 +288,7 @@ pub(super) fn prepare_output_message(
         deduplication_ttl_ms,
         deduplication_group,
         max_bytes_per_exec,
+        nats_payload_ceiling,
         oversized_policy,
     } = context.policy.clone();
     let mut pending_message = PendingMessage {
@@ -271,6 +300,44 @@ pub(super) fn prepare_output_message(
         raw_payload: None,
     };
     let atomic = interval_ms > 0;
+
+    // A connected NATS output has a hard server payload ceiling and no RESP
+    // framing, so the oversized policy must act against that real limit. Doing
+    // this here (rather than only at publish time) makes `truncate` actually
+    // truncate and `drop` drop, instead of the payload slipping past the
+    // RESP-based check and being rejected as oversized when it is sent.
+    if let Some(ceiling) = nats_payload_ceiling {
+        if pending_message.payload.len() > ceiling {
+            match oversized_policy {
+                // `send` keeps the full payload; the client/server still enforce
+                // its own limit, so a truly over-limit message fails as NotSent.
+                OversizedMessagePolicy::Send => {}
+                OversizedMessagePolicy::Drop => {
+                    context.metrics.record_output_dropped(
+                        context.output_metrics,
+                        1,
+                        pending_message.payload.len(),
+                        super::pending_message_queue_bytes(&pending_message),
+                    );
+                    context.policy_log.report(context.name, 1, 0, 0);
+                    return None;
+                }
+                OversizedMessagePolicy::Truncate => {
+                    let truncated_bytes = pending_message.payload.len() - ceiling;
+                    pending_message.raw_payload = Some(Arc::clone(&pending_message.payload));
+                    pending_message.payload = Arc::from(&pending_message.payload[..ceiling]);
+                    context
+                        .metrics
+                        .record_output_truncated(context.output_metrics, truncated_bytes);
+                    context
+                        .policy_log
+                        .report(context.name, 0, 1, truncated_bytes);
+                }
+            }
+        }
+        return Some(pending_message);
+    }
+
     if publish_operation_frame_bytes(&pending_message, atomic) <= max_bytes_per_exec
         || oversized_policy == OversizedMessagePolicy::Send
     {

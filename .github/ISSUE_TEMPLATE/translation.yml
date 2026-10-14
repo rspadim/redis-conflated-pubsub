@@ -1,0 +1,60 @@
+name: Translation
+description: Offer a new translation, extend one, or report a problem in an existing one
+title: "Translation: "
+labels: ["translation"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping translate Conflated Pub/Sub!
+
+        The site is built with MkDocs Material. The default language is pt-BR, in
+        `docs/*.md`, served at the site root. Every other language lives next to it
+        as `docs/<page>.<locale>.md` and is served under `/<locale>/`.
+
+        You do not need to speak every technical term: **field names, JSON, shell
+        commands, metric names, file paths and error strings are never translated.**
+  - type: input
+    id: language
+    attributes:
+      label: Language
+      description: Language and locale code as it will be used in the file suffix.
+      placeholder: Spanish (es), German (de), Japanese (ja)…
+    validations:
+      required: true
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - Whole site (all pages)
+        - Some pages
+        - Fix or improvement in an existing translation
+        - Review of an existing translation
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Details
+      description: Which pages, and anything a maintainer should know.
+      placeholder: |
+        I can translate the whole site to Spanish, starting with the home page and
+        quick start. I am a native speaker and have read the language guide.
+    validations:
+      required: false
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: I have read the "Add a language" section of the development page.
+          required: false
+        - label: I can validate the build with `mkdocs build --strict` before opening a pull request.
+          required: false
+  - type: markdown
+    attributes:
+      value: |
+        A maintainer will add the locale to `plugins.i18n.languages` in `mkdocs.yml`
+        and list the translation in the language switcher. Pull requests are the
+        fastest path: one file per page, same section order as the pt-BR source.

@@ -209,6 +209,7 @@ fn channel_deduplication_disable_does_not_disable_conflation() {
                 deduplication_ttl_ms: Some(resolved.deduplication_ttl_ms),
                 deduplication_group: resolved.deduplication_group.clone(),
                 max_bytes_per_exec: usize::MAX,
+                nats_payload_ceiling: None,
                 oversized_policy: OversizedMessagePolicy::Send,
             },
         );
@@ -247,6 +248,7 @@ async fn nonpositive_group_ttl_disables_deduplication_but_keeps_conflation() {
                 deduplication_ttl_ms: Some(5000),
                 deduplication_group: Some("shared".to_owned()),
                 max_bytes_per_exec: usize::MAX,
+                nats_payload_ceiling: None,
                 oversized_policy: OversizedMessagePolicy::Send,
             },
         );
@@ -597,6 +599,7 @@ async fn truncate_deduplication_compares_the_raw_input_payload() {
         deduplication_ttl_ms: None,
         deduplication_group: None,
         max_bytes_per_exec: max_bytes,
+        nats_payload_ceiling: None,
         oversized_policy: OversizedMessagePolicy::Truncate,
     };
 

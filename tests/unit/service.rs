@@ -120,7 +120,7 @@ struct RecordingPublisher {
     successful_batches: Vec<Vec<PendingMessage>>,
 }
 
-impl BatchPublisher for RecordingPublisher {
+impl OutputSink for RecordingPublisher {
     async fn publish(
         &mut self,
         messages: &[PendingMessage],
@@ -142,6 +142,12 @@ impl BatchPublisher for RecordingPublisher {
         }
         self.successful_batches.push(messages.to_vec());
         Ok(messages.len() as i64)
+    }
+
+    /// In-memory publishers settle in `publish`, so `flush` is a no-op that
+    /// keeps the shared `OutputSink` contract satisfied.
+    async fn flush(&mut self) -> std::result::Result<(), PublishFailure> {
+        Ok(())
     }
 }
 
@@ -210,6 +216,7 @@ fn enqueue_for_test_with_cache_at(
             deduplication_ttl_ms: None,
             deduplication_group: None,
             max_bytes_per_exec: 4 * 1024 * 1024,
+            nats_payload_ceiling: None,
             oversized_policy: OversizedMessagePolicy::Send,
         },
     );
@@ -254,12 +261,33 @@ fn publish_context_for_test<'a>(
     metrics: &'a Metrics,
     output_metrics: &'a OutputMetrics,
 ) -> OutputPublishContext<'a> {
+    publish_context_for_test_with_ceiling(
+        name,
+        failure_log,
+        deduplication_cache,
+        metrics,
+        output_metrics,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn publish_context_for_test_with_ceiling<'a>(
+    name: &'a str,
+    failure_log: &'a mut OutputFailureLog,
+    deduplication_cache: &'a mut DeduplicationCache,
+    metrics: &'a Metrics,
+    output_metrics: &'a OutputMetrics,
+    nats_payload_ceiling: Option<usize>,
+) -> OutputPublishContext<'a> {
     OutputPublishContext {
         name,
         failure_log,
         deduplication_cache,
         metrics,
         output_metrics,
+        not_sent_reconnects: true,
+        nats_payload_ceiling,
     }
 }
 
@@ -322,6 +350,14 @@ mod filter_load;
 mod input_client_name;
 #[path = "service/input_filtering.rs"]
 mod input_filtering;
+#[path = "service/nats_input.rs"]
+mod nats_input;
+#[path = "service/nats_lifecycle.rs"]
+mod nats_lifecycle;
+#[path = "service/nats_output.rs"]
+mod nats_output;
+#[path = "service/nats_subjects.rs"]
+mod nats_subjects;
 #[path = "service/policy_schedules.rs"]
 mod policy_schedules;
 #[path = "service/queue_limits.rs"]

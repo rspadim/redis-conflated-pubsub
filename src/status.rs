@@ -32,6 +32,9 @@ pub struct Metrics {
     pub deduplicated_payload_bytes_total: AtomicU64,
     pub deduplication_evictions_total: AtomicU64,
     pub excluded_messages_total: AtomicU64,
+    /// Messages dropped at the input because they already carried the relay hop
+    /// header, i.e. re-entry of a message this relay forwarded (NATS loop guard).
+    pub loop_suppressed_messages_total: AtomicU64,
     pub dropped_messages_total: AtomicU64,
     pub dropped_payload_bytes_total: AtomicU64,
     pub shed_messages_total: AtomicU64,
@@ -44,6 +47,18 @@ pub struct Metrics {
     pub uncertain_messages_total: AtomicU64,
     pub input_reconnects_total: AtomicU64,
     pub output_reconnects_total: AtomicU64,
+    /// NATS client connection events observed through `async-nats`'
+    /// `event_callback`. Core NATS reconnects internally, so these fire for a
+    /// node failover that the role-based reconnect counters above would miss.
+    /// `connects` counts every successful connect including the first, so a
+    /// failover shows as `disconnects >= 1` and `connects` greater than the
+    /// connection count at startup.
+    pub nats_client_connects_total: AtomicU64,
+    pub nats_client_disconnects_total: AtomicU64,
+    /// `async-nats` `Event::SlowConsumer`: the client dropped input messages
+    /// because a subscription's delivery channel was full. Silent at the wire
+    /// level, so it needs its own counter.
+    pub nats_client_slow_consumers_total: AtomicU64,
     pub pending_keys: AtomicU64,
     last_input_at: AtomicU64,
     last_flush_at: Mutex<Option<String>>,
@@ -253,6 +268,7 @@ impl Metrics {
             deduplicated_payload_bytes_total: AtomicU64::new(0),
             deduplication_evictions_total: AtomicU64::new(0),
             excluded_messages_total: AtomicU64::new(0),
+            loop_suppressed_messages_total: AtomicU64::new(0),
             dropped_messages_total: AtomicU64::new(0),
             dropped_payload_bytes_total: AtomicU64::new(0),
             shed_messages_total: AtomicU64::new(0),
@@ -265,6 +281,9 @@ impl Metrics {
             uncertain_messages_total: AtomicU64::new(0),
             input_reconnects_total: AtomicU64::new(0),
             output_reconnects_total: AtomicU64::new(0),
+            nats_client_connects_total: AtomicU64::new(0),
+            nats_client_disconnects_total: AtomicU64::new(0),
+            nats_client_slow_consumers_total: AtomicU64::new(0),
             pending_keys: AtomicU64::new(0),
             last_input_at: AtomicU64::new(0),
             last_flush_at: Mutex::new(None),
@@ -648,6 +667,32 @@ impl Metrics {
             .fetch_add(message_count as u64, Ordering::Relaxed);
     }
 
+    /// Records a NATS client connection event. Called from the `async-nats`
+    /// `event_callback`, which fires on every connect (including the first) and
+    /// every disconnect. Core NATS reconnects internally, so these are the only
+    /// honest signal that a node failover happened; the role-based
+    /// `input_reconnects_total`/`output_reconnects_total` do not see it.
+    pub fn record_nats_connect(&self) {
+        self.nats_client_connects_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_nats_disconnect(&self) {
+        self.nats_client_disconnects_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records an `async-nats` slow-consumer event: input messages were dropped
+    /// because a subscription's delivery channel was full. Also surfaces it as
+    /// an error so it is visible, not silent.
+    pub fn record_nats_slow_consumer(&self) {
+        self.nats_client_slow_consumers_total
+            .fetch_add(1, Ordering::Relaxed);
+        self.record_error(
+            "NATS client reported a slow consumer; input messages were dropped because a subscription's delivery channel was full",
+        );
+    }
+
     pub fn record_output_uncertain(
         &self,
         output: &OutputMetrics,
@@ -695,6 +740,9 @@ impl Metrics {
                 .deduplication_evictions_total
                 .load(Ordering::Relaxed),
             excluded_messages_total: self.excluded_messages_total.load(Ordering::Relaxed),
+            loop_suppressed_messages_total: self
+                .loop_suppressed_messages_total
+                .load(Ordering::Relaxed),
             dropped_messages_total: self.dropped_messages_total.load(Ordering::Relaxed),
             dropped_payload_bytes_total: self.dropped_payload_bytes_total.load(Ordering::Relaxed),
             shed_messages_total: self.shed_messages_total.load(Ordering::Relaxed),
@@ -709,6 +757,13 @@ impl Metrics {
             uncertain_messages_total: self.uncertain_messages_total.load(Ordering::Relaxed),
             input_reconnects_total: self.input_reconnects_total.load(Ordering::Relaxed),
             output_reconnects_total: self.output_reconnects_total.load(Ordering::Relaxed),
+            nats_client_connects_total: self.nats_client_connects_total.load(Ordering::Relaxed),
+            nats_client_disconnects_total: self
+                .nats_client_disconnects_total
+                .load(Ordering::Relaxed),
+            nats_client_slow_consumers_total: self
+                .nats_client_slow_consumers_total
+                .load(Ordering::Relaxed),
             pending_keys: self.pending_keys.load(Ordering::Relaxed),
             last_input_at: format_epoch_millis(self.last_input_at.load(Ordering::Relaxed)),
             last_flush_at: self.last_flush_at.lock().unwrap().clone(),
@@ -746,6 +801,9 @@ pub struct StatusSnapshot {
     /// Per-channel deduplication cache entries evicted by the optional LRU limits.
     pub deduplication_evictions_total: u64,
     pub excluded_messages_total: u64,
+    /// Messages dropped at the input because they already carried the relay hop
+    /// header (NATS loop re-entry guard).
+    pub loop_suppressed_messages_total: u64,
     pub dropped_messages_total: u64,
     pub dropped_payload_bytes_total: u64,
     /// Messages discarded by a queue overflow policy.
@@ -763,6 +821,15 @@ pub struct StatusSnapshot {
     pub uncertain_messages_total: u64,
     pub input_reconnects_total: u64,
     pub output_reconnects_total: u64,
+    /// NATS client connection events (Core NATS reconnects internally, so a node
+    /// failover shows up here rather than in the role-based counters above).
+    /// `connects` includes the first connect; compare it against the number of
+    /// NATS endpoints to detect reconnections.
+    pub nats_client_connects_total: u64,
+    pub nats_client_disconnects_total: u64,
+    /// NATS client slow-consumer events: input messages dropped because a
+    /// subscription's delivery channel was full.
+    pub nats_client_slow_consumers_total: u64,
     pub pending_keys: u64,
     pub last_input_at: Option<String>,
     pub last_flush_at: Option<String>,

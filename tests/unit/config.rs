@@ -4,6 +4,8 @@ use super::*;
 mod client_name;
 #[path = "config/defaults_schema.rs"]
 mod defaults_schema;
+#[path = "config/endpoints.rs"]
+mod endpoints;
 #[path = "config/policies_groups.rs"]
 mod policies_groups;
 #[path = "config/redis_instance_lock.rs"]

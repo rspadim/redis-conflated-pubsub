@@ -1,10 +1,10 @@
-# Zabbix monitoring (v0.2.2)
+# Zabbix monitoring (v0.3)
 
 This guide configures the Python 3 collector and the Zabbix 5.0 or 7.0 template. The collector reads the service status over HTTP and sends trapper-item values with `zabbix_sender`; it uses only Python standard-library modules.
 
 ## Prerequisites
 
-- Redis Conflated Pub/Sub v0.2.2 running with its HTTP status listener enabled. The project configuration example uses:
+- Redis Conflated Pub/Sub v0.3 running with its HTTP status listener enabled. The project configuration example uses:
 
   ```json
   "status": {
@@ -36,7 +36,22 @@ curl --fail http://127.0.0.1:9090/
 python3 monitoring/zabbix_sender.py --config monitoring/config.json
 ```
 
-With a valid status response, the collector sends 31 values in one batch. If the endpoint is unavailable or the response is invalid, it sends only `health=0` and leaves other values unchanged. The command exits with an error if `zabbix_sender` fails or Zabbix rejects values.
+With a valid status response, the collector sends 34 values in one batch. If the endpoint is unavailable or the response is invalid, it sends only `health=0` and leaves other values unchanged. The command exits with an error if `zabbix_sender` fails or Zabbix rejects values.
+
+## Reusing an existing Zabbix agent configuration
+
+`zabbix_sender` reads no configuration file unless you pass `-c`. If the host already has a Zabbix agent, you can let the collector inherit its `ServerActive`, `Hostname`, and TLS settings by setting `zabbix_config` to its configuration file (typically `/etc/zabbix/zabbix_agentd.conf`):
+
+```json
+{
+  "base_url": "http://127.0.0.1:9090/",
+  "zabbix_config": "/etc/zabbix/zabbix_agentd.conf",
+  "host": "your-zabbix-host",
+  "sender_path": "zabbix_sender"
+}
+```
+
+With `zabbix_config` set, `zabbix_server` becomes optional: leave it unset to use the agent's `ServerActive` list, or set it to override the server address (`-z`). `source_address` maps to `-I`, overriding the agent's `SourceIP`. Explicit `-z`/`-p`/`-I` always take precedence over the file. `host` is still required and must be the agent `Hostname` (the `Hostname` from the file is only inherited by sending `-` as the per-line hostname, which this collector does not do).
 
 ## Import and link a template
 
@@ -56,7 +71,7 @@ The status endpoint is `GET /`; configure `base_url` with the HTTP(S) origin, su
 | Status field or derived value | Zabbix key suffix | Type / meaning |
 | --- | --- | --- |
 | Derived from `state` | `health` | Unsigned integer: `1` when `state` is `running`, otherwise `0` |
-| `schema_version` | `schema_version` | Unsigned integer; remains `5` in v0.2.2 |
+| `schema_version` | `schema_version` | Unsigned integer; remains `5` in v0.3 |
 | `state` | `state` | Text service state |
 | `updated_at`, `started_at`, `last_input_at`, `last_flush_at` | Same field name | Text timestamps; null is sent as `never` |
 | `last_error` | `last_error` | Text; null is sent as `none` |
@@ -72,10 +87,13 @@ The status endpoint is `GET /`; configure `base_url` with the HTTP(S) origin, su
 | `publish_errors_total`, `publish_error_messages_total` | Same field name | Publish failures and affected messages |
 | `uncertain_transactions_total`, `uncertain_messages_total` | Same field name | Uncertain publish transactions and affected messages |
 | `input_reconnects_total`, `output_reconnects_total` | Same field name | Redis reconnect counts |
+| `nats_client_connects_total`, `nats_client_disconnects_total` | Same field name | NATS client connection events. Core NATS reconnects internally, so a node failover appears here rather than in the reconnect counters; `connects` includes the first connect |
+| `nats_client_slow_consumers_total` | `nats_client_slow_consumers_total` | NATS client queue-full drops: messages discarded because a subscription's consumer could not keep up. A value above zero means real message loss |
+| `loop_suppressed_messages_total` | `loop_suppressed_messages_total` | Unsigned integer, NATS-to-NATS loop-guard drops |
 | `pending_keys` | `pending_keys` | Unsigned integer |
 | `outputs` | `outputs_json` | Compact JSON text map of per-output metrics |
 
-The deduplication counters are additive; **`schema_version` remains `5`**. The per-output JSON includes destination-level published, conflated, deduplicated, and payload-byte metrics. Its deduplication byte counts use the same raw-input-payload semantics as the global counters. The default item keys use the `redis_conflated_pubsub.` prefix; if you change `key_prefix`, update the imported template's item keys to match. Error text is limited to 2,048 characters and line breaks are normalized for sender input.
+The deduplication counters are additive; **`schema_version` remains `5`**. Both templates now carry 35 items (the four NATS/loop counters were added). The per-output JSON includes destination-level published, conflated, deduplicated, and payload-byte metrics. Its deduplication byte counts use the same raw-input-payload semantics as the global counters. The default item keys use the `redis_conflated_pubsub.` prefix; if you change `key_prefix`, update the imported template's item keys to match. Error text is limited to 2,048 characters and line breaks are normalized for sender input.
 
 ## Run on a schedule
 

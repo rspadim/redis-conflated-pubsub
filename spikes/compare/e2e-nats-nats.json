@@ -1,0 +1,53 @@
+{
+  "max_bytes_per_exec": 4194304,
+  "oversized_message_policy": "send",
+  "client_name": "ConflatedPS-{version}-{role}",
+  "input": {
+    "nats": {
+      "servers": ["nats://127.0.0.1:14230"],
+      "name": "e2e-nats-input",
+      "connect_timeout_ms": 5000,
+      "auth": { "type": "none" }
+    },
+    "filters": [],
+    "filter_cache_max_entries": 16384,
+    "filter_default": "accept",
+    "subscriptions": [
+      {
+        "type": "nats_subject",
+        "subject": "e2e.in.>",
+        "output_prefix": "e2e.out.",
+        "output_suffix": ""
+      }
+    ]
+  },
+  "outputs": {
+    "out": {
+      "nats": {
+        "servers": ["nats://127.0.0.1:14230"],
+        "name": "e2e-nats-output",
+        "auth": { "type": "none" }
+      },
+      "channel_prefix": "",
+      "channel_suffix": "",
+      "filters": [],
+      "filter_cache_max_entries": 16384,
+      "channel_policy_cache_max_entries": 16384,
+      "filter_default": "accept",
+      "conflation": {
+        "interval_ms": 0,
+        "max_commands_per_exec": 256,
+        "max_in_flight_commands": 256,
+        "oversized_message_policy": "send"
+      },
+      "deduplication": { "ttl_ms": 0 }
+    }
+  },
+  "instance_lock": { "path": "e2e-nats.lock" },
+  "status": {
+    "path": "e2e-nats-status.json",
+    "update_interval_ms": 500,
+    "http": { "bind": "127.0.0.1", "port": 19090 }
+  },
+  "logging": { "enabled": false, "directory": "logs", "level": "info", "retention_days": 1, "max_total_size_mb": 8 }
+}

@@ -7,7 +7,6 @@ use std::{
 };
 
 use futures_util::{StreamExt, stream::FuturesOrdered};
-use redis::aio::MultiplexedConnection;
 use tokio::time::{self, MissedTickBehavior};
 use tracing::{debug, error};
 
@@ -18,8 +17,8 @@ use super::policy::{
     CompiledChannelPolicies, advance_due_schedules, flush_schedules, next_schedule_tick,
 };
 use super::publish::{
-    OutputFailureLog, PublishFailure, RedisBatchPublisher, ensure_output_connection,
-    publish_batch_on_connection, settle_publish_result,
+    OutputConnection, OutputFailureLog, PublishFailure, publish_batch_on_connection,
+    publish_chunk_and_flush, settle_publish_result,
 };
 use super::queue::{QueueShedLog, TryRecv};
 use super::{
@@ -52,6 +51,7 @@ struct OutputEnqueueContext<'a> {
     config: &'a crate::config::OutputConfig,
     channel_policies: &'a CompiledChannelPolicies,
     max_bytes_per_exec: usize,
+    nats_payload_ceiling: Option<usize>,
     oversized_policy: crate::config::OversizedMessagePolicy,
     pending: &'a mut PendingByInterval,
     passthrough: &'a mut VecDeque<PendingMessage>,
@@ -75,6 +75,7 @@ impl OutputEnqueueContext<'_> {
                 deduplication_ttl_ms: Some(policy.deduplication_ttl_ms),
                 deduplication_group: policy.deduplication_group,
                 max_bytes_per_exec: self.max_bytes_per_exec,
+                nats_payload_ceiling: self.nats_payload_ceiling,
                 oversized_policy: self.oversized_policy,
             },
             metrics: self.metrics,
@@ -171,7 +172,7 @@ pub(super) fn shed_expired_message(
 
 pub(super) async fn publish_output(
     setup: OutputRuntimeSetup,
-    client: redis::Client,
+    connection: OutputConnection,
     mut receiver: OutputQueueReceiver,
     metrics: Arc<Metrics>,
     output_metrics: Arc<OutputMetrics>,
@@ -185,7 +186,6 @@ pub(super) async fn publish_output(
         oversized_policy,
         filters_endpoint_enabled,
         channel_policy_cache_max_entries,
-        client_name,
     } = setup;
     let max_commands_per_exec = config.conflation.max_commands_per_exec;
     let compiled_channel_policies = CompiledChannelPolicies::new_with_cache(
@@ -226,7 +226,7 @@ pub(super) async fn publish_output(
     let mut failure_log = OutputFailureLog::default();
     let mut policy_log = OversizedPolicyLog::default();
     let mut shed_log = QueueShedLog::default();
-    let mut connection: Option<MultiplexedConnection> = None;
+    let mut connection = connection;
     let mut input_closed = false;
     let mut due_intervals = Vec::<i64>::new();
     let mut deferred_input = None;
@@ -236,6 +236,10 @@ pub(super) async fn publish_output(
     let mut in_flight_batches = VecDeque::<(usize, usize)>::new();
     let mut in_flight_direct_messages = 0usize;
     let mut in_flight_direct_bytes = 0usize;
+    // Constant per output: Redis reconnects on any failure, NATS only on an
+    // ambiguous outcome, so a definitive NotSent must not inflate the reconnect
+    // counter for a NATS output.
+    let not_sent_reconnects = connection.not_sent_reconnects();
 
     metrics.set_output_state(&output_metrics, "running");
     loop {
@@ -244,6 +248,12 @@ pub(super) async fn publish_output(
         let input_command_capacity =
             max_in_flight_commands.saturating_sub(in_flight_direct_messages);
         let input_byte_capacity = max_in_flight_bytes.saturating_sub(in_flight_direct_bytes);
+        // The NATS payload ceiling is only known once the client is connected.
+        // Before the first connect (and while a broker is down) it is `None`, so
+        // the oversized policy falls back to the RESP target for that first
+        // batch; once connected, `nats_payload_ceiling` drives the policy. The
+        // window is one flush interval wide, after which the ceiling applies.
+        let nats_payload_ceiling = connection.nats_payload_ceiling();
         // Intake is always serviced (bounded by the in-flight window), even while
         // conflated buckets are due: the flush below is budgeted per turn, so
         // blocking intake here would starve it for the whole bucket drain.
@@ -263,6 +273,7 @@ pub(super) async fn publish_output(
                 config: &config,
                 channel_policies: &compiled_channel_policies,
                 max_bytes_per_exec,
+                nats_payload_ceiling,
                 oversized_policy,
                 pending: &mut pending,
                 passthrough: &mut passthrough,
@@ -353,7 +364,9 @@ pub(super) async fn publish_output(
             }
         }
 
-        if !due_intervals.is_empty() && !(connection.is_none() && !in_flight_direct.is_empty()) {
+        if !due_intervals.is_empty()
+            && !(!connection.is_connected() && !in_flight_direct.is_empty())
+        {
             let intervals = std::mem::take(&mut due_intervals);
             let mut settled_pending_keys = None;
             for interval_ms in intervals {
@@ -361,24 +374,20 @@ pub(super) async fn publish_output(
                     continue;
                 }
                 metrics.set_output_state(&output_metrics, "publishing");
-                if connection.is_none() {
+                if !connection.is_connected() {
                     metrics.set_output_state(&output_metrics, "connecting");
                 }
-                let mut publisher = RedisBatchPublisher {
-                    config: &config,
-                    client: &client,
-                    connection: &mut connection,
-                    client_name: client_name.as_deref(),
-                };
                 let mut publish_context = OutputPublishContext {
                     name: &name,
                     failure_log: &mut failure_log,
                     deduplication_cache: &mut deduplication_cache,
                     metrics: &metrics,
                     output_metrics: &output_metrics,
+                    not_sent_reconnects,
+                    nats_payload_ceiling,
                 };
                 let (has_remaining, pending_keys) = publish_conflated_interval_pending(
-                    &mut publisher,
+                    &mut connection,
                     &mut pending,
                     &mut passthrough,
                     interval_ms,
@@ -403,7 +412,7 @@ pub(super) async fn publish_output(
 
         while passthrough.len() > in_flight_direct_messages
             && in_flight_direct_messages < max_in_flight_commands
-            && !(connection.is_none() && !in_flight_direct.is_empty())
+            && !(!connection.is_connected() && !in_flight_direct.is_empty())
         {
             // A new batch is bounded by both the per-batch ceilings and the
             // remaining in-flight window.
@@ -414,6 +423,7 @@ pub(super) async fn publish_output(
             let (batch_length, atomic, request_bytes) = passthrough_batch_length(
                 available_commands,
                 available_bytes,
+                nats_payload_ceiling,
                 passthrough.iter().skip(in_flight_direct_messages),
             );
             if batch_length == 0
@@ -431,62 +441,114 @@ pub(super) async fn publish_output(
                 remember_dispatched_batch(&mut deduplication_cache, &batch, in_flight_suppression);
             metrics.record_deduplication_evictions(&output_metrics, evictions);
 
-            if connection.is_none() {
-                metrics.set_output_state(&output_metrics, "connecting");
-                if let Err(failure) = ensure_output_connection(
-                    &config,
-                    &client,
-                    &mut connection,
-                    client_name.as_deref(),
-                )
-                .await
-                {
-                    let mut publish_context = OutputPublishContext {
-                        name: &name,
-                        failure_log: &mut failure_log,
-                        deduplication_cache: &mut deduplication_cache,
-                        metrics: &metrics,
-                        output_metrics: &output_metrics,
-                    };
-                    let result = settle_dispatched_batch(
-                        &batch,
-                        Err(failure),
-                        in_flight_suppression,
-                        &mut publish_context,
-                    );
-                    if let Err(failure) = result {
-                        let pending_keys = flush::settle_failed_batch(
-                            0,
-                            &batch,
-                            &mut pending,
-                            &mut passthrough,
-                            &failure,
-                            &metrics,
-                            &output_metrics,
-                        );
-                        metrics.publish_output_pending_keys(&output_metrics, pending_keys);
+            match &mut connection {
+                OutputConnection::Redis(redis) => {
+                    if !redis.is_connected() {
+                        metrics.set_output_state(&output_metrics, "connecting");
+                        if let Err(failure) = redis.ensure_connected().await {
+                            let mut publish_context = OutputPublishContext {
+                                name: &name,
+                                failure_log: &mut failure_log,
+                                deduplication_cache: &mut deduplication_cache,
+                                metrics: &metrics,
+                                output_metrics: &output_metrics,
+                                not_sent_reconnects,
+                                nats_payload_ceiling,
+                            };
+                            let result = settle_dispatched_batch(
+                                &batch,
+                                Err(failure),
+                                in_flight_suppression,
+                                &mut publish_context,
+                            );
+                            if let Err(failure) = result {
+                                let pending_keys = flush::settle_failed_batch(
+                                    0,
+                                    &batch,
+                                    &mut pending,
+                                    &mut passthrough,
+                                    &failure,
+                                    &metrics,
+                                    &output_metrics,
+                                );
+                                metrics.publish_output_pending_keys(&output_metrics, pending_keys);
+                            }
+                            metrics.set_output_state(&output_metrics, "running");
+                            continue;
+                        }
                     }
-                    metrics.set_output_state(&output_metrics, "running");
-                    continue;
+                }
+                OutputConnection::Nats(nats) => {
+                    if !nats.is_connected() {
+                        metrics.set_output_state(&output_metrics, "connecting");
+                        if let Err(failure) = nats.ensure_connected().await {
+                            let mut publish_context = OutputPublishContext {
+                                name: &name,
+                                failure_log: &mut failure_log,
+                                deduplication_cache: &mut deduplication_cache,
+                                metrics: &metrics,
+                                output_metrics: &output_metrics,
+                                not_sent_reconnects,
+                                nats_payload_ceiling,
+                            };
+                            let result = settle_dispatched_batch(
+                                &batch,
+                                Err(failure),
+                                in_flight_suppression,
+                                &mut publish_context,
+                            );
+                            if let Err(failure) = result {
+                                let pending_keys = flush::settle_failed_batch(
+                                    0,
+                                    &batch,
+                                    &mut pending,
+                                    &mut passthrough,
+                                    &failure,
+                                    &metrics,
+                                    &output_metrics,
+                                );
+                                metrics.publish_output_pending_keys(&output_metrics, pending_keys);
+                            }
+                            metrics.set_output_state(&output_metrics, "running");
+                            continue;
+                        }
+                    }
                 }
             }
 
-            let connection_clone = connection
-                .as_ref()
-                .expect("output connection was initialized")
-                .clone();
-            // Polling this ordered stream submits direct commands without
-            // awaiting each Redis reply before accepting the next message.
-            let mut publish_future: DirectPublishFuture<'_> = Box::pin(
-                publish_batch_on_connection(&config, connection_clone, batch, atomic),
-            );
-            // Poll once in FIFO order so the MultiplexedConnection receives
-            // the command now; retain the future only to collect its reply.
-            let initial_poll =
-                poll_fn(|context| Poll::Ready(publish_future.as_mut().poll(context))).await;
-            if let Poll::Ready(result) = initial_poll {
-                publish_future = Box::pin(std::future::ready(result));
-            }
+            let publish_future: DirectPublishFuture<'_> = match &connection {
+                OutputConnection::Redis(redis) => {
+                    let connection_clone = redis
+                        .connection()
+                        .expect("output connection was initialized");
+                    // Polling this ordered stream submits direct commands without
+                    // awaiting each Redis reply before accepting the next message.
+                    let mut publish_future: DirectPublishFuture<'_> = Box::pin(
+                        publish_batch_on_connection(&config, connection_clone, batch, atomic),
+                    );
+                    // Poll once in FIFO order so the MultiplexedConnection receives
+                    // the command now; retain the future only to collect its reply.
+                    let initial_poll =
+                        poll_fn(|context| Poll::Ready(publish_future.as_mut().poll(context))).await;
+                    match initial_poll {
+                        Poll::Ready(result) => Box::pin(std::future::ready(result)),
+                        Poll::Pending => publish_future,
+                    }
+                }
+                OutputConnection::Nats(nats) => {
+                    // The NATS client is a cheap cloneable handle, so the direct
+                    // lane owns its own publish+flush future without borrowing the
+                    // worker's connection. `PendingMessage` payloads are `Arc`s, so
+                    // cloning the batch is a refcount bump per message.
+                    let mut sender = nats.sender().expect("output connection was initialized");
+                    let batch = batch.clone();
+                    let started_at = time::Instant::now();
+                    Box::pin(async move {
+                        let result = publish_chunk_and_flush(&mut sender, &batch).await;
+                        (batch, result, started_at.elapsed())
+                    })
+                }
+            };
             in_flight_direct.push_back(publish_future);
             in_flight_batches.push_back((batch_length, request_bytes));
             in_flight_direct_messages += batch_length;
@@ -518,6 +580,8 @@ pub(super) async fn publish_output(
                         deduplication_cache: &mut deduplication_cache,
                         metrics: &metrics,
                         output_metrics: &output_metrics,
+                        not_sent_reconnects,
+                        nats_payload_ceiling,
                     };
                     metrics.record_output_publish_rtt(&output_metrics, publish_rtt);
                     let result = settle_dispatched_batch(
@@ -549,7 +613,10 @@ pub(super) async fn publish_output(
                             pending_keys
                         }
                         Err(failure) => {
-                            connection = None;
+                            // Redis drops the connection on any failure; NATS
+                            // keeps a healthy client on a definitive NotSent
+                            // (see `on_publish_failure`).
+                            connection.on_publish_failure(&failure);
                             flush::settle_failed_batch(
                                 0,
                                 &batch,
@@ -608,6 +675,13 @@ pub(super) async fn publish_output(
     failure_log.flush_suppressed(&name);
     policy_log.flush_suppressed(&name);
     shed_log.flush_suppressed(&name);
+    // The loop only exits once the intake queue, conflated buckets, and the
+    // in-flight direct window are all empty, so every message has already gone
+    // through a backend settlement. A final NATS flush is still issued because
+    // the client may hold publish commands that were queued without an
+    // individual per-chunk flush (the direct lane flushes per batch, so this is
+    // normally a cheap no-op). Redis has no equivalent and ignores it.
+    connection.flush_before_shutdown().await;
     metrics.set_output_state(&output_metrics, "stopped");
 }
 

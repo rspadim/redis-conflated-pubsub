@@ -85,6 +85,7 @@ fn channel_policy_resolution_uses_first_match_and_output_fallbacks() {
             deduplication_ttl_ms: Some(direct_policy.deduplication_ttl_ms),
             deduplication_group: direct_policy.deduplication_group,
             max_bytes_per_exec: usize::MAX,
+            nats_payload_ceiling: None,
             oversized_policy: OversizedMessagePolicy::Send,
         },
     );

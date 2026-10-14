@@ -1,4 +1,4 @@
-use std::{sync::Arc, sync::atomic::Ordering, time::Duration};
+use std::{sync::Arc, sync::atomic::Ordering};
 
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
@@ -7,15 +7,13 @@ use tokio::time;
 use tracing::{debug, info, warn};
 
 use crate::{
-    config::{
-        InputConfig, OutputConfig, QueueOverflowPolicy, RedisConfig, Subscription,
-        same_pubsub_server,
-    },
+    config::{InputConfig, OutputConfig, QueueOverflowPolicy, RedisConfig, Subscription},
     status::Metrics,
 };
 
 use super::{
-    ChannelFilterSet, InboundMessage, MAX_RETRY_DELAY, OutputSender, QueuedInboundMessage,
+    ChannelFilterSet, INITIAL_RETRY_DELAY, InboundMessage, OutputSender, QueuedInboundMessage,
+    next_retry_delay,
 };
 
 #[derive(Clone, Debug)]
@@ -35,9 +33,18 @@ pub(super) fn output_echo_filters(
     input: &InputConfig,
     outputs: &std::collections::BTreeMap<String, OutputConfig>,
 ) -> Vec<OutputChannelFilter> {
+    // Echo filters only apply when the input is Redis and an output shares that
+    // Redis server; a NATS endpoint never produces Redis Pub/Sub echoes.
+    let Some(input_redis) = input.redis.as_ref() else {
+        return Vec::new();
+    };
     outputs
         .values()
-        .filter(|output| same_pubsub_server(&input.redis, &output.redis))
+        .filter(|output| {
+            output.redis.as_ref().is_some_and(|output_redis| {
+                crate::config::same_pubsub_server(input_redis, output_redis)
+            })
+        })
         .flat_map(|output| {
             input.subscriptions.iter().map(|subscription| {
                 let (subscription_prefix, subscription_suffix) = subscription.output_mapping();
@@ -99,24 +106,30 @@ pub(super) async fn read_input(
     mut channel_filter: ChannelFilterSet,
     metrics: Arc<Metrics>,
 ) {
-    let mut retry_delay = Duration::from_millis(250);
+    let mut retry_delay = INITIAL_RETRY_DELAY;
     // With a single subscription the connection only delivers messages for it,
     // so the pattern reported by Redis can be ignored without allocating.
     let single_subscription = match config.subscriptions.as_slice() {
         [subscription] => Some(subscription),
         _ => None,
     };
+    // The runtime only reaches here through the Redis path; the caller resolves
+    // string selectors to compiled form and keeps `config.redis` present.
+    let redis_config = config
+        .redis
+        .as_ref()
+        .expect("read_input requires a Redis input endpoint");
     loop {
         match connect_input(
             &client,
-            &config.redis,
+            redis_config,
             &config.subscriptions,
             input_client_name.as_deref(),
         )
         .await
         {
             Ok(mut pubsub) => {
-                retry_delay = Duration::from_millis(250);
+                retry_delay = INITIAL_RETRY_DELAY;
                 info!("input_connected");
                 let mut stream = pubsub.on_message();
                 while let Some(message) = stream.next().await {
@@ -187,7 +200,7 @@ pub(super) async fn read_input(
             }
         }
         time::sleep(retry_delay).await;
-        retry_delay = (retry_delay * 2).min(MAX_RETRY_DELAY);
+        retry_delay = next_retry_delay(retry_delay);
     }
 }
 
@@ -319,6 +332,9 @@ pub(super) fn single_subscription_match<'a>(
             ..
         } => (!from_pattern && configured == channel).then_some(subscription),
         Subscription::Psubscribe { .. } => from_pattern.then_some(subscription),
+        // A NATS subscription is matched by its own dedicated adapter using the
+        // backend-native subject identity, not by the Redis channel/pattern path.
+        Subscription::NatsSubject { .. } => None,
     }
 }
 
@@ -389,6 +405,11 @@ pub(super) async fn connect_input(
                 )
                 .await
                 .context("timed out subscribing to input pattern")??;
+            }
+            Subscription::NatsSubject { .. } => {
+                anyhow::bail!(
+                    "a `nats_subject` subscription cannot be handled by the Redis input reader"
+                );
             }
         }
     }

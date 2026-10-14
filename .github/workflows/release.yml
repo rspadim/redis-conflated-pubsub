@@ -76,9 +76,173 @@ jobs:
             ${{ matrix.artifact }}.*
           if-no-files-found: error
 
+  # Linux packages (deb, rpm, apk and Arch pkg.tar.zst) are built from the same
+  # static musl binary, so none of them declares dependencies. The maintainer
+  # scripts, the init scripts and the shipped configuration live in nfpm.yaml
+  # and packaging/.
+  package-linux:
+    name: Package Linux deb/rpm/apk/pkg
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      # Pinned so the package layout cannot change under a release.
+      NFPM_VERSION: "2.48.0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-x86_64-musl
+          path: dist
+      - name: Install nFPM
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}"
+          curl -fsSL -o "$RUNNER_TEMP/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" "$base/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/checksums.txt" "$base/checksums.txt"
+          (cd "$RUNNER_TEMP" && grep "nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz\$" checksums.txt | sha256sum --check)
+          sudo tar -xzf "$RUNNER_TEMP/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" -C /usr/local/bin nfpm
+          nfpm --version
+      - name: Build the packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -xzf dist/linux-x86_64-musl.tar.gz -C dist
+          # The same source of truth the tag check uses.
+          VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
+          export VERSION
+          for packager in deb rpm apk archlinux; do
+            nfpm package --config nfpm.yaml --packager "$packager" --target dist/
+          done
+          (cd dist && for file in *.deb *.rpm *.apk *.pkg.tar.zst; do sha256sum "$file" > "$file.sha256"; done)
+          ls -l dist/
+      - name: Install the packages in distribution containers
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The same release list the compatibility matrix in ci.yml uses.
+          for release in 20.04 22.04 24.04 26.04; do
+            echo "::group::dpkg install on Ubuntu $release"
+            docker run --rm --platform linux/amd64 -v "$PWD/dist:/dist:ro" "ubuntu:$release" bash -c '
+              set -euo pipefail
+              apt-get update -qq
+              apt-get install -y -qq /dist/redis-conflated-pubsub_*_amd64.deb
+              redis-conflated-pubsub --version
+              redis-conflated-pubsub --config /etc/redis-conflated-pubsub/config.json --check-config
+              id redis-conflated-pubsub
+              test -f /usr/lib/systemd/system/redis-conflated-pubsub.service
+              test -f /usr/lib/sysusers.d/redis-conflated-pubsub.conf
+              dpkg --purge redis-conflated-pubsub
+              ! id redis-conflated-pubsub
+            '
+            echo "::endgroup::"
+          done
+
+          echo "::group::rpm install on Fedora"
+          docker run --rm --platform linux/amd64 -v "$PWD/dist:/dist:ro" fedora:latest bash -c '
+            set -euo pipefail
+            rpm -ivh /dist/*.rpm
+            redis-conflated-pubsub --version
+            redis-conflated-pubsub --config /etc/redis-conflated-pubsub/config.json --check-config
+            id redis-conflated-pubsub
+            test -f /usr/lib/systemd/system/redis-conflated-pubsub.service
+            rpm -e redis-conflated-pubsub
+          '
+          echo "::endgroup::"
+
+          echo "::group::apk install on Alpine"
+          docker run --rm --platform linux/amd64 -v "$PWD/dist:/dist:ro" alpine:3.22 sh -c '
+            set -eu
+            apk add --allow-untrusted /dist/redis-conflated-pubsub_*_x86_64.apk
+            redis-conflated-pubsub --version
+            redis-conflated-pubsub --config /etc/redis-conflated-pubsub/config.json --check-config
+            id redis-conflated-pubsub
+            test -f /etc/init.d/redis-conflated-pubsub
+            apk del redis-conflated-pubsub
+          '
+          echo "::endgroup::"
+
+          echo "::group::pacman install on Arch"
+          docker run --rm --platform linux/amd64 -v "$PWD/dist:/dist:ro" archlinux:latest bash -c '
+            set -euo pipefail
+            pacman -U --noconfirm /dist/*.pkg.tar.zst
+            redis-conflated-pubsub --version
+            redis-conflated-pubsub --config /etc/redis-conflated-pubsub/config.json --check-config
+            id redis-conflated-pubsub
+            pacman -R --noconfirm redis-conflated-pubsub
+          '
+          echo "::endgroup::"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: |
+            dist/*.deb
+            dist/*.deb.sha256
+            dist/*.rpm
+            dist/*.rpm.sha256
+            dist/*.apk
+            dist/*.apk.sha256
+            dist/*.pkg.tar.zst
+            dist/*.pkg.tar.zst.sha256
+          if-no-files-found: error
+
+  build-installer:
+    name: Build the Windows installer
+    needs: [build]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch the packaged executable
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-x86_64
+          path: dist
+      - name: Stage the executable where the installer expects it
+        shell: pwsh
+        run: |
+          Expand-Archive -Path dist\windows-x86_64.zip -DestinationPath dist -Force
+          New-Item -ItemType Directory -Force target\release | Out-Null
+          Copy-Item dist\redis-conflated-pubsub.exe target\release\ -Force
+          # The installer ships the schema for editor completion; it is generated
+          # from the binary instead of being checked in.
+          & .\target\release\redis-conflated-pubsub.exe --config-json-schema |
+            Set-Content -Encoding utf8 config.schema.json
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+      - name: Compile the installer
+        id: compile
+        shell: pwsh
+        run: |
+          # The fixed version resource accepts digits and dots only, so a
+          # pre-release suffix is stripped from the version handed to Inno.
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          $numeric = ($version -replace '[^0-9.].*$', '').TrimEnd('.')
+          if (-not $numeric) { throw "cannot derive a numeric version from '$version'" }
+          "numeric=$numeric" >> $env:GITHUB_OUTPUT
+
+          iscc "/DAppVersion=$numeric" "installer\redis-conflated-pubsub.iss"
+          $exe = "installer\output\ConflatedPubSubSetup-$numeric.exe"
+          if (-not (Test-Path -LiteralPath $exe)) { throw "installer was not produced: $exe" }
+          Write-Host "installer built: $exe"
+      - name: Checksum the installer
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem installer\output\*.exe | Select-Object -First 1
+          if (-not $exe) { throw "no installer in installer\output" }
+
+          $hash = (Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLower()
+          "$hash  $($exe.Name)" | Set-Content -Encoding utf8 "$($exe.FullName).sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: installer/output/*
+          if-no-files-found: error
+
   publish:
     name: Publish GitHub Release
-    needs: build
+    needs: [build, package-linux, build-installer]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

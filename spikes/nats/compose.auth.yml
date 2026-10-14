@@ -1,0 +1,76 @@
+services:
+  auth-material:
+    image: natsio/nats-box:latest
+    command: ["/bin/sh", "/scripts/generate-auth-material.sh"]
+    volumes:
+      - ./certs/auth:/auth
+      - ./certs/auth:/nsc
+      - ./generate-auth-material.sh:/scripts/generate-auth-material.sh:ro
+
+  auth-certs:
+    image: alpine:3.22
+    command:
+      - /bin/sh
+      - -c
+      - apk add --no-cache openssl >/dev/null && exec /bin/sh /scripts/generate-auth-certs.sh
+    volumes:
+      - ./certs/auth:/auth
+      - ./generate-auth-certs.sh:/scripts/generate-auth-certs.sh:ro
+
+  nats-userpass:
+    image: nats:2.15-alpine
+    command: ["-c", "/etc/nats/nats.conf"]
+    environment:
+      NATS_SPIKE_USER: ${NATS_SPIKE_USER:?generate spikes/nats/certs/auth/runtime.env first}
+      NATS_SPIKE_PASSWORD: ${NATS_SPIKE_PASSWORD:?generate spikes/nats/certs/auth/runtime.env first}
+    volumes:
+      - ./auth-userpass.conf:/etc/nats/nats.conf:ro
+    ports:
+      - "127.0.0.1:14401:4222"
+
+  nats-token:
+    image: nats:2.15-alpine
+    command: ["-c", "/etc/nats/nats.conf"]
+    environment:
+      NATS_SPIKE_TOKEN: ${NATS_SPIKE_TOKEN:?generate spikes/nats/certs/auth/runtime.env first}
+    volumes:
+      - ./auth-token.conf:/etc/nats/nats.conf:ro
+    ports:
+      - "127.0.0.1:14402:4222"
+
+  nats-nkey:
+    image: nats:2.15-alpine
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - 'export NATS_SPIKE_NKEY_PUBLIC="$(cat /auth/nkey.public)"; exec nats-server -c /etc/nats/nats.conf'
+    depends_on:
+      auth-material:
+        condition: service_completed_successfully
+    volumes:
+      - ./auth-nkey.conf:/etc/nats/nats.conf:ro
+      - ./certs/auth:/auth:ro
+    ports:
+      - "127.0.0.1:14403:4222"
+
+  nats-credentials:
+    image: nats:2.15-alpine
+    command: ["-c", "/auth/nats-jwt.conf"]
+    depends_on:
+      auth-material:
+        condition: service_completed_successfully
+    volumes:
+      - ./certs/auth:/auth:ro
+    ports:
+      - "127.0.0.1:14404:4222"
+
+  nats-mtls:
+    image: nats:2.15-alpine
+    command: ["-c", "/etc/nats/nats.conf"]
+    depends_on:
+      auth-certs:
+        condition: service_completed_successfully
+    volumes:
+      - ./auth-mtls.conf:/etc/nats/nats.conf:ro
+      - ./certs/auth/certs:/etc/nats/certs:ro
+    ports:
+      - "127.0.0.1:14405:4222"

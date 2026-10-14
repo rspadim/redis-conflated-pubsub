@@ -72,13 +72,27 @@ fn nonpositive_interval_keeps_every_incoming_message_in_order() {
 
     assert_eq!(passthrough.len(), 2);
     let no_conflated_pending = HashMap::new();
-    let batch = pending_batch(0, 256, usize::MAX, &no_conflated_pending, &passthrough);
+    let batch = pending_batch(
+        0,
+        256,
+        usize::MAX,
+        None,
+        &no_conflated_pending,
+        &passthrough,
+    );
     assert_eq!(batch[0].payload.as_ref(), b"first");
     clear_published_batch(0, &mut pending, &mut passthrough, &batch);
     assert_eq!(
-        pending_batch(0, 256, usize::MAX, &no_conflated_pending, &passthrough,)[0]
-            .payload
-            .as_ref(),
+        pending_batch(
+            0,
+            256,
+            usize::MAX,
+            None,
+            &no_conflated_pending,
+            &passthrough,
+        )[0]
+        .payload
+        .as_ref(),
         b"second"
     );
 }
@@ -179,11 +193,11 @@ fn passthrough_exec_batch_respects_resp_byte_cap() {
     passthrough.extend([first, second]);
 
     assert_eq!(
-        passthrough_batch_length(10, two_command_exec - 1, passthrough.iter()),
+        passthrough_batch_length(10, two_command_exec - 1, None, passthrough.iter()),
         (1, false, one_command)
     );
     assert_eq!(
-        passthrough_batch_length(10, two_command_exec, passthrough.iter()),
+        passthrough_batch_length(10, two_command_exec, None, passthrough.iter()),
         (2, true, two_command_exec)
     );
     assert!(one_command < two_command_exec);
@@ -742,11 +756,11 @@ fn transaction_byte_limit_splits_at_the_exact_wire_size_boundary() {
             + publish_command_frame_bytes(&second)
     );
     assert_eq!(
-        pending_batch(10, 2, exact_limit, &pending, &VecDeque::new()),
+        pending_batch(10, 2, exact_limit, None, &pending, &VecDeque::new()),
         pair
     );
     assert_eq!(
-        pending_batch(10, 2, exact_limit - 1, &pending, &VecDeque::new()),
+        pending_batch(10, 2, exact_limit - 1, None, &pending, &VecDeque::new()),
         vec![first]
     );
 }
@@ -763,7 +777,7 @@ fn oversized_send_keeps_the_message_as_a_singleton_chunk() {
     ]);
 
     assert_eq!(
-        pending_batch(10, 256, limit, &pending, &VecDeque::new()),
+        pending_batch(10, 256, limit, None, &pending, &VecDeque::new()),
         vec![message]
     );
 }
@@ -787,6 +801,7 @@ fn truncate_preserves_payload_prefix_and_exact_exec_byte_target() {
             deduplication_ttl_ms: None,
             deduplication_group: None,
             max_bytes_per_exec: max_bytes,
+            nats_payload_ceiling: None,
             oversized_policy: OversizedMessagePolicy::Truncate,
         },
         InboundMessage {
@@ -825,6 +840,7 @@ fn truncate_drops_when_even_an_empty_publish_frame_exceeds_the_target() {
                 deduplication_ttl_ms: None,
                 deduplication_group: None,
                 max_bytes_per_exec: max_bytes,
+                nats_payload_ceiling: None,
                 oversized_policy: OversizedMessagePolicy::Truncate,
             },
             InboundMessage {
@@ -860,6 +876,7 @@ fn direct_truncation_uses_publishes_frame_without_transaction_wrappers() {
             deduplication_ttl_ms: None,
             deduplication_group: None,
             max_bytes_per_exec: max_bytes,
+            nats_payload_ceiling: None,
             oversized_policy: OversizedMessagePolicy::Truncate,
         },
         InboundMessage {
@@ -896,6 +913,7 @@ fn drop_policy_skips_one_oversized_message_and_counts_it() {
                 deduplication_ttl_ms: None,
                 deduplication_group: None,
                 max_bytes_per_exec: 1,
+                nats_payload_ceiling: None,
                 oversized_policy: OversizedMessagePolicy::Drop,
             },
             InboundMessage {
@@ -926,9 +944,351 @@ fn output_batch_is_deterministic_and_retains_one_payload_per_channel() {
             pending_message("replica:a", b"value".to_vec()),
         ),
     ]);
-    let batch = pending_batch(10, 256, usize::MAX, &pending, &VecDeque::new());
+    let batch = pending_batch(10, 256, usize::MAX, None, &pending, &VecDeque::new());
 
     assert_eq!(batch.len(), 2);
     assert_eq!(batch[0].output_channel, "replica:a");
     assert_eq!(batch[1].payload.as_ref(), [0, 255]);
+}
+
+/// A connected NATS output has a hard server payload ceiling (no RESP framing),
+/// so the oversized policy acts against that real limit: `truncate` actually
+/// truncates to the ceiling, and the RESP-based `max_bytes_per_exec` is
+/// irrelevant once the ceiling is known. Regression for the bug where a
+/// `truncate` config with the default 4 MiB target silently dropped messages
+/// that exceeded a smaller server limit.
+#[test]
+fn nats_payload_ceiling_drives_the_oversized_policy() {
+    let metrics = Metrics::new();
+    let output_metrics = metrics.register_output("nats-ceiling-output");
+    let payload = vec![7u8; 100];
+    metrics.record_output_input(&output_metrics, payload.len(), payload.len());
+    let mut policy_log = OversizedPolicyLog::default();
+
+    // Ceiling of 64 bytes with a huge max_bytes_per_exec: the payload must be
+    // truncated to 64, not left at 100 and rejected at publish time.
+    let prepared = prepare_for_test(
+        "nats-ceiling-output",
+        OutputMessagePolicy {
+            interval_ms: 0,
+            deduplication_ttl_ms: None,
+            deduplication_group: None,
+            max_bytes_per_exec: 4 * 1024 * 1024,
+            nats_payload_ceiling: Some(64),
+            oversized_policy: OversizedMessagePolicy::Truncate,
+        },
+        InboundMessage {
+            output_channel: "events.data".to_owned(),
+            payload: payload.clone().into(),
+        },
+        &metrics,
+        &output_metrics,
+        &mut policy_log,
+    )
+    .expect("truncate keeps the message");
+
+    assert_eq!(prepared.payload.len(), 64);
+    assert_eq!(prepared.raw_payload().len(), 100);
+    let output = &metrics.snapshot().outputs["nats-ceiling-output"];
+    assert_eq!(output.truncated_messages_total, 1);
+    assert_eq!(output.truncated_payload_bytes_total, 36);
+}
+
+/// With `drop`, a payload above the NATS ceiling is dropped here instead of
+/// reaching the publish path; the RESP target must not decide this.
+#[test]
+fn nats_payload_ceiling_drops_for_the_drop_policy() {
+    let metrics = Metrics::new();
+    let output_metrics = metrics.register_output("nats-drop-output");
+    let payload = vec![7u8; 100];
+    metrics.record_output_input(&output_metrics, payload.len(), payload.len());
+    let mut policy_log = OversizedPolicyLog::default();
+
+    let prepared = prepare_for_test(
+        "nats-drop-output",
+        OutputMessagePolicy {
+            interval_ms: 0,
+            deduplication_ttl_ms: None,
+            deduplication_group: None,
+            max_bytes_per_exec: 4 * 1024 * 1024,
+            nats_payload_ceiling: Some(64),
+            oversized_policy: OversizedMessagePolicy::Drop,
+        },
+        InboundMessage {
+            output_channel: "events.data".to_owned(),
+            payload: payload.into(),
+        },
+        &metrics,
+        &output_metrics,
+        &mut policy_log,
+    );
+
+    assert!(prepared.is_none());
+    let output = &metrics.snapshot().outputs["nats-drop-output"];
+    assert_eq!(output.dropped_messages_total, 1);
+    assert_eq!(output.dropped_payload_bytes_total, 100);
+}
+
+/// A payload within the NATS ceiling is untouched by any policy.
+#[test]
+fn payload_within_the_nats_ceiling_is_untouched() {
+    let metrics = Metrics::new();
+    let output_metrics = metrics.register_output("nats-fit-output");
+    let payload = vec![7u8; 32];
+    metrics.record_output_input(&output_metrics, payload.len(), payload.len());
+    let mut policy_log = OversizedPolicyLog::default();
+
+    let prepared = prepare_for_test(
+        "nats-fit-output",
+        OutputMessagePolicy {
+            interval_ms: 0,
+            deduplication_ttl_ms: None,
+            deduplication_group: None,
+            max_bytes_per_exec: 4 * 1024 * 1024,
+            nats_payload_ceiling: Some(64),
+            oversized_policy: OversizedMessagePolicy::Drop,
+        },
+        InboundMessage {
+            output_channel: "events.data".to_owned(),
+            payload: payload.clone().into(),
+        },
+        &metrics,
+        &output_metrics,
+        &mut policy_log,
+    )
+    .expect("a payload within the ceiling is kept");
+
+    assert_eq!(prepared.payload.as_ref(), payload.as_slice());
+    assert!(prepared.raw_payload.is_none());
+}
+
+/// A connected NATS output cannot send a payload above the live server ceiling,
+/// so batching must keep such a payload in a batch of its own. Otherwise the
+/// definitive `NotSent` it always produces would drop every unrelated channel
+/// that merely shared its batch.
+#[test]
+fn nats_ceiling_isolates_an_oversized_conflated_channel() {
+    let small = pending_message("events:a", vec![0u8; 8]);
+    let oversized = pending_message("events:b", vec![0u8; 64]);
+    let later = pending_message("events:c", vec![0u8; 8]);
+    let pending = HashMap::from([
+        (small.output_channel.clone(), small.clone()),
+        (oversized.output_channel.clone(), oversized.clone()),
+        (later.output_channel.clone(), later.clone()),
+    ]);
+
+    // The batch stops before the unsendable payload instead of dragging it in.
+    assert_eq!(
+        pending_batch(10, 256, usize::MAX, Some(32), &pending, &VecDeque::new()),
+        vec![small.clone()]
+    );
+
+    // Alone, the oversized payload is still returned as a singleton: never an
+    // empty batch, which would stall the output without ever trying it.
+    let only_oversized = HashMap::from([(oversized.output_channel.clone(), oversized.clone())]);
+    assert_eq!(
+        pending_batch(
+            10,
+            256,
+            usize::MAX,
+            Some(32),
+            &only_oversized,
+            &VecDeque::new()
+        ),
+        vec![oversized.clone()]
+    );
+
+    // Without a live ceiling (before the connection exists) batching is
+    // unchanged: every candidate still shares the batch.
+    assert_eq!(
+        pending_batch(10, 256, usize::MAX, None, &pending, &VecDeque::new()),
+        vec![small, oversized, later]
+    );
+}
+
+/// A publisher that models the live server: a batch carrying a payload above
+/// the ceiling is rejected as a definitive `NotSent`, every other batch is
+/// acknowledged. `RecordingPublisher`'s failure counter cannot express "only
+/// the oversized batch fails", which is exactly the case under test.
+#[derive(Default)]
+struct CeilingRejectingPublisher {
+    ceiling: usize,
+    attempts: Vec<(bool, Vec<PendingMessage>)>,
+    successful_batches: Vec<Vec<PendingMessage>>,
+}
+
+impl OutputSink for CeilingRejectingPublisher {
+    async fn publish(
+        &mut self,
+        messages: &[PendingMessage],
+        atomic: bool,
+    ) -> std::result::Result<i64, PublishFailure> {
+        self.attempts.push((atomic, messages.to_vec()));
+        if messages
+            .iter()
+            .any(|message| message.payload.len() > self.ceiling)
+        {
+            return Err(PublishFailure::NotSent(
+                "simulated oversize rejection".to_owned(),
+            ));
+        }
+        self.successful_batches.push(messages.to_vec());
+        Ok(messages.len() as i64)
+    }
+
+    async fn flush(&mut self) -> std::result::Result<(), PublishFailure> {
+        Ok(())
+    }
+}
+
+/// The oversized singleton's `NotSent` must not take the next passthrough
+/// message down with it: each is published and settled on its own.
+#[tokio::test]
+async fn nats_ceiling_singleton_not_sent_does_not_drop_the_next_message() {
+    let metrics = Metrics::new();
+    let output_metrics = metrics.register_output("nats-ceiling-isolation-output");
+    let mut pending = PendingByInterval::new();
+    let mut passthrough = VecDeque::new();
+    let mut cache = DeduplicationCache::new(0);
+
+    let oversized = pending_message("events:big", vec![0u8; 64]);
+    let neighbour = pending_message("events:next", b"keep".to_vec());
+    metrics.record_output_input(
+        &output_metrics,
+        oversized.payload.len(),
+        oversized.payload.len(),
+    );
+    metrics.record_output_input(
+        &output_metrics,
+        neighbour.payload.len(),
+        neighbour.payload.len(),
+    );
+    passthrough.push_back(oversized);
+    passthrough.push_back(neighbour);
+
+    let mut publisher = RecordingPublisher {
+        not_sent_failures_remaining: 1,
+        ..RecordingPublisher::default()
+    };
+    let mut failure_log = OutputFailureLog::default();
+    let mut context = publish_context_for_test_with_ceiling(
+        "nats-ceiling-isolation-output",
+        &mut failure_log,
+        &mut cache,
+        &metrics,
+        &output_metrics,
+        Some(32),
+    );
+
+    assert!(
+        publish_passthrough_batch(
+            &mut publisher,
+            &mut pending,
+            &mut passthrough,
+            256,
+            usize::MAX,
+            &mut context,
+        )
+        .await
+    );
+    assert!(
+        publish_passthrough_batch(
+            &mut publisher,
+            &mut pending,
+            &mut passthrough,
+            256,
+            usize::MAX,
+            &mut context,
+        )
+        .await
+    );
+
+    // The first attempt carried only the oversized message, so its definitive
+    // failure dropped exactly one message; the neighbour was a separate second
+    // attempt (`attempts` records every publish, successful or not).
+    assert_eq!(publisher.attempts.len(), 2);
+    assert_eq!(publisher.attempts[0].1.len(), 1);
+    assert_eq!(publisher.attempts[0].1[0].output_channel, "events:big");
+    assert_eq!(publisher.attempts[1].1[0].output_channel, "events:next");
+
+    // The neighbour was published on the second attempt and the queue drained.
+    assert_eq!(publisher.successful_batches.len(), 1);
+    assert_eq!(
+        publisher.successful_batches[0][0].output_channel,
+        "events:next"
+    );
+    assert!(passthrough.is_empty());
+    assert_eq!(
+        metrics.snapshot().outputs["nats-ceiling-isolation-output"].dropped_messages_total,
+        1
+    );
+}
+
+/// In a conflated bucket, an unsendable middle channel is published as its own
+/// singleton so its `NotSent` spares the neighbours that would otherwise share
+/// its transaction.
+#[tokio::test]
+async fn nats_ceiling_singleton_not_sent_spares_the_conflated_neighbours() {
+    let metrics = Metrics::new();
+    let output_metrics = metrics.register_output("nats-ceiling-neighbours-output");
+    let mut pending = PendingByInterval::new();
+    let mut passthrough = VecDeque::new();
+    let mut cache = DeduplicationCache::new(0);
+
+    for (channel, payload) in [
+        ("events:a", vec![0u8; 8]),
+        ("events:b", vec![0u8; 64]),
+        ("events:c", vec![0u8; 8]),
+    ] {
+        metrics.record_output_input(&output_metrics, payload.len(), payload.len());
+        enqueue_for_test_with_cache(
+            100,
+            InboundMessage {
+                output_channel: channel.to_owned(),
+                payload: payload.into(),
+            },
+            &mut pending,
+            &mut passthrough,
+            &metrics,
+            &output_metrics,
+            &mut cache,
+        );
+    }
+
+    let mut publisher = CeilingRejectingPublisher {
+        ceiling: 32,
+        ..CeilingRejectingPublisher::default()
+    };
+    let mut failure_log = OutputFailureLog::default();
+    let mut context = publish_context_for_test_with_ceiling(
+        "nats-ceiling-neighbours-output",
+        &mut failure_log,
+        &mut cache,
+        &metrics,
+        &output_metrics,
+        Some(32),
+    );
+
+    publish_conflated_pending(&mut publisher, &mut pending, 256, usize::MAX, &mut context).await;
+
+    assert_eq!(publisher.attempts.len(), 3);
+    assert_eq!(publisher.attempts[0].1[0].output_channel, "events:a");
+    assert_eq!(publisher.attempts[1].1.len(), 1);
+    assert_eq!(publisher.attempts[1].1[0].output_channel, "events:b");
+    assert_eq!(publisher.attempts[2].1[0].output_channel, "events:c");
+
+    assert_eq!(publisher.successful_batches.len(), 2);
+    assert_eq!(
+        publisher.successful_batches[0][0].output_channel,
+        "events:a"
+    );
+    assert_eq!(
+        publisher.successful_batches[1][0].output_channel,
+        "events:c"
+    );
+    assert_eq!(
+        metrics.snapshot().outputs["nats-ceiling-neighbours-output"].dropped_messages_total,
+        1
+    );
+    assert!(pending.is_empty());
 }

@@ -1,6 +1,6 @@
 [package]
 name = "redis-conflated-pubsub"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.88"
 description = "A Redis Pub/Sub fan-out bridge with per-output conflation"
@@ -11,12 +11,25 @@ repository = "https://github.com/rspadim/redis-conflated-pubsub"
 name = "redis-conflated-pubsub"
 path = "src/main.rs"
 
+[build-dependencies]
+# Windows VERSIONINFO resources (product name/version, copyright). Required by
+# SignPath Foundation before the executable can be signed, and shown by Windows
+# in the file properties and SmartScreen. Only compiled for Windows targets; see
+# build.rs.
+winresource = "0.1.34"
+
 [dependencies]
-anyhow = "1.0"
+anyhow = "1.0"# Core NATS runtime adapter. Minimal feature set: `websockets` for ws/wss,
+# `nkeys` for NKey/JWT credentials, `ring` as the rustls crypto provider.
+async-nats = { version = "=0.50.0", default-features = false, features = ["websockets", "nkeys", "ring"] }
+# `Bytes` is the payload type the async-nats publish API takes; it is already in
+# the dependency tree transitively but must be named to call `Client::publish`.
+bytes = "1.11"
 chrono = { version = "0.4", features = ["serde", "clock"] }
 clap = { version = "4.5", features = ["derive"] }
 fs2 = "0.4"
 futures-util = "0.3"
+percent-encoding = "2.3"
 redis = { version = "1.7.1", default-features = false, features = ["tokio-rustls-comp", "tls-rustls-webpki-roots"] }
 regex-automata = { version = "0.4", default-features = false, features = ["std", "syntax", "meta", "unicode"] }
 schemars = "1.0"

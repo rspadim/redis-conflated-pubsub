@@ -7,3 +7,10 @@
 *.py text eol=lf
 *.xml text eol=lf
 Dockerfile text eol=lf
+# Maintainer scripts, init scripts and the systemd EnvironmentFile are consumed
+# verbatim on Linux (and CRLF breaks them), so they always use LF even on
+# Windows checkouts.
+*.sh text eol=lf
+packaging/redis.env text eol=lf
+packaging/openrc/* text eol=lf
+packaging/sysusers/* text eol=lf

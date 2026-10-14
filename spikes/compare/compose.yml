@@ -1,0 +1,45 @@
+services:
+  certgen:
+    image: alpine:3.22
+    command:
+      - /bin/sh
+      - -c
+      - apk add --no-cache openssl >/dev/null && exec /bin/sh /scripts/generate-certs.sh
+    volumes:
+      - ./certs:/certs
+      - ./generate-certs.sh:/scripts/generate-certs.sh:ro
+
+  redis:
+    image: redis:7.4-alpine
+    ports:
+      - "127.0.0.1:16390:6379"
+
+  nats:
+    image: nats:2.15-alpine
+    command: ["-p", "4222", "-m", "8222"]
+    ports:
+      - "127.0.0.1:14230:4222"
+      - "127.0.0.1:18252:8222"
+
+  nats-ws:
+    image: nats:2.15-alpine
+    command: ["-c", "/etc/nats/nats.conf"]
+    volumes:
+      - ./nats-ws.conf:/etc/nats/nats.conf:ro
+    ports:
+      - "127.0.0.1:14231:4222"
+      - "127.0.0.1:18090:8080"
+
+  nats-wss:
+    image: nats:2.15-alpine
+    command: ["-c", "/etc/nats/nats.conf"]
+    depends_on:
+      certgen:
+        condition: service_completed_successfully
+    volumes:
+      - ./nats-wss.conf:/etc/nats/nats.conf:ro
+      - ./certs:/etc/nats/certs:ro
+    ports:
+      - "127.0.0.1:14232:4222"
+      - "127.0.0.1:18490:8443"
+      - "127.0.0.1:18232:8222"

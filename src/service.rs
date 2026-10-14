@@ -6,26 +6,31 @@ use std::{collections::HashMap, path::Path, sync::Arc, time::Duration};
 use anyhow::bail;
 use anyhow::{Context, Result, anyhow};
 use tokio::time::{self, MissedTickBehavior};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     config::{
-        AppConfig, HttpStatusConfig, OutputConfig, OversizedMessagePolicy, QueueOverflowPolicy,
+        AppConfig, Endpoint, HttpStatusConfig, OutputConfig, OversizedMessagePolicy,
+        QueueOverflowPolicy,
     },
     http_status, logging,
     status::{self, Metrics, OutputMetrics},
 };
 
+mod backend;
 mod batch;
 mod channel_cache;
 mod dedup;
 mod filter;
 mod input;
+pub(crate) mod nats;
 mod output;
 mod policy;
 mod publish;
 mod queue;
 
+#[cfg(test)]
+use backend::OutputSink;
 use batch::OversizedPolicyLog;
 #[cfg(test)]
 use batch::{
@@ -41,6 +46,8 @@ use input::{
     matching_subscription, single_subscription_match,
 };
 use input::{output_echo_filters, read_input};
+use nats::input::read_nats_input;
+use nats::output::NatsOutputSink;
 #[cfg(test)]
 use output::{
     clear_published_batch, direct_batch_boundary_required, enqueue_message,
@@ -54,11 +61,25 @@ use policy::{CompiledChannelPolicies, glob_matches};
 #[cfg(test)]
 use policy::{advance_due_schedules, flush_schedules, resolve_channel_policy};
 use publish::OutputFailureLog;
+use publish::{OutputConnection, RedisOutputSink};
 #[cfg(test)]
-use publish::{BatchPublisher, PublishFailure, publish_once};
+use publish::{PublishFailure, publish_once};
 use queue::{OutputQueueReceiver, OutputQueueSender, QueueLimits, QueueShedLog, output_queue};
 
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
+
+/// Next input-reconnect delay: exponential doubling capped at [`MAX_RETRY_DELAY`].
+///
+/// Shared by the Redis and Core NATS input readers so both reconnect with the
+/// same backoff schedule. The first retry uses the initial short delay, and the
+/// delay is reset to that initial value after a successful connect, so a healthy
+/// connection never inherits a grown delay.
+fn next_retry_delay(current: Duration) -> Duration {
+    (current * 2).min(MAX_RETRY_DELAY)
+}
+
+/// Initial reconnect backoff, matching the Redis reader.
+const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(250);
 
 #[derive(Debug)]
 pub enum RunOutcome {
@@ -206,7 +227,6 @@ struct OutputRuntimeSetup {
     oversized_policy: OversizedMessagePolicy,
     filters_endpoint_enabled: bool,
     channel_policy_cache_max_entries: usize,
-    client_name: Option<String>,
 }
 
 #[derive(Clone)]
@@ -215,6 +235,10 @@ struct OutputMessagePolicy {
     deduplication_ttl_ms: Option<i64>,
     deduplication_group: Option<String>,
     max_bytes_per_exec: usize,
+    /// For a connected NATS output: the server payload ceiling (after the relay
+    /// header). When set, the oversized policy compares the payload against this
+    /// real server limit instead of the RESP-framed `max_bytes_per_exec`.
+    nats_payload_ceiling: Option<usize>,
     oversized_policy: OversizedMessagePolicy,
 }
 
@@ -245,6 +269,15 @@ struct OutputPublishContext<'a> {
     deduplication_cache: &'a mut DeduplicationCache,
     metrics: &'a Metrics,
     output_metrics: &'a OutputMetrics,
+    /// Whether a definitive `NotSent` failure implies a reconnect. Redis
+    /// reconnects on any failure, so `true`; Core NATS keeps a healthy client on
+    /// a mapping/oversize `NotSent`, so `false`, and `output_reconnects_total`
+    /// is not inflated by a deterministic config error.
+    not_sent_reconnects: bool,
+    /// Live NATS payload ceiling for a connected output, captured once per turn.
+    /// The batching helpers use it to keep an unsendable payload in a batch of
+    /// its own, so a `NotSent` never drops the channels that shared its batch.
+    nats_payload_ceiling: Option<usize>,
 }
 
 pub async fn run(
@@ -257,10 +290,30 @@ pub async fn run(
     let _ = config_path;
     metrics.clear_channel_cache_inspectors();
     let input_client_name = config.client_name_for("i");
-    let input_client = match &input_client_name {
-        Some(lib_name) => config.input.redis.client_with_lib_name(lib_name)?,
-        None => config.input.redis.client()?,
+    // Resolve the input backend without connecting yet. Redis builds a client
+    // handle; NATS is constructed inside its reader task so the initial connect
+    // (and its retry loop) does not block service startup.
+    let input_endpoint = config.input.endpoint("input")?;
+    let input_client = match input_endpoint {
+        Endpoint::Redis(_) => {
+            let input_redis = input_endpoint
+                .as_redis()
+                .expect("a Redis endpoint resolves to Redis settings");
+            Some(Arc::new(match &input_client_name {
+                Some(lib_name) => input_redis.client_with_lib_name(lib_name)?,
+                None => input_redis.client()?,
+            }))
+        }
+        Endpoint::Nats(nats) => {
+            // Fail fast on a missing/invalid secret or TLS file, like the Redis
+            // client construction above, rather than looping in the reader.
+            let plan = nats::connect::connection_plan(nats)
+                .context("input NATS settings are not usable")?;
+            nats::connect::preflight(&plan).context("input NATS authentication is not usable")?;
+            None
+        }
     };
+    let nats_input = matches!(input_endpoint, Endpoint::Nats(_));
     let filters_endpoint_enabled = config
         .status
         .http
@@ -297,9 +350,27 @@ pub async fn run(
                 filters_endpoint_enabled.then(|| (&*metrics, format!("outputs.{name}.filters"))),
             )?;
             output_config.filters = Vec::new();
-            let client = match &client_name {
-                Some(lib_name) => output_config.redis.client_with_lib_name(lib_name)?,
-                None => output_config.redis.client()?,
+            let path = format!("outputs.{name}");
+            let connection = match output_config.endpoint(&path)? {
+                Endpoint::Redis(output_redis) => {
+                    let client = match &client_name {
+                        Some(lib_name) => output_redis.client_with_lib_name(lib_name)?,
+                        None => output_redis.client()?,
+                    };
+                    OutputConnection::Redis(RedisOutputSink::new(
+                        output_config,
+                        client,
+                        client_name.clone(),
+                    ))
+                }
+                Endpoint::Nats(_) => {
+                    if client_name.is_some() {
+                        debug!(output = name, "nats_output_ignores_redis_client_name");
+                    }
+                    OutputConnection::Nats(
+                        NatsOutputSink::new(output_config)?.with_metrics(Arc::clone(&metrics)),
+                    )
+                }
             };
             Ok((
                 name.clone(),
@@ -312,7 +383,7 @@ pub async fn run(
                     .conflation
                     .oversized_message_policy
                     .unwrap_or(global_oversized_message_policy),
-                client,
+                connection,
                 metrics.register_output(name),
                 channel_filter,
                 output_config.channel_policy_cache_max_entries,
@@ -345,11 +416,11 @@ pub async fn run(
                 output_config,
                 max_bytes_per_exec,
                 oversized_policy,
-                client,
+                connection,
                 output_metrics,
                 channel_filter,
                 channel_policy_cache_max_entries,
-                client_name,
+                _client_name,
             )| {
                 let queue_limits = QueueLimits::new(
                     output_config.queue_max_messages,
@@ -395,12 +466,11 @@ pub async fn run(
                     oversized_policy,
                     filters_endpoint_enabled,
                     channel_policy_cache_max_entries,
-                    client_name,
                 };
                 let task = tokio::spawn(async move {
                     publish_output(
                         runtime_setup,
-                        client,
+                        connection,
                         receiver,
                         worker_metrics,
                         worker_output_metrics,
@@ -430,16 +500,30 @@ pub async fn run(
     let input_config = config.input.clone();
     let input_metrics = Arc::clone(&metrics);
     let input_task = tokio::spawn(async move {
-        read_input(
-            input_config,
-            input_client,
-            input_client_name,
-            input_senders,
-            echo_filters,
-            input_filter,
-            input_metrics,
-        )
-        .await;
+        if nats_input {
+            read_nats_input(
+                input_config,
+                input_senders,
+                echo_filters,
+                input_filter,
+                input_metrics,
+            )
+            .await;
+        } else {
+            read_input(
+                input_config,
+                input_client
+                    .expect("a Redis input resolves a client")
+                    .as_ref()
+                    .clone(),
+                input_client_name,
+                input_senders,
+                echo_filters,
+                input_filter,
+                input_metrics,
+            )
+            .await;
+        }
     });
 
     let status_task = config.status.path.clone().map(|path| {
@@ -524,12 +608,15 @@ pub async fn run(
     }
 
     metrics.set_state("stopped");
-    if let Some(path) = &config.status.path {
-        let _ = status::write_atomic(path, &metrics.snapshot());
-    }
+    // Stop the periodic writer before the final snapshot: a tick already inside
+    // `write_atomic` would otherwise be able to overwrite the "stopped" file
+    // with a stale pre-shutdown snapshot.
     if let Some(status_task) = status_task {
         status_task.abort();
         let _ = status_task.await;
+    }
+    if let Some(path) = &config.status.path {
+        let _ = status::write_atomic(path, &metrics.snapshot());
     }
     if let Some(http_task) = http_task {
         http_task.abort();
@@ -562,6 +649,11 @@ fn reload_logging_settings_unchanged(current: &AppConfig, next: &AppConfig) -> b
 fn load_reload_config(current: &AppConfig, path: &Path) -> Result<ReloadPlan> {
     let next = AppConfig::load(path).context("failed to load configuration after SIGHUP")?;
     next.validate()?;
+    // Reject a config whose backends cannot even be constructed (a bad Redis
+    // connection URL or a malformed NATS endpoint) before the caller tears the
+    // running workers down. This mirrors the fallible setup `run` performs at
+    // startup, so a reload cannot get past validation and then fail mid-switch.
+    validate_reload_backends(&next)?;
     if !reload_logging_settings_unchanged(current, &next) {
         bail!("changes to logging require a full service restart");
     }
@@ -578,6 +670,46 @@ fn load_reload_config(current: &AppConfig, path: &Path) -> Result<ReloadPlan> {
         config: next,
         instance_lock,
     })
+}
+
+/// Backend construction preflight for a reload: resolves every input/output
+/// endpoint and verifies it can be built without any network access.
+///
+/// Redis credentials are resolved here exactly as the runtime does (so a
+/// missing `password_env` is a reload rejection rather than a half-started
+/// service), and NATS endpoints go through [`nats::connect::connection_plan`].
+/// No connection is opened and no secret value is retained.
+#[cfg(unix)]
+fn validate_reload_backends(config: &AppConfig) -> Result<()> {
+    match config.input.endpoint("input")? {
+        Endpoint::Redis(redis) => {
+            redis
+                .client()
+                .context("input Redis settings are not usable")?;
+        }
+        Endpoint::Nats(nats) => {
+            let plan = nats::connect::connection_plan(nats)
+                .context("input NATS settings are not usable")?;
+            nats::connect::preflight(&plan).context("input NATS authentication is not usable")?;
+        }
+    }
+    for (name, output) in &config.outputs {
+        let path = format!("outputs.{name}");
+        match output.endpoint(&path)? {
+            Endpoint::Redis(redis) => {
+                redis
+                    .client()
+                    .with_context(|| format!("{path} Redis settings are not usable"))?;
+            }
+            Endpoint::Nats(nats) => {
+                let plan = nats::connect::connection_plan(nats)
+                    .with_context(|| format!("{path} NATS settings are not usable"))?;
+                nats::connect::preflight(&plan)
+                    .with_context(|| format!("{path} NATS authentication is not usable"))?;
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn bind_status_http(

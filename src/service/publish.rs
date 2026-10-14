@@ -6,6 +6,8 @@ use tracing::warn;
 
 use crate::config::OutputConfig;
 
+use super::backend::OutputSink;
+use super::nats::output::NatsOutputSink;
 use super::{OutputPublishContext, PendingMessage};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,51 +63,235 @@ impl OutputFailureLog {
     }
 }
 
-pub(super) trait BatchPublisher {
-    async fn publish(
-        &mut self,
-        messages: &[PendingMessage],
-        atomic: bool,
-    ) -> std::result::Result<i64, PublishFailure>;
+/// Redis output sink owning the multiplexed connection. Implements the shared
+/// [`OutputSink`] boundary so the conflated and direct lanes can drive either
+/// backend through one interface.
+pub(crate) struct RedisOutputSink {
+    config: OutputConfig,
+    client: redis::Client,
+    connection: Option<MultiplexedConnection>,
+    /// Redis `CLIENT SETNAME` target, also carried in `OutputRuntimeSetup` for
+    /// the runtime record; the sink is the value that actually applies it.
+    client_name: Option<String>,
 }
 
-pub(super) struct RedisBatchPublisher<'a> {
-    pub(super) config: &'a OutputConfig,
-    pub(super) client: &'a redis::Client,
-    pub(super) connection: &'a mut Option<MultiplexedConnection>,
-    pub(super) client_name: Option<&'a str>,
+impl RedisOutputSink {
+    pub(crate) fn new(
+        config: &OutputConfig,
+        client: redis::Client,
+        client_name: Option<String>,
+    ) -> Self {
+        Self {
+            config: config.clone(),
+            client,
+            connection: None,
+            client_name,
+        }
+    }
+
+    /// `true` once a connection has been established and not yet discarded.
+    pub(super) fn is_connected(&self) -> bool {
+        self.connection.is_some()
+    }
+
+    /// Drops the connection so the next publish reconnects.
+    pub(crate) fn disconnect(&mut self) {
+        self.connection = None;
+    }
+
+    /// Clone of the multiplexed connection for an in-flight direct batch, or
+    /// `None` when the sink is currently disconnected.
+    pub(super) fn connection(&self) -> Option<MultiplexedConnection> {
+        self.connection.clone()
+    }
+
+    pub(crate) async fn ensure_connected(&mut self) -> std::result::Result<(), PublishFailure> {
+        if self.connection.is_some() {
+            return Ok(());
+        }
+        ensure_output_connection(
+            &self.config,
+            &self.client,
+            &mut self.connection,
+            self.client_name.as_deref(),
+        )
+        .await
+    }
 }
 
-impl BatchPublisher for RedisBatchPublisher<'_> {
+impl OutputSink for RedisOutputSink {
     async fn publish(
         &mut self,
         messages: &[PendingMessage],
         atomic: bool,
     ) -> std::result::Result<i64, PublishFailure> {
         publish_batch(
-            self.config,
-            self.client,
-            self.connection,
+            &self.config,
+            &self.client,
+            &mut self.connection,
             messages,
             atomic,
-            self.client_name,
+            self.client_name.as_deref(),
         )
         .await
     }
+
+    /// Redis settles per batch through the pipeline replies; there is no
+    /// additional server-side barrier to await.
+    async fn flush(&mut self) -> std::result::Result<(), PublishFailure> {
+        Ok(())
+    }
 }
 
-pub(super) async fn publish_once<P: BatchPublisher>(
-    publisher: &mut P,
+/// A connected output backend whose connection state the worker owns.
+///
+/// The Redis variant is larger because it owns a clone of the `OutputConfig`
+/// needed for its byte/oversized policy; exactly one variant exists per output
+/// for the process lifetime, so the size difference is not worth an indirection.
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum OutputConnection {
+    Redis(RedisOutputSink),
+    Nats(NatsOutputSink),
+}
+
+impl OutputConnection {
+    pub(crate) fn is_connected(&self) -> bool {
+        match self {
+            Self::Redis(sink) => sink.is_connected(),
+            Self::Nats(sink) => sink.is_connected(),
+        }
+    }
+
+    pub(crate) fn disconnect(&mut self) {
+        match self {
+            Self::Redis(sink) => sink.disconnect(),
+            Self::Nats(sink) => sink.disconnect(),
+        }
+    }
+
+    /// Server-advertised payload ceiling for a connected NATS output (usable
+    /// bytes after the relay header), or `None` for Redis or while disconnected.
+    /// The worker uses this to cap the oversized-message policy against the real
+    /// server limit, not only `max_bytes_per_exec`.
+    pub(crate) fn nats_payload_ceiling(&self) -> Option<usize> {
+        match self {
+            Self::Redis(_) => None,
+            Self::Nats(sink) => sink.payload_ceiling(),
+        }
+    }
+
+    /// Reconnects every backend through its own sink. Not currently called by
+    /// the worker (which performs the connect inline), kept for the shared
+    /// boundary and future direct-lane use.
+    #[allow(dead_code)]
+    pub(crate) async fn ensure_connected(&mut self) -> std::result::Result<(), PublishFailure> {
+        match self {
+            Self::Redis(sink) => sink.ensure_connected().await,
+            Self::Nats(sink) => sink.ensure_connected().await,
+        }
+    }
+
+    /// Flushes whatever the backend still has buffered before the process exits.
+    /// Redis settles per publish batch, so this is a no-op there; NATS pushes
+    /// its client-buffered publish commands to the socket (a local drain, not a
+    /// server round trip). Errors are ignored because shutdown must not block on
+    /// a backend that is already unreachable.
+    pub(crate) async fn flush_before_shutdown(&mut self) {
+        match self {
+            Self::Redis(sink) => {
+                let _ = OutputSink::flush(sink).await;
+            }
+            Self::Nats(sink) => sink.flush_before_shutdown().await,
+        }
+    }
+
+    /// Decides whether a publish failure should discard the connection, and
+    /// returns whether a reconnect actually happened.
+    ///
+    /// Redis needs to reconnect on any failure (its publish path nulls the
+    /// connection on error). A NATS sink only discards the client on an
+    /// ambiguous (`Uncertain`) outcome: a definitive `NotSent` (invalid mapped
+    /// subject, oversized payload) leaves the healthy client in place, so a
+    /// repeated mapping error must not trigger a reconnect storm or inflate the
+    /// reconnect counter. This keeps the direct and conflated lanes consistent.
+    pub(crate) fn on_publish_failure(&mut self, failure: &PublishFailure) -> bool {
+        match self {
+            Self::Redis(_) => {
+                let was_connected = self.is_connected();
+                self.disconnect();
+                was_connected
+            }
+            Self::Nats(sink) => {
+                if matches!(failure, PublishFailure::Uncertain(_)) && sink.is_connected() {
+                    sink.disconnect();
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    /// Whether a definitive `NotSent` implies a reconnect for this backend:
+    /// Redis reconnects on any failure; NATS does not reconnect for a
+    /// deterministic mapping/oversize rejection.
+    pub(crate) fn not_sent_reconnects(&self) -> bool {
+        matches!(self, Self::Redis(_))
+    }
+}
+
+impl OutputSink for OutputConnection {
+    async fn publish(
+        &mut self,
+        messages: &[PendingMessage],
+        atomic: bool,
+    ) -> std::result::Result<i64, PublishFailure> {
+        match self {
+            Self::Redis(sink) => sink.publish(messages, atomic).await,
+            Self::Nats(sink) => sink.publish(messages, atomic).await,
+        }
+    }
+
+    async fn flush(&mut self) -> std::result::Result<(), PublishFailure> {
+        match self {
+            Self::Redis(sink) => OutputSink::flush(sink).await,
+            Self::Nats(sink) => OutputSink::flush(sink).await,
+        }
+    }
+}
+
+/// Publishes one chunk through any sink and settles it through the backend's
+/// flush step. The subscriber count is backend-specific: Redis returns the
+/// summed `PUBLISH` replies, Core NATS returns `0` because it has no
+/// acknowledgement or subscriber count (`flush` only drains the client's local
+/// write buffer, so it is not a delivery guarantee).
+pub(super) async fn publish_once<S: OutputSink>(
+    publisher: &mut S,
     batch: &[PendingMessage],
     atomic: bool,
     context: &mut OutputPublishContext<'_>,
 ) -> std::result::Result<i64, PublishFailure> {
     let started_at = time::Instant::now();
-    let result = publisher.publish(batch, atomic).await;
+    let result = match publisher.publish(batch, atomic).await {
+        Ok(subscribers) => publisher.flush().await.map(|()| subscribers),
+        Err(failure) => Err(failure),
+    };
     context
         .metrics
         .record_output_publish_rtt(context.output_metrics, started_at.elapsed());
     settle_publish_result(batch, result, context)
+}
+
+/// Publishes an ordered chunk and flushes it without touching metrics, for the
+/// in-flight direct lane which records its own RTT and settles on completion.
+pub(super) async fn publish_chunk_and_flush<S: OutputSink>(
+    publisher: &mut S,
+    batch: &[PendingMessage],
+) -> std::result::Result<i64, PublishFailure> {
+    match publisher.publish(batch, false).await {
+        Ok(subscribers) => publisher.flush().await.map(|()| subscribers),
+        Err(failure) => Err(failure),
+    }
 }
 
 pub(super) fn settle_publish_result(
@@ -134,9 +320,11 @@ pub(super) fn settle_publish_result(
             }
             match &failure {
                 PublishFailure::NotSent(error) => {
-                    context
-                        .metrics
-                        .record_output_error(context.output_metrics, error, true);
+                    context.metrics.record_output_error(
+                        context.output_metrics,
+                        error,
+                        context.not_sent_reconnects,
+                    );
                     context
                         .metrics
                         .record_output_error_messages(context.output_metrics, batch.len());
@@ -191,7 +379,7 @@ pub(super) async fn ensure_output_connection(
         return Ok(());
     }
     let mut connected = match time::timeout(
-        config.redis.connect_timeout(),
+        config.redis_endpoint().connect_timeout(),
         client.get_multiplexed_async_connection(),
     )
     .await
@@ -245,7 +433,7 @@ async fn publish_on_connection(
             "output publish batch is empty".to_owned(),
         ));
     }
-    let result = time::timeout(config.redis.connect_timeout(), async {
+    let result = time::timeout(config.redis_endpoint().connect_timeout(), async {
         if atomic {
             let mut pipeline = redis::pipe();
             pipeline.atomic();

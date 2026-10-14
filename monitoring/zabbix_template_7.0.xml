@@ -209,6 +209,34 @@
                     <tags><tag><tag>component</tag><value>application</value></tag></tags>
                 </item>
                 <item>
+                    <uuid>10000000000040008000000000000022</uuid>
+                    <name>NATS client connects total</name><type>TRAP</type><key>redis_conflated_pubsub.nats_client_connects_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><value_type>UNSIGNED</value_type>
+                    <description>Total NATS client connect events (includes the first connect). Core NATS reconnects internally, so a node failover shows up here rather than in the reconnect counters.</description>
+                    <tags><tag><tag>component</tag><value>application</value></tag></tags>
+                </item>
+                <item>
+                    <uuid>10000000000040008000000000000023</uuid>
+                    <name>NATS client disconnects total</name><type>TRAP</type><key>redis_conflated_pubsub.nats_client_disconnects_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><value_type>UNSIGNED</value_type>
+                    <description>Total NATS client disconnect events. A value above zero means at least one reconnection happened.</description>
+                    <tags><tag><tag>component</tag><value>application</value></tag></tags>
+                </item>
+                <item>
+                    <uuid>10000000000040008000000000000024</uuid>
+                    <name>Loop suppressed messages total</name><type>TRAP</type><key>redis_conflated_pubsub.loop_suppressed_messages_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><value_type>UNSIGNED</value_type>
+                    <description>Messages dropped at the input because they already carried the relay hop header (NATS-to-NATS loop guard).</description>
+                    <tags><tag><tag>component</tag><value>application</value></tag></tags>
+                </item>
+                <item>
+                    <uuid>10000000000040008000000000000025</uuid>
+                    <name>NATS client slow consumers total</name><type>TRAP</type><key>redis_conflated_pubsub.nats_client_slow_consumers_total</key>
+                    <delay>0</delay><history>7d</history><trends>365d</trends><value_type>UNSIGNED</value_type>
+                    <description>Subscription queue-full drops reported by the NATS client. A value above zero means messages were discarded because a consumer could not keep up (real message loss).</description>
+                    <tags><tag><tag>component</tag><value>application</value></tag></tags>
+                </item>
+                <item>
                     <uuid>10000000000040008000000000000013</uuid>
                     <name>Last input timestamp</name><type>TRAP</type><key>redis_conflated_pubsub.last_input_at</key>
                     <delay>0</delay><history>7d</history><trends>0</trends><value_type>TEXT</value_type>
