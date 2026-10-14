@@ -324,7 +324,6 @@ pub(in crate::service) async fn read_nats_input(
                 retry_delay = INITIAL_RETRY_DELAY;
                 info!("input_connected");
                 loop {
-                    let received_at = time::Instant::now();
                     let envelope = match input.next_envelope().await {
                         Ok(Some(envelope)) => envelope,
                         Ok(None) => break,
@@ -334,6 +333,10 @@ pub(in crate::service) async fn read_nats_input(
                             break;
                         }
                     };
+                    // Stamp after the await, matching the Redis reader: the metric
+                    // measures relay processing, not the idle wait for the next
+                    // message (which would dominate the percentile at low rates).
+                    let received_at = time::Instant::now();
                     let source_subject = envelope.source_subject.clone();
                     if envelope.already_forwarded {
                         // Loop re-entry: this relay already published this message,

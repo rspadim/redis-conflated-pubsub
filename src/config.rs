@@ -59,20 +59,30 @@ impl NatsTransport {
 }
 
 /// Redacts any `userinfo@` embedded in a URL so it is safe to place in an error
-/// message or a log line. Everything between `://` and the last `@` in the
-/// authority is replaced with `***`; a string without that shape is returned
-/// unchanged (it cannot contain userinfo).
+/// message or a log line. If the string contains an `@`, everything from just
+/// after the scheme separator (`://`, or the start of the string when there is
+/// none) through the **last** `@` is replaced with `***`, regardless of `/`,
+/// `?`, or `#` in the password. This also covers malformed URLs that never
+/// parse, and URLs with no scheme at all.
 pub fn redact_url_userinfo(value: &str) -> String {
-    let Some((scheme, rest)) = value.split_once("://") else {
+    let Some(at) = value.rfind('@') else {
         return value.to_owned();
     };
-    // The authority ends at the first `/`, `?`, or `#` after the scheme.
-    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    let (authority, tail) = rest.split_at(authority_end);
-    match authority.rsplit_once('@') {
-        Some((_, host)) => format!("{scheme}://***@{host}{tail}"),
-        None => value.to_owned(),
+    let start = value.find("://").map(|index| index + 3).unwrap_or(0);
+    // Nothing between the start of the authority and the last `@` to hide.
+    if at <= start {
+        return value.to_owned();
     }
+    format!("{}***{}", &value[..start], &value[at..])
+}
+
+/// Decodes percent-encoded userinfo (`url` returns the encoded serialization).
+/// Falls back to the raw value when the bytes are not valid UTF-8.
+fn decode_userinfo(encoded: &str) -> String {
+    percent_encoding::percent_decode_str(encoded)
+        .decode_utf8()
+        .map(|decoded| decoded.into_owned())
+        .unwrap_or_else(|_| encoded.to_owned())
 }
 
 /// Credentials embedded directly in a NATS server URL (`nats://user:pass@host`).
@@ -123,16 +133,20 @@ pub fn parse_nats_server(server: &str) -> Result<(String, NatsTransport, Option<
             url.scheme()
         )
     })?;
-    let inline = if !url.username().is_empty() {
-        if let Some(password) = url.password() {
-            Some(NatsInlineAuth::UserPassword {
-                username: url.username().to_owned(),
-                password: password.to_owned(),
-            })
-        } else {
+    // Userinfo presence is `username OR password`: `nats://:secret@host` has an
+    // empty username but a real password, and must not fall through to the raw
+    // URL (which would leak the password and drop the auth).
+    let has_userinfo = !url.username().is_empty() || url.password().is_some();
+    let inline = if has_userinfo {
+        match url.password() {
+            // A password is present: user + password (username may be empty).
+            Some(password) => Some(NatsInlineAuth::UserPassword {
+                username: decode_userinfo(url.username()),
+                password: decode_userinfo(password),
+            }),
             // A lone userinfo value with no colon is a token, matching the
             // common NATS convention.
-            Some(NatsInlineAuth::Token(url.username().to_owned()))
+            None => Some(NatsInlineAuth::Token(decode_userinfo(url.username()))),
         }
     } else {
         None

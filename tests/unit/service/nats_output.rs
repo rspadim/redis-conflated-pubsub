@@ -46,6 +46,9 @@ fn hop_header_name_is_stable() {
 /// header is rejected here rather than by the client.
 #[test]
 fn oversized_payloads_are_rejected_before_publishing() {
+    // Pin the wire size of the relay's one-header publish; a header-format
+    // change in async-nats would silently shift the usable ceiling otherwise.
+    assert_eq!(NATS_HOP_HEADER_WIRE_BYTES, 26);
     let ceiling = 1024 - NATS_HOP_HEADER_WIRE_BYTES;
     assert!(check_payload_size("events", ceiling, 1024).is_ok());
     // Exactly the server max is too big once the header is counted.

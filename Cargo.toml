@@ -23,6 +23,7 @@ chrono = { version = "0.4", features = ["serde", "clock"] }
 clap = { version = "4.5", features = ["derive"] }
 fs2 = "0.4"
 futures-util = "0.3"
+percent-encoding = "2.3"
 redis = { version = "1.7.1", default-features = false, features = ["tokio-rustls-comp", "tls-rustls-webpki-roots"] }
 regex-automata = { version = "0.4", default-features = false, features = ["std", "syntax", "meta", "unicode"] }
 schemars = "1.0"

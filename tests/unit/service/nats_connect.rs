@@ -268,6 +268,77 @@ fn inline_url_token_auth_is_recognized() {
     assert!(!format!("{:?}", planned.auth).contains("t0k3n"));
 }
 
+/// An empty username with a password is still userinfo: the password must be
+/// extracted and the URL stripped, not left raw (`nats://:secret@host`).
+#[test]
+fn empty_username_still_extracts_and_strips_the_password() {
+    let planned = connection_plan(&config(serde_json::json!({
+        "servers": ["nats://:s3cr3t@one:4222"],
+    })))
+    .unwrap();
+    assert_eq!(
+        planned.auth,
+        NatsAuthPlan::InlineUserPassword {
+            username: String::new(),
+            password: "s3cr3t".to_owned(),
+        }
+    );
+    assert_eq!(planned.servers, vec!["nats://one:4222"]);
+    assert!(!planned.servers[0].contains("s3cr3t"));
+    assert!(!format!("{planned:?}").contains("s3cr3t"));
+}
+
+/// Percent-encoded userinfo is decoded before use, so a password containing a
+/// reserved character is sent literally, not as its encoding.
+#[test]
+fn percent_encoded_userinfo_is_decoded() {
+    let planned = connection_plan(&config(serde_json::json!({
+        "servers": ["nats://user:p%3Aw@one:4222"],
+    })))
+    .unwrap();
+    assert_eq!(
+        planned.auth,
+        NatsAuthPlan::InlineUserPassword {
+            username: "user".to_owned(),
+            password: "p:w".to_owned(),
+        }
+    );
+    let token = connection_plan(&config(serde_json::json!({
+        "servers": ["nats://us%40er@one:4222"],
+    })))
+    .unwrap();
+    assert_eq!(
+        token.auth,
+        NatsAuthPlan::InlineToken {
+            token: "us@er".to_owned(),
+        }
+    );
+}
+
+/// Redaction removes the secret even for malformed URLs the parser rejects,
+/// including passwords containing `/`, `?`, `#`, and strings with no scheme.
+#[test]
+fn redaction_hides_secrets_in_malformed_urls() {
+    for raw in [
+        "nats://relay:YWJj/ZGVm@10.0.0.1:4222",
+        "nats://relay:pa://ss@10.0.0.1:4222",
+        "relay:s3cr3t@127.0.0.1:4222",
+        "http://relay:s3cr3t@nats.example.net:4222",
+    ] {
+        let redacted = crate::config::redact_url_userinfo(raw);
+        assert!(!redacted.contains("s3cr3t"), "{raw} -> {redacted}");
+        assert!(!redacted.contains("YWJj"), "{raw} -> {redacted}");
+        assert!(!redacted.contains("pa://ss"), "{raw} -> {redacted}");
+        assert!(redacted.contains('@'), "{raw} -> {redacted}");
+        assert!(redacted.contains("***"), "{raw} -> {redacted}");
+    }
+    // A plain URL with no userinfo is returned unchanged.
+    assert_eq!(
+        crate::config::redact_url_userinfo("nats://host:4222"),
+        "nats://host:4222"
+    );
+}
+
 /// Inline credentials and an explicit `auth` block cannot coexist.
 #[test]
 fn inline_credentials_conflict_with_explicit_auth() {

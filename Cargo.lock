@@ -1062,6 +1062,7 @@ dependencies = [
  "clap",
  "fs2",
  "futures-util",
+ "percent-encoding",
  "redis",
  "regex-automata",
  "schemars",
