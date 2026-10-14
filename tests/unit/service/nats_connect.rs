@@ -412,6 +412,9 @@ fn malformed_url_without_userinfo_does_not_leak_a_password() {
         "nats://relay:pa#s3cr3t",
         // A credential sitting *after* the `@` (the `@` is not a reliable split).
         "nats://host@user:s3cr3t",
+        // A password that itself contains `://`: the prefix is not a scheme, so
+        // nothing before it can be echoed.
+        "nats:relay:p://s3cr3t@host:4222",
     ] {
         let error = connection_plan(&config(serde_json::json!({ "servers": [server] })))
             .unwrap_err()

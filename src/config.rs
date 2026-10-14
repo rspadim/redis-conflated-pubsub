@@ -82,14 +82,26 @@ pub fn redact_url_userinfo(value: &str) -> String {
 ///
 /// The parse failure is exactly what makes the string untrustworthy: `admin:s3cr3t`
 /// might be a host and a bad port, or a password, and an `@` may sit before *or*
-/// after the secret. So nothing after the scheme is echoed — only `scheme://` is
-/// kept, and a string with no `://` is fully masked. This is deliberately blunter
-/// than [`redact_url_userinfo`], which is safe only once the URL has parsed.
+/// after the secret. So nothing after the scheme is echoed. Only `scheme://` is
+/// kept, and only when what precedes the `://` really is a scheme (`[A-Za-z][A-Za-z0-9+.-]*`);
+/// otherwise — including a password that itself contains `://` — the whole
+/// string is masked. This is deliberately blunter than [`redact_url_userinfo`],
+/// which is safe only once the URL has parsed.
 fn redact_malformed_nats_url(value: &str) -> String {
-    match value.find("://") {
-        Some(index) => format!("{}://***", &value[..index]),
-        None => "***".to_owned(),
+    if let Some(index) = value.find("://") {
+        let scheme = &value[..index];
+        let looks_like_scheme = scheme
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_alphabetic())
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+        if looks_like_scheme {
+            return format!("{scheme}://***");
+        }
     }
+    "***".to_owned()
 }
 
 /// Decodes percent-encoded userinfo (`url` returns the encoded serialization).
