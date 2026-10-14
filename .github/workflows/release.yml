@@ -247,6 +247,19 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
+      - name: Take the release notes from the changelog
+        # The changelog is the curated text. A missing or malformed section must
+        # not fail a release: the extraction can only leave the body empty, which
+        # is exactly what the publish job did before this step existed.
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v version="$version" '
+            $0 ~ "^## " version " " { inside = 1; next }
+            inside && /^## / { exit }
+            inside { print }
+          ' CHANGELOG.md > release-notes.md || true
+          echo "release notes: $(wc -l < release-notes.md) line(s)"
       - uses: actions/download-artifact@v8
         with:
           path: dist
@@ -254,3 +267,4 @@ jobs:
       - uses: softprops/action-gh-release@v3
         with:
           files: dist/*
+          body_path: release-notes.md
