@@ -11,9 +11,15 @@ repository = "https://github.com/rspadim/redis-conflated-pubsub"
 name = "redis-conflated-pubsub"
 path = "src/main.rs"
 
+[build-dependencies]
+# Windows VERSIONINFO resources (product name/version, copyright). Required by
+# SignPath Foundation before the executable can be signed, and shown by Windows
+# in the file properties and SmartScreen. Only compiled for Windows targets; see
+# build.rs.
+winresource = "0.1.34"
+
 [dependencies]
-anyhow = "1.0"
-# Core NATS runtime adapter. Minimal feature set: `websockets` for ws/wss,
+anyhow = "1.0"# Core NATS runtime adapter. Minimal feature set: `websockets` for ws/wss,
 # `nkeys` for NKey/JWT credentials, `ring` as the rustls crypto provider.
 async-nats = { version = "=0.50.0", default-features = false, features = ["websockets", "nkeys", "ring"] }
 # `Bytes` is the payload type the async-nats publish API takes; it is already in

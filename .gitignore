@@ -6,6 +6,7 @@
 /state/
 /dist/
 /site/
+/installer/output/
 build.log
 /redis-conflated-pubsub-linux-x86_64
 /redis-conflated-pubsub-named-linux-x86_64

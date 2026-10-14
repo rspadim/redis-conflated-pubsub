@@ -1,0 +1,74 @@
+//! Embeds the Windows VERSIONINFO resource into the executable.
+//!
+//! Two things depend on this:
+//!
+//! * SignPath Foundation requires every binary it signs to carry product
+//!   metadata: "Set all product name attributes to your project's name" and
+//!   "Set all product version attributes to the same value in each build".
+//! * Windows itself reads these fields in the file properties dialog, in
+//!   SmartScreen and in Apps & features, so an executable without them looks
+//!   anonymous even before any reputation question comes up.
+//!
+//! The resource is compiled only when the **target** is Windows. The check uses
+//! `CARGO_CFG_TARGET_OS` rather than `#[cfg(windows)]`, because a build script's
+//! own `cfg` describes the *host*: cross-compiling from Linux to Windows must
+//! still embed the resource, and building for Linux must not look for a resource
+//! compiler at all.
+
+fn main() {
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=Cargo.toml");
+
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+
+    let version = env_or("CARGO_PKG_VERSION", "0.0.0");
+    let package = env_or("CARGO_PKG_NAME", "redis-conflated-pubsub");
+    let repository = env_or("CARGO_PKG_REPOSITORY", "");
+    let executable = format!("{package}.exe");
+
+    let mut resource = winresource::WindowsResource::new();
+    resource
+        .set("ProductName", "Conflated Pub/Sub")
+        .set("FileDescription", "Conflated Pub/Sub relay")
+        .set("CompanyName", "rspadim")
+        .set("LegalCopyright", "MIT License")
+        .set("InternalName", &package)
+        .set("OriginalFilename", &executable)
+        .set("FileVersion", &version)
+        .set("ProductVersion", &version)
+        .set("Comments", &repository);
+
+    // The string fields above are what a reviewer reads; these are the numeric
+    // versions Windows comparisons and the resource checks use.
+    let fixed = fixed_version(&version);
+    resource.set_version_info(winresource::VersionInfo::FILEVERSION, fixed);
+    resource.set_version_info(winresource::VersionInfo::PRODUCTVERSION, fixed);
+
+    resource
+        .compile()
+        .expect("failed to compile the Windows VERSIONINFO resource");
+}
+
+fn env_or(key: &str, fallback: &str) -> String {
+    std::env::var(key).unwrap_or_else(|_| fallback.to_string())
+}
+
+/// Packs a `major.minor.patch.build` version into the 64-bit layout the fixed
+/// version fields use (16 bits each). Non-numeric parts such as a `-rc1`
+/// pre-release suffix are skipped, which keeps a pre-release tag from turning
+/// into a nonsense version like 0.3.1.
+fn fixed_version(version: &str) -> u64 {
+    let mut parts = version
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| part.parse::<u64>().ok());
+
+    let major = parts.next().unwrap_or(0) & 0xffff;
+    let minor = parts.next().unwrap_or(0) & 0xffff;
+    let patch = parts.next().unwrap_or(0) & 0xffff;
+    let build = parts.next().unwrap_or(0) & 0xffff;
+
+    (major << 48) | (minor << 32) | (patch << 16) | build
+}

@@ -153,3 +153,28 @@ jobs:
       - run: chmod +x dist/redis-conflated-pubsub
       - name: Run static binary in Ubuntu container
         run: docker run --rm --platform linux/amd64 -v "$PWD/dist:/dist:ro" ubuntu:${{ matrix.ubuntu }} /dist/redis-conflated-pubsub --version
+
+  windows-installer:
+    name: Compile the Windows installer (unsigned)
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - run: cargo build --release --locked
+      - run: choco install innosetup -y --no-progress
+        shell: pwsh
+      - name: Compile the installer
+        shell: pwsh
+        run: |
+          # Compiling here on every run keeps a broken .iss from being found only
+          # on a release tag. Releases pass the real version; this is a
+          # placeholder numeric value.
+          iscc "/DAppVersion=0.0.0" "installer\redis-conflated-pubsub.iss"
+          $exe = "installer\output\ConflatedPubSubSetup-0.0.0.exe"
+          if (-not (Test-Path -LiteralPath $exe)) { throw "the installer was not produced" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer-unsigned
+          path: installer/output/*.exe
+          if-no-files-found: error
