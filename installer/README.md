@@ -22,25 +22,39 @@ Silent mode, for a scripted deployment:
 
 ## What the wizard does
 
-1. **Configuration page** (after the tasks page). Defaults to
-   `%ProgramFiles%\Conflated Pub/Sub\config.json`. Leaving the page runs the
-   relay's own `--check-config` against the chosen file, using a temporary copy of
-   the executable extracted from the installer — the install directory does not
-   exist yet at that point. A rejected file is shown with the relay's own message
-   and the wizard asks whether to continue anyway.
-2. **Files**. The executable, both example configurations, the README, the
+1. **Input, output and tuning pages** (after the tasks page). The wizard asks the
+   questions instead of handing over a JSON file:
+   - input: Redis endpoint (`host:port`, or `rediss://host:6380` for TLS),
+     database, the name of the environment variable holding the password, and the
+     subscription pattern;
+   - output: the same endpoint fields plus the channel prefix and suffix. The
+     prefix defaults to `conflated:` because the relay refuses a configuration
+     where the input and the output are the same Redis server with no prefix or
+     suffix: its own output would match its subscription.
+   - tuning: conflation interval, deduplication TTL, status HTTP port and log
+     level. Zero disables conflation, deduplication or the status listener.
+2. **Destination page.** `config.json` in the install directory by default. An
+   existing file is kept and used as it is, so an upgrade never overwrites the
+   operator's configuration. Leaving the page validates the outcome: if the file
+   does not exist yet, the wizard builds a draft in the temporary directory with
+   the same content and the same absolute paths, and the relay's own
+   `--check-config` judges it — the echo-loop and backend rules are reported here,
+   before anything is installed.
+3. **Files.** The executable, both example configurations, the README, the
    licence, the generated JSON Schema and the helper scripts.
-3. **`config.json` bootstrap** (post-install). `install-config.ps1` writes it from
-   the example **with absolute paths** and never overwrites an existing file, so
-   an upgrade keeps whatever the operator configured.
-4. **Service**. Optional task: registers `redis-conflated-pubsub` with auto or
+4. **Service.** Optional task: registers `redis-conflated-pubsub` with auto or
    manual start, sets a description and restart-on-failure actions, then starts it.
-5. **Verification**. `sc start` only means the service manager accepted the
+5. **Verification.** `sc start` only means the service manager accepted the
    request, so `verify-service.ps1` asks the relay whether it came up, and the
    finish page reports the answer.
 
 The uninstaller stops and removes the service and asks whether to keep
 `config.json`, the lock file and the logs.
+
+Only Redis endpoints are offered on both sides. A Core NATS topology, or anything
+beyond one subscription and one output, is configured by pointing the destination
+page at a hand-written file; `config.nats.example.json` and the project site cover
+those cases.
 
 ## Why the paths are rewritten
 
@@ -81,18 +95,24 @@ To add or extend a language:
 2. Add the `.isl` to the language's `MessagesFile` entry in the `.iss`.
 3. Compile and check the language in the selector.
 
+A language file does not have to cover every key. The configuration-wizard keys
+were added after the first translation pass, so the seven languages other than
+English, Brazilian Portuguese and Spanish currently fall back to English for those
+labels; the older installer messages are translated in all ten.
+
 ## Helper scripts
 
 | Script | Used by | Purpose |
 | --- | --- | --- |
 | `validate-config.ps1` | wizard, `Validate-Config.cmd` | Runs `--check-config` and reports the relay's own output. |
-| `install-config.ps1` | wizard (post-install) | Writes `config.json` from the example with absolute paths, keeping an existing file. |
+| `New-Config.ps1` | wizard | Turns the wizard answers into `config.json` with absolute paths, keeping an existing file unless `-Force` is given. |
 | `service.ps1` | wizard, uninstaller | Install, uninstall, start, stop, restart or query the service. |
 | `verify-service.ps1` | wizard (post-install) | Checks that the relay actually started, not only that the service was started. |
 | `Validate-Config.cmd` | Start Menu shortcut | Double-click wrapper around `validate-config.ps1`. |
 
 Every script is idempotent and reports through its exit code, which is what the
-wizard reacts to.
+wizard reacts to. `New-Config.ps1` can also be run by hand to regenerate a
+configuration: it accepts the same answers as parameters.
 
 ## Upgrades
 
