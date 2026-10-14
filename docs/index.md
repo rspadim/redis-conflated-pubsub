@@ -16,6 +16,10 @@ combinação.
 [Baixar binário](https://github.com/rspadim/redis-conflated-pubsub/releases){ .md-button .md-button--primary }
 [Ver código no GitHub](https://github.com/rspadim/redis-conflated-pubsub){ .md-button }
 
+Assinatura de código gratuita do instalador e do executável do Windows fornecida
+pelo [SignPath.io](https://signpath.io/), certificado pela
+[SignPath Foundation](https://signpath.org/).
+
 ## O que ele resolve
 
 Você tem um feed de eventos (cotações, telemetria, sinais) publicando muito mais

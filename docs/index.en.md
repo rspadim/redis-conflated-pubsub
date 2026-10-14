@@ -15,6 +15,10 @@ deduplication behave the same way for every combination.
 [Download a binary](https://github.com/rspadim/redis-conflated-pubsub/releases){ .md-button .md-button--primary }
 [View the source](https://github.com/rspadim/redis-conflated-pubsub){ .md-button }
 
+Free code signing for the Windows installer and executable provided by
+[SignPath.io](https://signpath.io/), certificate by
+[SignPath Foundation](https://signpath.org/).
+
 ## What it solves
 
 You have an event feed (quotes, telemetry, signals) publishing far more messages
