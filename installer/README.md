@@ -1,0 +1,103 @@
+# Windows installer
+
+Inno Setup 6 script that installs the relay as a Windows service. Build it from
+the repository root, with the release executable already built:
+
+```powershell
+cargo build --release --locked
+tools\make-icons.ps1                                              # only after changing the mark
+& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DAppVersion=0.3.0" "installer\redis-conflated-pubsub.iss"
+.\installer\output\ConflatedPubSubSetup-0.3.0.exe
+```
+
+`AppVersion` must be numeric (`a.b.c` or `a.b.c.d`): it feeds the file's fixed
+version resource, which Windows comparisons and the resource checks read. CI
+passes the release tag without the leading `v`; a local build defaults to `0.0.0`.
+
+Silent mode, for a scripted deployment:
+
+```powershell
+.\ConflatedPubSubSetup-0.3.0.exe /VERYSILENT /CONFIG=C:\relay\config.json /SERVICE=1 /SERVICESTART=auto
+```
+
+## What the wizard does
+
+1. **Configuration page** (after the tasks page). Defaults to
+   `%ProgramFiles%\Conflated Pub/Sub\config.json`. Leaving the page runs the
+   relay's own `--check-config` against the chosen file, using a temporary copy of
+   the executable extracted from the installer — the install directory does not
+   exist yet at that point. A rejected file is shown with the relay's own message
+   and the wizard asks whether to continue anyway.
+2. **Files**. The executable, both example configurations, the README, the
+   licence, the generated JSON Schema and the helper scripts.
+3. **`config.json` bootstrap** (post-install). `install-config.ps1` writes it from
+   the example **with absolute paths** and never overwrites an existing file, so
+   an upgrade keeps whatever the operator configured.
+4. **Service**. Optional task: registers `redis-conflated-pubsub` with auto or
+   manual start, sets a description and restart-on-failure actions, then starts it.
+5. **Verification**. `sc start` only means the service manager accepted the
+   request, so `verify-service.ps1` asks the relay whether it came up, and the
+   finish page reports the answer.
+
+The uninstaller stops and removes the service and asks whether to keep
+`config.json`, the lock file and the logs.
+
+## Why the paths are rewritten
+
+The relay resolves `logging.directory`, `instance_lock.path` and `status.path`
+against its working directory. A Windows service starts with `System32` as its
+working directory, so an installed configuration copied verbatim from the example
+would write its logs and its lock file there. `install-config.ps1` rewrites those
+three fields to absolute paths under the install directory.
+
+It also writes UTF-8 **without a BOM**: `Set-Content -Encoding UTF8` in Windows
+PowerShell 5.1 prepends one, and `serde_json` rejects a BOM, so a configuration
+written that way would fail to load.
+
+## Language files
+
+The wizard ships the same ten languages as the sibling RedisExcel project:
+English (default), Brazilian Portuguese, Spanish, Chinese Simplified, Chinese
+Traditional, Russian, French, Korean, German and Japanese. The standard Inno UI is
+fully translated by the official `.isl` files; only the messages this wizard adds
+need translating.
+
+Each language reads two message files, in this order:
+
+```ini
+Name: "japanese"; MessagesFile: "compiler:Languages\Japanese.isl,languages\messages.english.isl,languages\messages.japanese.isl"
+```
+
+The last file wins, and `messages.english.isl` holds the base wording of every
+key. So a language file defines only what it translates and the rest falls back to
+English — no language can ever show a raw `{cm:...}` constant, and a language with
+no file at all still works. Nothing is defined inline in the `.iss` on purpose: an
+entry in the main script applies to every language and would shadow these files.
+
+To add or extend a language:
+
+1. Copy `languages\messages.english.isl`, translate the values and keep the keys.
+   Save as UTF-8 **without BOM** and keep the `%1`/`%n` placeholders intact.
+2. Add the `.isl` to the language's `MessagesFile` entry in the `.iss`.
+3. Compile and check the language in the selector.
+
+## Helper scripts
+
+| Script | Used by | Purpose |
+| --- | --- | --- |
+| `validate-config.ps1` | wizard, `Validate-Config.cmd` | Runs `--check-config` and reports the relay's own output. |
+| `install-config.ps1` | wizard (post-install) | Writes `config.json` from the example with absolute paths, keeping an existing file. |
+| `service.ps1` | wizard, uninstaller | Install, uninstall, start, stop, restart or query the service. |
+| `verify-service.ps1` | wizard (post-install) | Checks that the relay actually started, not only that the service was started. |
+| `Validate-Config.cmd` | Start Menu shortcut | Double-click wrapper around `validate-config.ps1`. |
+
+Every script is idempotent and reports through its exit code, which is what the
+wizard reacts to.
+
+## Upgrades
+
+`PrepareToInstall` stops an existing service before the files are copied. Windows
+allows a running image to be renamed but not overwritten, so without that step the
+copy would be deferred to the next reboot and the service would keep executing the
+old binary while the wizard reported success. If the service task is unchecked
+during an upgrade, a service that was stopped is started again.
