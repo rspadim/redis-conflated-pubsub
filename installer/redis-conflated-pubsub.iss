@@ -17,9 +17,10 @@
 ; The uninstaller stops and removes the service, then asks whether to keep
 ; config.json and the logs.
 ;
-; Silent mode:
-;   ConflatedPubSubSetup.exe /VERYSILENT /DIR=... /CONFIG=<path> /SERVICE=<0|1>
-;   /SERVICESTART=<auto|delayed-auto|demand>
+; Silent mode: /VERYSILENT, plus Inno's own switches such as /DIR=..., runs the
+; wizard's default answers — Redis input to Redis output, the service installed and
+; started. The answers are NOT settable from the command line; change them in the
+; wizard, or in config.json afterwards.
 
 #define AppName "Conflated Pub/Sub"
 #define AppExeName "redis-conflated-pubsub"

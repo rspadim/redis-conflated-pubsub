@@ -65,6 +65,7 @@ theme:
 nav:
   - Início: index.md
   - Início rápido: inicio-rapido.md
+  - Instalação: instalacao.md
   - Configuração: configuracao.md
   - Backend NATS: nats.md
   - Docker e testes: docker.md
@@ -91,6 +92,7 @@ plugins:
           nav_translations:
             Início: Home
             Início rápido: Quick start
+            Instalação: Installation
             Configuração: Configuration
             Backend NATS: NATS backend
             Docker e testes: Docker and tests
@@ -104,6 +106,7 @@ plugins:
           nav_translations:
             Início: Inicio
             Início rápido: Inicio rápido
+            Instalação: Instalación
             Configuração: Configuración
             Backend NATS: Backend NATS
             Docker e testes: Docker y pruebas
