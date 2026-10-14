@@ -261,6 +261,25 @@ fn publish_context_for_test<'a>(
     metrics: &'a Metrics,
     output_metrics: &'a OutputMetrics,
 ) -> OutputPublishContext<'a> {
+    publish_context_for_test_with_ceiling(
+        name,
+        failure_log,
+        deduplication_cache,
+        metrics,
+        output_metrics,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn publish_context_for_test_with_ceiling<'a>(
+    name: &'a str,
+    failure_log: &'a mut OutputFailureLog,
+    deduplication_cache: &'a mut DeduplicationCache,
+    metrics: &'a Metrics,
+    output_metrics: &'a OutputMetrics,
+    nats_payload_ceiling: Option<usize>,
+) -> OutputPublishContext<'a> {
     OutputPublishContext {
         name,
         failure_log,
@@ -268,6 +287,7 @@ fn publish_context_for_test<'a>(
         metrics,
         output_metrics,
         not_sent_reconnects: true,
+        nats_payload_ceiling,
     }
 }
 

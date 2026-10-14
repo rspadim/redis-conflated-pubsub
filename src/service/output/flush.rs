@@ -211,6 +211,7 @@ async fn publish_interval_bucket<P: OutputSink>(
     let candidate_batch_length = pending_batch_length(
         max_commands_per_exec,
         max_bytes_per_exec,
+        context.nats_payload_ceiling,
         interval_pending,
         &candidate_channels,
     );
@@ -378,6 +379,7 @@ pub(in crate::service) async fn publish_passthrough_batch<P: OutputSink>(
     let (batch_length, atomic, _) = passthrough_batch_length(
         max_commands_per_exec,
         max_bytes_per_exec,
+        context.nats_payload_ceiling,
         passthrough.iter(),
     );
     if batch_length == 0 {

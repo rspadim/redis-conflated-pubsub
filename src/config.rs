@@ -76,6 +76,22 @@ pub fn redact_url_userinfo(value: &str) -> String {
     format!("{}***{}", &value[..start], &value[at..])
 }
 
+/// Redacts a NATS server URL that could not be split into scheme, authority and
+/// host — either because [`Url::parse`] rejected it, or because it parsed
+/// without an authority.
+///
+/// The parse failure is exactly what makes the string untrustworthy: `admin:s3cr3t`
+/// might be a host and a bad port, or a password, and an `@` may sit before *or*
+/// after the secret. So nothing after the scheme is echoed — only `scheme://` is
+/// kept, and a string with no `://` is fully masked. This is deliberately blunter
+/// than [`redact_url_userinfo`], which is safe only once the URL has parsed.
+fn redact_malformed_nats_url(value: &str) -> String {
+    match value.find("://") {
+        Some(index) => format!("{}://***", &value[..index]),
+        None => "***".to_owned(),
+    }
+}
+
 /// Decodes percent-encoded userinfo (`url` returns the encoded serialization).
 /// Falls back to the raw value when the bytes are not valid UTF-8.
 fn decode_userinfo(encoded: &str) -> String {
@@ -123,7 +139,7 @@ pub fn parse_nats_server(server: &str) -> Result<(String, NatsTransport, Option<
     let url = Url::parse(server).with_context(|| {
         format!(
             "invalid NATS server URL {:?}: expected nats://, tls://, ws://, or wss://",
-            redact_url_userinfo(server)
+            redact_malformed_nats_url(server)
         )
     })?;
     let transport = NatsTransport::from_scheme(url.scheme()).ok_or_else(|| {
@@ -133,6 +149,18 @@ pub fn parse_nats_server(server: &str) -> Result<(String, NatsTransport, Option<
             url.scheme()
         )
     })?;
+    // A URL with no authority (`nats:user:pass@host:4222`) parses as a
+    // *cannot-be-a-base* URL: it has no host and no `userinfo`, so the checks
+    // below would treat it as credential-free and store the raw string. The
+    // `async-nats` client then prepends `nats://` and reads `user:pass` as
+    // credentials, which would leak the secret through `ConnectionPlan.servers`
+    // and its debug logging. Reject it before any of that.
+    if url.cannot_be_a_base() || url.host_str().is_none() {
+        bail!(
+            "invalid NATS server URL {:?}: missing host; use nats://[user:password@]host:port",
+            redact_malformed_nats_url(server)
+        );
+    }
     // Userinfo presence is `username OR password`: `nats://:secret@host` has an
     // empty username but a real password, and must not fall through to the raw
     // URL (which would leak the password and drop the auth).

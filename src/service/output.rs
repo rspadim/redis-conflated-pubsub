@@ -384,6 +384,7 @@ pub(super) async fn publish_output(
                     metrics: &metrics,
                     output_metrics: &output_metrics,
                     not_sent_reconnects,
+                    nats_payload_ceiling,
                 };
                 let (has_remaining, pending_keys) = publish_conflated_interval_pending(
                     &mut connection,
@@ -422,6 +423,7 @@ pub(super) async fn publish_output(
             let (batch_length, atomic, request_bytes) = passthrough_batch_length(
                 available_commands,
                 available_bytes,
+                nats_payload_ceiling,
                 passthrough.iter().skip(in_flight_direct_messages),
             );
             if batch_length == 0
@@ -451,6 +453,7 @@ pub(super) async fn publish_output(
                                 metrics: &metrics,
                                 output_metrics: &output_metrics,
                                 not_sent_reconnects,
+                                nats_payload_ceiling,
                             };
                             let result = settle_dispatched_batch(
                                 &batch,
@@ -486,6 +489,7 @@ pub(super) async fn publish_output(
                                 metrics: &metrics,
                                 output_metrics: &output_metrics,
                                 not_sent_reconnects,
+                                nats_payload_ceiling,
                             };
                             let result = settle_dispatched_batch(
                                 &batch,
@@ -577,6 +581,7 @@ pub(super) async fn publish_output(
                         metrics: &metrics,
                         output_metrics: &output_metrics,
                         not_sent_reconnects,
+                        nats_payload_ceiling,
                     };
                     metrics.record_output_publish_rtt(&output_metrics, publish_rtt);
                     let result = settle_dispatched_batch(

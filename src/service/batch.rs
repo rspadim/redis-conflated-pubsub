@@ -14,6 +14,7 @@ pub(super) fn pending_batch(
     interval_ms: i64,
     max_commands_per_exec: usize,
     max_bytes_per_exec: usize,
+    nats_payload_ceiling: Option<usize>,
     pending: &HashMap<String, PendingMessage>,
     passthrough: &VecDeque<PendingMessage>,
 ) -> Vec<PendingMessage> {
@@ -23,6 +24,7 @@ pub(super) fn pending_batch(
         let batch_length = pending_batch_length(
             max_commands_per_exec,
             max_bytes_per_exec,
+            nats_payload_ceiling,
             pending,
             &candidates,
         );
@@ -41,9 +43,17 @@ pub(super) fn pending_batch(
     }
 }
 
+/// A payload above the live NATS server ceiling can never be published on this
+/// connection, so batching keeps it alone: a definitive `NotSent` would
+/// otherwise drop every unrelated channel sharing its batch.
+fn exceeds_nats_ceiling(message: &PendingMessage, ceiling: Option<usize>) -> bool {
+    ceiling.is_some_and(|ceiling| message.payload.len() > ceiling)
+}
+
 pub(super) fn pending_batch_length(
     max_commands_per_exec: usize,
     max_bytes_per_exec: usize,
+    nats_payload_ceiling: Option<usize>,
     pending: &HashMap<String, PendingMessage>,
     candidate_channels: &[String],
 ) -> usize {
@@ -53,6 +63,15 @@ pub(super) fn pending_batch_length(
         let message = pending
             .get(channel)
             .expect("pending channel snapshot must remain present");
+        if exceeds_nats_ceiling(message, nats_payload_ceiling) {
+            // Keep an unsendable payload in a batch of its own: it can only
+            // fail with `NotSent`, and that must not take the channels that
+            // merely shared its batch down with it.
+            if batch_length == 0 {
+                return 1;
+            }
+            break;
+        }
         let message_bytes = publish_command_frame_bytes(message);
         let transaction_bytes = batch_bytes
             .saturating_add(message_bytes)
@@ -69,12 +88,21 @@ pub(super) fn pending_batch_length(
 pub(super) fn passthrough_batch_length<'a>(
     max_commands_per_exec: usize,
     max_bytes_per_exec: usize,
+    nats_payload_ceiling: Option<usize>,
     candidates: impl Iterator<Item = &'a PendingMessage>,
 ) -> (usize, bool, usize) {
     let mut batch_length = 0usize;
     let mut batch_bytes = 0usize;
     for message in candidates.take(max_commands_per_exec) {
         let message_bytes = publish_command_frame_bytes(message);
+        if exceeds_nats_ceiling(message, nats_payload_ceiling) {
+            // A payload past the live server ceiling is unsendable here; keep it
+            // as a singleton so a `NotSent` drops only it, not its neighbours.
+            if batch_length == 0 {
+                return (1, false, message_bytes);
+            }
+            break;
+        }
         if batch_length == 0 {
             if message_bytes > max_bytes_per_exec {
                 // Preserve the existing oversized-message `Send` behavior;

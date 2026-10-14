@@ -389,3 +389,58 @@ fn mtls_requires_certificate_and_key_together() {
     let error = planned.unwrap_err().to_string();
     assert!(error.contains("client_cert_file"), "{error}");
 }
+
+/// A URL the parser rejects before it can split userinfo from host must not
+/// echo a credential: without a trustworthy `@`, `admin:s3cr3t` (or a password
+/// containing `/`, `?`, `#`) is ambiguous, so the post-scheme part is masked.
+#[test]
+fn malformed_url_without_userinfo_does_not_leak_a_password() {
+    for server in [
+        "nats://admin:s3cr3t",
+        "nats://admin:s3cr3t/path",
+        // Credentials after a slash but with an empty authority, and with no
+        // `://` at all: the parser still cannot split userinfo from host.
+        "nats:///relay:s3cr3t@localhost:4222",
+        "nats:/relay:s3cr3t@localhost:4222",
+        "nats:///admin:s3cr3t",
+        // An `@` with empty userinfo, and passwords carrying a raw `/`, `?` or
+        // `#`: the whole post-scheme part must be masked, not just the first
+        // authority segment.
+        "nats://@admin:s3cr3t",
+        "nats://relay:pa?s3cr3t",
+        "nats://relay:pa/s3cr3t",
+        "nats://relay:pa#s3cr3t",
+        // A credential sitting *after* the `@` (the `@` is not a reliable split).
+        "nats://host@user:s3cr3t",
+    ] {
+        let error = connection_plan(&config(serde_json::json!({ "servers": [server] })))
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("s3cr3t"), "{server}: {error}");
+        assert!(error.contains("***"), "{server}: {error}");
+    }
+
+    // A parseable URL with an unsupported scheme still redacts only the
+    // userinfo, keeping the rest of the authority readable.
+    let error = connection_plan(&config(serde_json::json!({
+        "servers": ["ftp://relay:s3cr3t@host:4222"],
+    })))
+    .unwrap_err()
+    .to_string();
+    assert!(!error.contains("s3cr3t"), "{error}");
+}
+
+/// A URL with no authority (`nats:user:pass@host:port`) parses as a
+/// cannot-be-a-base URL, so it has no host for the client to connect to and
+/// would leak the raw credentials if stored verbatim. It is rejected instead.
+#[test]
+fn authority_less_url_is_rejected() {
+    let error = connection_plan(&config(serde_json::json!({
+        "servers": ["nats:relay:s3cr3t@localhost:4222"],
+    })))
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("missing host"), "{error}");
+    assert!(!error.contains("s3cr3t"), "{error}");
+    assert!(!error.contains("relay:"), "{error}");
+}

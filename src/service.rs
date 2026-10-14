@@ -274,6 +274,10 @@ struct OutputPublishContext<'a> {
     /// a mapping/oversize `NotSent`, so `false`, and `output_reconnects_total`
     /// is not inflated by a deterministic config error.
     not_sent_reconnects: bool,
+    /// Live NATS payload ceiling for a connected output, captured once per turn.
+    /// The batching helpers use it to keep an unsendable payload in a batch of
+    /// its own, so a `NotSent` never drops the channels that shared its batch.
+    nats_payload_ceiling: Option<usize>,
 }
 
 pub async fn run(
