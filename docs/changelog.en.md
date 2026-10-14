@@ -3,6 +3,28 @@
 The canonical file is [`CHANGELOG.md`](https://github.com/rspadim/redis-conflated-pubsub/blob/main/CHANGELOG.md)
 at the repository root. Below is a summary of the versions.
 
+## 0.3.1 — 2026-10-14
+
+- The relay now implements the Windows service protocol: the service control
+  manager starts, stops and restarts it like any other service. Before this the
+  installer registered a console program, so every start request failed with
+  error 1053 and the service never came up. Other platforms are unaffected.
+- Parameterised silent install: `/CONFIG=<file>` uses a configuration that already
+  exists, `/SERVICE=0|1` decides whether the service is registered, and
+  `/SERVICESTART=auto|delayed-auto|demand` sets its startup type.
+- Failures after the files are copied return exit code **9** and are recorded in
+  `{app}\install-report.txt`, one line per step; nothing is shown in silent mode.
+  Inno Setup returns 0 for a script failure, so that code is the only way to fail
+  loudly.
+- The setup confirms that the relay came up, not only that the service accepted
+  the start request, and it requires a status file written after the check began.
+- Fixed: `sc.exe` could not receive the default installation path (error 1639),
+  and the service state was read from text that changes with the language
+  (`ESTADO`), which made a running service look `unknown`.
+- Fixed: a silent install generated NATS-to-NATS instead of Redis-to-Redis, a
+  silent upgrade skipped the service, and the reason a configuration was rejected
+  was lost.
+
 ## 0.3.0 — 2026-10-14
 
 - Protocol-neutral backend selection: `input` and each output use exactly one of

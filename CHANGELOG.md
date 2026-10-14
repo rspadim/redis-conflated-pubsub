@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.1 — 2026-10-14
+
+- The relay now implements the Windows service protocol (`windows-service`, compiled only for Windows): the service control manager starts, stops and restarts it like any other service. Before this the installer registered a console program, so every start request failed with error 1053 and the service never came up. A stop control maps onto the same shutdown path Ctrl-C uses, and the runtime is reported as `Running` before anything is connected, because the relay retries a missing Redis forever and a start that waited for a connection would always time out. Other platforms are unaffected.
+- Parameterised silent install for scripted deployment: `/CONFIG=<file>` uses a configuration that already exists, `/SERVICE=0|1` decides whether the service is registered, and `/SERVICESTART=auto|delayed-auto|demand` sets its startup type. An invalid value aborts before anything is written.
+- Failures after the files are copied return exit code **9** and are recorded in `{app}\install-report.txt`, one line per step. Inno Setup returns 0 for a script failure (verified: `RaiseException` and `Abort()` from `ssPostInstall` both leave the exit code at 0), so `GetCustomSetupExitCode` is the only way to fail loudly. Nothing is shown in silent mode: a dialog would wait for a click that never comes.
+- The setup confirms that the relay came up, not only that the service accepted the start request, and it requires the status file to have been written after the check began: a snapshot left behind by an earlier run no longer passes for a relay that is alive.
+- Fixed: `sc.exe` could not receive the default installation path (error 1639, "invalid command line"). `binPath` is now written through `New-Service`/WMI, which do not parse a command line.
+- Fixed: service state was read from `sc.exe` text, whose field names are localized (`ESTADO` instead of `STATE` on a Portuguese machine), so a running service was read as `unknown` and the installer reported a healthy relay as dead.
+- Fixed: a silent install generated NATS-to-NATS instead of Redis-to-Redis (an option page that is never shown reports index -1), and a silent upgrade silently skipped the service (Inno leaves a `checkedonce` task unchecked on a later installation).
+- Fixed: the reason a configuration was rejected was lost on the way, because the script died on the relay's own stderr output and the report came out empty; the operator now sees the relay's message.
+- A silent uninstall keeps `config.json` and no longer shows message boxes.
+
 ## 0.3.0 — 2026-10-14
 
 - Added protocol-neutral backend selection for 0.3: `input` and each output now take exactly one of `redis` or `nats`. Existing Redis configurations are unchanged, and `--check-config` plus the generated JSON Schema reject an endpoint with zero or two backends.

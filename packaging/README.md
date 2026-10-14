@@ -46,7 +46,7 @@ From the repository root, with the musl binary placed at
 
 ```sh
 for packager in deb rpm apk archlinux; do
-  VERSION=0.3.0 nfpm package --config nfpm.yaml --packager "$packager" --target dist/
+  VERSION=0.3.1 nfpm package --config nfpm.yaml --packager "$packager" --target dist/
 done
 ```
 

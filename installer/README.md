@@ -6,8 +6,8 @@ the repository root, with the release executable already built:
 ```powershell
 cargo build --release --locked
 tools\make-icons.ps1                                              # only after changing the mark
-& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DAppVersion=0.3.0" "installer\redis-conflated-pubsub.iss"
-.\installer\output\ConflatedPubSubSetup-0.3.0.exe
+& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DAppVersion=0.3.1" "installer\redis-conflated-pubsub.iss"
+.\installer\output\ConflatedPubSubSetup-0.3.1.exe
 ```
 
 `AppVersion` must be numeric (`a.b.c` or `a.b.c.d`): it feeds the file's fixed
@@ -17,7 +17,7 @@ passes the release tag without the leading `v`; a local build defaults to `0.0.0
 Silent mode, for a scripted deployment:
 
 ```powershell
-.\ConflatedPubSubSetup-0.3.0.exe /VERYSILENT /CONFIG=C:\relay\config.json /SERVICE=1 /SERVICESTART=auto
+.\ConflatedPubSubSetup-0.3.1.exe /VERYSILENT /CONFIG=C:\relay\config.json /SERVICE=1 /SERVICESTART=auto
 ```
 
 | Parameter | Meaning |

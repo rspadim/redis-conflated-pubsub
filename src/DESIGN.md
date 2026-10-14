@@ -1,6 +1,6 @@
 # Design
 
-Architecture, runtime behavior, defaults and reference measurements for `redis-conflated-pubsub` 0.3.0. This document describes the current version; see [`../CHANGELOG.md`](../CHANGELOG.md) for change history. The original 0.3 NATS proposal and the transport spike behind it are in [`../DESIGN-0.3.md`](../DESIGN-0.3.md).
+Architecture, runtime behavior, defaults and reference measurements for `redis-conflated-pubsub` 0.3.1. This document describes the current version; see [`../CHANGELOG.md`](../CHANGELOG.md) for change history. The original 0.3 NATS proposal and the transport spike behind it are in [`../DESIGN-0.3.md`](../DESIGN-0.3.md).
 
 ## Purpose
 

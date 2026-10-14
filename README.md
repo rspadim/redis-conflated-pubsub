@@ -2,7 +2,7 @@
 
 A Rust relay that forwards Pub/Sub messages between Redis and Core NATS. The `input` selects one backend and every output independently selects Redis or Core NATS; mapping, filters, conflation and deduplication run the same way for either backend.
 
-Current release: **v0.3.0**. [Download a platform binary](https://github.com/rspadim/redis-conflated-pubsub/releases) or see the [developer build instructions](src/README.md). The project site is at <https://rspadim.github.io/redis-conflated-pubsub/> (pt-BR).
+Current release: **v0.3.1**. [Download a platform binary](https://github.com/rspadim/redis-conflated-pubsub/releases) or see the [developer build instructions](src/README.md). The project site is at <https://rspadim.github.io/redis-conflated-pubsub/> (pt-BR).
 
 Windows ships an installer (`ConflatedPubSubSetup-<version>.exe`) that asks the configuration questions, registers the service and verifies it came up; Linux ships deb, rpm, apk and Arch packages built from the static musl binary. Both are on the release page, and the [installation page](https://rspadim.github.io/redis-conflated-pubsub/instalacao/) covers the paths, the service accounts and the unattended options.
 
@@ -546,10 +546,10 @@ Releases also ship packages for the four families, all built with [nFPM](https:/
 
 | Family | Package | Install |
 | --- | --- | --- |
-| Debian/Ubuntu | `redis-conflated-pubsub_<version>-1_amd64.deb` | `sudo apt install ./redis-conflated-pubsub_0.3.0-1_amd64.deb` |
-| RHEL/Fedora/SUSE | `redis-conflated-pubsub-<version>-1.x86_64.rpm` | `sudo dnf install ./redis-conflated-pubsub-0.3.0-1.x86_64.rpm` |
-| Alpine | `redis-conflated-pubsub_<version>-r1_x86_64.apk` | `sudo apk add --allow-untrusted ./redis-conflated-pubsub_0.3.0-r1_x86_64.apk` |
-| Arch | `redis-conflated-pubsub-<version>-1-x86_64.pkg.tar.zst` | `sudo pacman -U redis-conflated-pubsub-0.3.0-1-x86_64.pkg.tar.zst` |
+| Debian/Ubuntu | `redis-conflated-pubsub_<version>-1_amd64.deb` | `sudo apt install ./redis-conflated-pubsub_0.3.1-1_amd64.deb` |
+| RHEL/Fedora/SUSE | `redis-conflated-pubsub-<version>-1.x86_64.rpm` | `sudo dnf install ./redis-conflated-pubsub-0.3.1-1.x86_64.rpm` |
+| Alpine | `redis-conflated-pubsub_<version>-r1_x86_64.apk` | `sudo apk add --allow-untrusted ./redis-conflated-pubsub_0.3.1-r1_x86_64.apk` |
+| Arch | `redis-conflated-pubsub-<version>-1-x86_64.pkg.tar.zst` | `sudo pacman -U redis-conflated-pubsub-0.3.1-1-x86_64.pkg.tar.zst` |
 
 The packages are unsigned, like the release archives, so each package manager asks for confirmation (or needs `--allow-untrusted` on Alpine). Then edit the configuration and start the service:
 

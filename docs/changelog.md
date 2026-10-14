@@ -3,6 +3,29 @@
 O arquivo canônico é o [`CHANGELOG.md`](https://github.com/rspadim/redis-conflated-pubsub/blob/main/CHANGELOG.md)
 na raiz do repositório. Abaixo está um resumo das versões.
 
+## 0.3.1 — 2026-10-14
+
+- O relay agora implementa o protocolo de serviço do Windows: o gerenciador de
+  serviços o inicia, para e reinicia em falha como qualquer outro serviço. Antes o
+  instalador registrava um executável de console e toda tentativa de início
+  falhava com o erro 1053 — o serviço nunca subia. Nas demais plataformas nada
+  mudou.
+- Instalação silenciosa parametrizável: `/CONFIG=<arquivo>` usa uma configuração
+  que já existe, `/SERVICE=0|1` decide se o serviço é registrado e
+  `/SERVICESTART=auto|delayed-auto|demand` define o tipo de inicialização.
+- Falhas depois da cópia dos arquivos devolvem código de saída **9** e ficam
+  registradas em `{app}\install-report.txt`, uma linha por etapa; nada é exibido
+  em modo silencioso. O Inno Setup devolve 0 para falha de script, então esse
+  código é o único jeito de falhar alto.
+- O instalador confirma que o relay subiu, não apenas que o serviço aceitou o
+  pedido, e exige um `status.json` escrito depois de a verificação começar.
+- Corrigido: o `sc.exe` não aceitava o caminho padrão de instalação (erro 1639) e
+  o estado do serviço era lido de um texto que muda com o idioma (`ESTADO`), o que
+  fazia um serviço rodando parecer `unknown`.
+- Corrigido: no modo silencioso a configuração gerada saía NATS→NATS em vez de
+  Redis→Redis, um upgrade silencioso pulava o serviço, e o motivo pelo qual o
+  relay rejeitou uma configuração se perdia.
+
 ## 0.3.0 — 2026-10-14
 
 - Seleção de backend neutra de protocolo: `input` e cada saída usam exatamente um

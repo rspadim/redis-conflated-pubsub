@@ -9,10 +9,10 @@
 #
 # Usage, from the repository root with the musl binary in dist/:
 #
-#   VERSION=0.3.0 nfpm package --config nfpm.yaml --packager deb --target dist/
-#   VERSION=0.3.0 nfpm package --config nfpm.yaml --packager rpm --target dist/
-#   VERSION=0.3.0 nfpm package --config nfpm.yaml --packager apk --target dist/
-#   VERSION=0.3.0 nfpm package --config nfpm.yaml --packager archlinux --target dist/
+#   VERSION=0.3.1 nfpm package --config nfpm.yaml --packager deb --target dist/
+#   VERSION=0.3.1 nfpm package --config nfpm.yaml --packager rpm --target dist/
+#   VERSION=0.3.1 nfpm package --config nfpm.yaml --packager apk --target dist/
+#   VERSION=0.3.1 nfpm package --config nfpm.yaml --packager archlinux --target dist/
 #
 # VERSION is required and holds the bare version (no leading "v"); the release
 # workflow derives it from Cargo.toml. See ci/README.md and packaging/README.md.
