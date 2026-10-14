@@ -37,7 +37,7 @@ A NATS output published on one connection can match an input subscription on ano
 | `service/output/flush.rs` | Queue settlement, conflated bucket flush, direct batch publish path. |
 | `service/batch.rs` | RESP frame accounting, batch sizing, oversized-message policy. |
 | `service/publish.rs` | Redis connection handling, publish commands, failure classification; `OutputSink`/`OutputConnection` backend selection. |
-| `service/backend.rs` | Backend boundary: `InputEnvelope` and the `InputSource`/`OutputSink` traits, plus the `Relay-Hop` header constant. |
+| `service/backend.rs` | Backend boundary: `InputEnvelope` and the `InputSource`/`OutputSink` traits, plus the `ConflatedPS-Hop` loop-guard header constant. |
 | `service/nats/connect.rs` | Turns a `NatsConfig` into a connected client; splits the secret-free `ConnectionPlan` from the secret-resolving `connect`. |
 | `service/nats/input.rs` | NATS input reader: installs subscriptions, fans streams in, drops loop re-entry. |
 | `service/nats/output.rs` | NATS output sink: ordered publish plus one `flush`; stamps the hop header. |
@@ -259,6 +259,6 @@ Observations:
 
 ## Test suite
 
-- Unit and integration tests live in `tests/unit/`, included as crate modules; `${cargo test --locked}` currently runs 130 tests and lists 8 ignored manual benchmarks.
+- Unit and integration tests live in `tests/unit/`, included as crate modules; `${cargo test --locked}` currently passes 187 tests on Windows and 198 on Unix (where the `#[cfg(unix)]` reload tests compile), and lists 8 ignored manual benchmarks.
 - Compose E2Es (see [`../docker/README.md`](../docker/README.md)): Pub/Sub integration, oversized request handling, RESP protocol/policies, TTL/groups/SIGHUP, hot-path latency (closed/open/mixed), and fault handling. The Pub/Sub integration, filter, oversize, RESP protocol/policies, fault and TTL/groups/SIGHUP stacks run the Rust drivers and proxies from `examples/e2e.rs` (built by `Dockerfile.e2e`) instead of Python.
 - `cargo fmt --all --check` and `cargo clippy --all-targets --locked -- -D warnings` are expected clean.

@@ -2,8 +2,10 @@
 //!
 //! This module defines the normalized message envelope and the two internal
 //! traits that concrete Redis and Core NATS adapters implement. No backend I/O
-//! lives here. The Redis input/output path predates this boundary and still
-//! does not route through it, so the items are allowed to be unused by Redis.
+//! lives here. The output side routes both backends through `OutputSink` (via
+//! `OutputConnection`); the input side keeps a dedicated loop per backend
+//! (`read_nats_input` here, `read_input` for Redis) because their stream and
+//! fan-in shapes differ, so some items here are unused by the Redis input.
 #![allow(dead_code)]
 
 use std::sync::Arc;

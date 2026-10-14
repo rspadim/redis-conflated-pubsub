@@ -249,7 +249,7 @@ async fn publish_chunk(
 ) -> std::result::Result<(), PublishStep> {
     // Stamp every forwarded message so a NATS input that also matches this
     // subject recognises it as a relay echo and drops it. The value is
-    // constant, so the headers are built once per chunk. Only `Relay-Hop` is
+    // constant, so the headers are built once per chunk. Only the hop header is
     // set: inbound application headers are not forwarded (documented in
     // DESIGN.md), which keeps the per-message wire size constant.
     let headers = hop_headers();
@@ -280,11 +280,11 @@ async fn publish_chunk(
     Ok(())
 }
 
-/// The headers a NATS output attaches to every forwarded message: exactly
-/// `Relay-Hop: 1`, nothing else. Application headers are intentionally not
-/// forwarded, which keeps the per-message wire size constant for the payload
-/// ceiling accounting. Extracted so the "only the hop header" invariant is
-/// pinned by a test.
+/// The headers a NATS output attaches to every forwarded message: exactly the
+/// hop header (`ConflatedPS-Hop: 1`), nothing else. Application headers are
+/// intentionally not forwarded, which keeps the per-message wire size constant
+/// for the payload ceiling accounting. Extracted so the "only the hop header"
+/// invariant is pinned by a test.
 pub(in crate::service) fn hop_headers() -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(NATS_HOP_HEADER, HeaderValue::from("1"));

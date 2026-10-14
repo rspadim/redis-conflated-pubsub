@@ -460,7 +460,7 @@ pub struct InputConfig {
     /// keeps its 0.2 fields and semantics unchanged.
     #[serde(default)]
     pub redis: Option<RedisConfig>,
-    /// Core NATS backend; not implemented by the runtime yet.
+    /// Core NATS backend. Exactly one of `redis`/`nats` must be present.
     #[serde(default)]
     pub nats: Option<NatsConfig>,
     #[schemars(length(min = 1))]
@@ -550,7 +550,7 @@ pub struct OutputConfig {
     /// Redis backend. Exactly one of `redis`/`nats` must be present.
     #[serde(default)]
     pub redis: Option<RedisConfig>,
-    /// Core NATS backend; not implemented by the runtime yet.
+    /// Core NATS backend. Exactly one of `redis`/`nats` must be present.
     #[serde(default)]
     pub nats: Option<NatsConfig>,
     #[serde(default)]

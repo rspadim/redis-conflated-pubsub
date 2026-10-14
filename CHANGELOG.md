@@ -1,12 +1,15 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 — 2026-10-14
 
 - Added protocol-neutral backend selection for 0.3: `input` and each output now take exactly one of `redis` or `nats`. Existing Redis configurations are unchanged, and `--check-config` plus the generated JSON Schema reject an endpoint with zero or two backends.
 - Added a Core NATS input and output backend (Core NATS Pub/Sub only, not JetStream): seed `servers` with a single-transport-per-list rule (`nats://`, `tls://`, `ws://`, `wss://`), connection `name`/`connect_timeout_ms`, optional `ignore_discovered_servers`, and `nats_subject` subscriptions that use native `*`/`>` wildcards (Redis globs are not translated). Output channel mapping uses the final mapped string directly as the publish subject.
-- Added NATS authentication variants `none` (default), `user_password` (`username` + `password_env`), `token` (`token_env`), `nkey` (`seed_file`), and `credentials_file` (`path` to a user JWT plus its NKey seed), with TLS/mTLS under `tls` (`root_cert_file` and paired `client_cert_file`/`client_key_file`). Secrets are always referenced by environment variable name or file path, never inlined in JSON.
-- Added the NATS-to-NATS loop guard: each NATS output stamps a `ConflatedPS-Hop` header on every forwarded message and the NATS input drops any message that already carries it, breaking output-to-input cycles; the guard keeps the payload byte-identical and records suppressed messages in the new `loop_suppressed_messages_total` status counter.
+- Added NATS authentication variants `none` (default), `user_password` (`username` + `password_env`), `token` (`token_env`), `nkey` (`seed_file`), and `credentials_file` (`path` to a user JWT plus its NKey seed), with TLS/mTLS under `tls` (`root_cert_file` and paired `client_cert_file`/`client_key_file`). Secrets are always referenced by environment variable name or file path, never inlined in JSON. A server URL that arrives with inline userinfo (for example from a spreadsheet-imported config) is parsed into the credential plan rather than rejected, and every URL written to a log line has its userinfo redacted first, including the empty-username and no-scheme forms.
+- Added the NATS-to-NATS loop guard: each NATS output stamps a `ConflatedPS-Hop` header on every forwarded message and the NATS input drops any message that already carries it, breaking output-to-input cycles; the guard keeps the payload byte-identical and records suppressed messages in the new `loop_suppressed_messages_total` status counter. The header is vendor-namespaced so it cannot collide with application headers; application headers are not forwarded.
+- Applied the oversized-message policy against the server-advertised NATS `max_payload` (minus the loop-guard header bytes) and preflight each chunk against it, so the relay never hands the client a batch the server would reject; a NATS chunk that cannot fit fails fast instead of silently dropping.
+- Added NATS connection lifecycle to status: `nats_client_connects_total`, `nats_client_disconnects_total` and `nats_client_slow_consumers_total`, and fail fast when a referenced secret environment variable or file is missing instead of connecting unauthenticated.
 - Documented that Core NATS provides no per-message acknowledgement or subscriber count: a NATS output reports `0` subscribers, and the `flush` that follows each batch only drains the client's local write buffer (it does not wait for the server), so it is not a delivery guarantee.
+- The static release binary grew about 47% versus 0.2 (the `async-nats`/TLS/WebSocket client stack). The bundle image and the Redis-only path are otherwise unchanged; a Redis-only deployment ships the same code path as before.
 
 ## 0.2.2 — 2026-10-08
 
