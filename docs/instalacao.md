@@ -42,10 +42,28 @@ registra o serviço com reinício automático em falha e, no fim, confirma se o 
 | `logs\` e `status.json` | dentro dessa pasta, por caminhos absolutos no `config.json` |
 | Menu Iniciar | validar a configuração, editar `config.json`, documentação, desinstalar |
 
-Instalação silenciosa: `/VERYSILENT /DIR="..."` usa as respostas padrão do wizard
-(Redis → Redis, serviço instalado e iniciado). As demais respostas **não** são
-parametrizáveis por linha de comando hoje — para mudá-las, rode o wizard ou edite o
-`config.json` depois.
+Instalação silenciosa, para deploy automatizado:
+
+```powershell
+.\ConflatedPubSubSetup-<versão>.exe /VERYSILENT /CONFIG=C:\relay\config.json /SERVICE=1 /SERVICESTART=auto
+```
+
+| Parâmetro | Significado |
+| --- | --- |
+| `/CONFIG=<arquivo>` | Usa uma configuração que já existe. Ela precisa existir: sem isso o instalador se recusa a começar, e nada é gerado. |
+| `/SERVICE=0\|1` | `1` (padrão) registra e inicia o serviço; `0` apenas copia os arquivos, para quem vai terminar à mão. |
+| `/SERVICESTART=auto\|delayed-auto\|demand` | Tipo de inicialização. Padrão `auto`, ou `demand` quando a tarefa "iniciar automaticamente" está desmarcada no wizard. |
+
+Sem `/CONFIG` a configuração é gerada com as respostas padrão do wizard (entrada
+Redis para saída Redis); para mudá-las, rode o wizard ou edite o `config.json`
+depois.
+
+Um valor inválido aborta antes de escrever qualquer coisa, e **nada é exibido** em
+modo silencioso — uma caixa de diálogo esperaria por um clique que nunca vem. O
+código de saída diferente de zero é o sinal, e `/LOG=<arquivo>` guarda o log do
+próprio Inno. Falhas depois de copiar os arquivos (o relay rejeitando a
+configuração, o serviço não subindo) abortam a instalação do mesmo jeito, em vez de
+mostrar uma caixa de mensagem.
 
 ### Credenciais
 

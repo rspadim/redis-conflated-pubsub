@@ -43,10 +43,27 @@ came up** — `sc start` alone would not prove that.
 | `logs\` and `status.json` | inside that directory, through absolute paths in `config.json` |
 | Start Menu | validate the configuration, edit `config.json`, documentation, uninstall |
 
-Silent install: `/VERYSILENT /DIR="..."` uses the wizard's default answers
-(Redis → Redis, service installed and started). The other answers are **not**
-settable from the command line today — to change them, run the wizard or edit
+Silent install, for a scripted deployment:
+
+```powershell
+.\ConflatedPubSubSetup-<version>.exe /VERYSILENT /CONFIG=C:\relay\config.json /SERVICE=1 /SERVICESTART=auto
+```
+
+| Parameter | Meaning |
+| --- | --- |
+| `/CONFIG=<file>` | Use a configuration that already exists. It must exist: otherwise the setup refuses to start and nothing is generated. |
+| `/SERVICE=0\|1` | `1` (default) registers and starts the service; `0` only copies the files, for an operator who will finish by hand. |
+| `/SERVICESTART=auto\|delayed-auto\|demand` | Startup type. Defaults to `auto`, or `demand` when the wizard's "start automatically" task is unchecked. |
+
+Without `/CONFIG` the configuration is generated from the wizard's default answers
+(Redis input to Redis output); to change those, run the wizard or edit
 `config.json` afterwards.
+
+An invalid value aborts before anything is written, and **nothing is shown** in
+silent mode — a dialog would wait for a click that never comes. The non-zero exit
+code is the signal, and `/LOG=<file>` keeps Inno's own log. Failures after the
+files are copied (the relay rejecting the configuration, the service refusing to
+start) abort the install the same way instead of showing a message box.
 
 ### Credentials
 

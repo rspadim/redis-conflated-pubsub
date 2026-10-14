@@ -4,6 +4,8 @@ A Rust relay that forwards Pub/Sub messages between Redis and Core NATS. The `in
 
 Current release: **v0.3.0**. [Download a platform binary](https://github.com/rspadim/redis-conflated-pubsub/releases) or see the [developer build instructions](src/README.md). The project site is at <https://rspadim.github.io/redis-conflated-pubsub/> (pt-BR).
 
+Windows ships an installer (`ConflatedPubSubSetup-<version>.exe`) that asks the configuration questions, registers the service and verifies it came up; Linux ships deb, rpm, apk and Arch packages built from the static musl binary. Both are on the release page, and the [installation page](https://rspadim.github.io/redis-conflated-pubsub/instalacao/) covers the paths, the service accounts and the unattended options.
+
 ## Quick start
 
 Save one of the configurations below as `config.json`, then validate and run the downloaded binary:

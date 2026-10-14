@@ -44,10 +44,28 @@ probaría.
 | `logs\` y `status.json` | dentro de esa carpeta, por rutas absolutas en `config.json` |
 | Menú Inicio | validar la configuración, editar `config.json`, documentación, desinstalar |
 
-Instalación silenciosa: `/VERYSILENT /DIR="..."` usa las respuestas
-predeterminadas del asistente (Redis → Redis, servicio instalado e iniciado). Las
-demás respuestas **no** se pueden pasar por línea de comandos hoy — para cambiarlas,
-usa el asistente o edita el `config.json` después.
+Instalación silenciosa, para despliegue automatizado:
+
+```powershell
+.\ConflatedPubSubSetup-<versión>.exe /VERYSILENT /CONFIG=C:\relay\config.json /SERVICE=1 /SERVICESTART=auto
+```
+
+| Parámetro | Significado |
+| --- | --- |
+| `/CONFIG=<archivo>` | Usa una configuración que ya existe. Debe existir: si no, el instalador se niega a empezar y no se genera nada. |
+| `/SERVICE=0\|1` | `1` (predeterminado) registra e inicia el servicio; `0` solo copia los archivos, para quien vaya a terminar a mano. |
+| `/SERVICESTART=auto\|delayed-auto\|demand` | Tipo de inicio. Predeterminado `auto`, o `demand` cuando la tarea "iniciar automáticamente" está desmarcada en el asistente. |
+
+Sin `/CONFIG` la configuración se genera con las respuestas predeterminadas del
+asistente (entrada Redis a salida Redis); para cambiarlas, usa el asistente o edita
+el `config.json` después.
+
+Un valor inválido aborta antes de escribir nada, y **no se muestra nada** en modo
+silencioso — un diálogo esperaría un clic que nunca llega. El código de salida
+distinto de cero es la señal, y `/LOG=<archivo>` guarda el log del propio Inno.
+Los fallos después de copiar los archivos (el relay rechazando la configuración, el
+servicio sin arrancar) abortan la instalación igual, en lugar de mostrar un cuadro
+de mensaje.
 
 ### Credenciales
 
