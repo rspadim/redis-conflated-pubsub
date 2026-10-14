@@ -91,3 +91,4 @@ FinishedNoConfig=No configuration was created and the service was not installed:
 BadServiceParam=/SERVICE accepts only 0 or 1, but got "%1".
 BadStartupParam=/SERVICESTART accepts only auto, delayed-auto or demand, but got "%1".
 ConfigRejected=The relay rejected this configuration:%n%n%1
+ServiceStopFailed=The relay's service could not be stopped:%n%n%1%n%nStop it and run the setup again.

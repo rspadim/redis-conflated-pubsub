@@ -52,18 +52,45 @@ Silent install, for a scripted deployment:
 | Parameter | Meaning |
 | --- | --- |
 | `/CONFIG=<file>` | Use a configuration that already exists. It must exist: otherwise the setup refuses to start and nothing is generated. |
-| `/SERVICE=0\|1` | `1` (default) registers and starts the service; `0` only copies the files, for an operator who will finish by hand. |
-| `/SERVICESTART=auto\|delayed-auto\|demand` | Startup type. Defaults to `auto`, or `demand` when the wizard's "start automatically" task is unchecked. |
+| `/SERVICE=0\|1` | `1` (the silent default) registers and starts the service; `0` only copies the files, for an operator who will finish by hand. The wizard asks through its tasks instead — note that Inno leaves a `checkedonce` task unchecked on a later installation. |
+| `/SERVICESTART=auto\|delayed-auto\|demand` | Startup type; `auto` is the silent default. In the wizard it is `auto` unless the "start automatically" task is unchecked. |
 
 Without `/CONFIG` the configuration is generated from the wizard's default answers
 (Redis input to Redis output); to change those, run the wizard or edit
 `config.json` afterwards.
 
 An invalid value aborts before anything is written, and **nothing is shown** in
-silent mode — a dialog would wait for a click that never comes. The non-zero exit
-code is the signal, and `/LOG=<file>` keeps Inno's own log. Failures after the
-files are copied (the relay rejecting the configuration, the service refusing to
-start) abort the install the same way instead of showing a message box.
+silent mode — a dialog would wait for a click that never comes. `/LOG=<file>`
+keeps Inno's own log.
+
+The relay implements the Windows service protocol, so the service control manager
+starts, stops and restarts it on failure like any other service. The setup confirms
+that the relay came up, not merely that the service accepted the start request.
+
+### What a scripted install can check
+
+| Exit code | Meaning |
+| --- | --- |
+| `0` | Everything the setup was asked to do was done. |
+| `1` | The parameters were rejected, or `/CONFIG` does not exist: nothing was written. |
+| `9` | A step **after** the files were copied failed. Inno returns `0` for a script failure (verified: `RaiseException` and `Abort()` from `ssPostInstall` both leave the exit code at `0`), so the setup reports this one through `GetCustomSetupExitCode`. |
+| `5`, `7`, `8` | Inno's own codes: cancelled, could not proceed, restart needed. |
+
+`{app}\install-report.txt` says which step failed, one line per step:
+
+```
+configuration: C:\Program Files\Conflated Pub/Sub\config.json
+configuration: generated
+configuration: accepted by the relay
+service: redis-conflated-pubsub (auto)
+service: installed
+service: started
+relay: running
+result: ok
+```
+
+A silent uninstall keeps `config.json`: nobody is there to answer, and deleting it
+is the destructive answer.
 
 ### Credentials
 

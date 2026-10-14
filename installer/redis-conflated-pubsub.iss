@@ -26,9 +26,13 @@
 ;   /SERVICESTART=auto|delayed-auto|demand
 ;
 ; An invalid value aborts before anything is written, and nothing is shown in
-; silent mode: the non-zero exit code is the signal. Without /CONFIG the
-; configuration is generated from the wizard defaults; to change those answers,
-; run the wizard or edit config.json afterwards.
+; silent mode: the non-zero exit code is the signal. Failures after the files are
+; copied (the relay rejecting the configuration, the service refusing to install or
+; start, the relay not coming up) also show nothing: they set the exit code to 9
+; through GetCustomSetupExitCode - Inno itself returns 0 for a script failure - and
+; land in {app}\install-report.txt. Without /CONFIG the configuration is generated
+; from the wizard defaults; to change those answers, run the wizard or edit
+; config.json afterwards.
 
 #define AppName "Conflated Pub/Sub"
 #define AppExeName "redis-conflated-pubsub"
@@ -176,6 +180,8 @@ var
   SilentServiceSet: Boolean;
   SilentInstallService: Boolean;
   SilentStartupType: String;
+  PostInstallFailure: String;
+  PostInstallReport: String;
 
 { --- mode helpers ------------------------------------------------------- }
 { Declared before the functions that use them: Pascal Script resolves
@@ -185,7 +191,9 @@ var
   before the pages exist, and the first entry is the default. }
 function ModeIndex(): Integer;
 begin
-  if ModePage = nil then
+  { A silent install reaches this before anything has been selected, and an option
+    page reports -1 until something is: both mean the default mode. }
+  if (ModePage = nil) or (ModePage.SelectedValueIndex < 0) then
     Result := 0
   else
     Result := ModePage.SelectedValueIndex;
@@ -317,10 +325,16 @@ begin
     Result := ExpandConstant('{app}\config.json');
 end;
 
+{ The tasks belong to the wizard: on a later installation Inno's "checkedonce"
+  leaves them unchecked, so reading them in silent mode would make an unattended
+  upgrade silently skip the service. Silent mode has its own documented defaults,
+  and /SERVICE and /SERVICESTART override them. }
 function ShouldInstallService(): Boolean;
 begin
   if SilentServiceSet then
     Result := SilentInstallService
+  else if WizardSilent() then
+    Result := True
   else
     Result := WizardIsTaskSelected('service');
 end;
@@ -329,6 +343,8 @@ function ServiceStartupType(): String;
 begin
   if SilentStartupType <> '' then
     Result := SilentStartupType
+  else if WizardSilent() then
+    Result := 'auto'
   else if WizardIsTaskSelected('serviceauto') then
     Result := 'auto'
   else
@@ -347,10 +363,41 @@ end;
 
 procedure FailOrReport(const Message: String);
 begin
-  if WizardSilent() then
-    RaiseException(Message)
-  else
+  { Records a failure after the files are copied. A dialog in an unattended install
+    would wait for a click that never comes, so in silent mode nothing is shown:
+    the caller stops, the report written next to the installation says what
+    happened, and GetCustomSetupExitCode turns it into a non-zero exit code. Inno
+    returns 0 for a script failure - verified: both RaiseException and Abort() from
+    ssPostInstall leave the exit code at 0 - so that hook is the only way to fail
+    loudly. }
+  if PostInstallFailure = '' then
+    PostInstallFailure := Message;
+  if not WizardSilent() then
     SuppressibleMsgBox(Message, mbError, MB_OK, IDOK);
+end;
+
+function GetCustomSetupExitCode(): Integer;
+begin
+  if PostInstallFailure <> '' then
+    Result := 9
+  else
+    Result := 0;
+end;
+
+procedure ReportLine(const Line: String);
+begin
+  PostInstallReport := PostInstallReport + Line + #13#10;
+end;
+
+{ The exit code cannot carry a sentence and a silent install has no dialog to
+  read, so the outcome of every step lands in a file next to the installation. }
+procedure FlushReport();
+begin
+  if PostInstallFailure <> '' then
+    ReportLine('result: failed - ' + PostInstallFailure)
+  else
+    ReportLine('result: ok');
+  SaveStringToFile(ExpandConstant('{app}\install-report.txt'), PostInstallReport, False);
 end;
 
 function PowerShellExe(): String;
@@ -668,6 +715,12 @@ var
   IsDraft: Boolean;
 begin
   Result := True;
+  { A silent install does not walk the pages the way a user does: this check is a
+    conversation (it offers to install anyway) and a page that refuses to be left
+    would keep an unattended install waiting forever. The file the service will
+    actually use is checked after it is written instead. }
+  if WizardSilent() then
+    exit;
   TargetPath := ConfigPage.Values[0];
 
   if TargetPath = '' then
@@ -774,8 +827,15 @@ begin
 
   Params := '-Action stop -ReportFile "' + ReportPath + '"';
   DeleteFile(ReportPath);
-  if RunScript(ScriptPath, Params, ExitCode) and (ExitCode = 0) then
-    ServiceWasStopped := True;
+  if (not RunScript(ScriptPath, Params, ExitCode)) or (ExitCode <> 0) then
+  begin
+    { Without the stop the copy is deferred to the next reboot and the service
+      keeps executing the old binary while the setup reports success, so this
+      stops the installation instead of warning about it. }
+    Result := FmtMessage(CustomMessage('ServiceStopFailed'), [ReadTextFile(ReportPath)]);
+    exit;
+  end;
+  ServiceWasStopped := True;
 end;
 
 procedure InitializeWizard();
@@ -793,6 +853,9 @@ begin
   ModePage.Add(CustomMessage('ModeNatsRedis'));
   ModePage.Add(CustomMessage('ModeExisting'));
   ModePage.Add(CustomMessage('ModeInstallOnly'));
+  { An option page reports -1 until something is selected, and a silent install
+    never selects anything: the first entry has to be the explicit default. }
+  ModePage.SelectedValueIndex := 0;
 
   RedisInPage := CreateInputQueryPage(ModePage.ID,
     CustomMessage('PageInputTitle'), '', CustomMessage('PageInputDesc'));
@@ -1006,6 +1069,8 @@ begin
   ReportPath := ExpandConstant('{tmp}\postinstall-report.txt');
   ExePath := ExpandConstant('{app}\{#AppExeName}.exe');
   ConfigPath := EffectiveConfigPath();
+  PostInstallFailure := '';
+  PostInstallReport := '';
 
   { config.json from the wizard answers, with absolute paths. An existing file is
     kept, which is what an upgrade wants; the draft was already validated by the
@@ -1017,8 +1082,12 @@ begin
     { No configuration was asked for, so there is nothing for a service to run:
       leave the examples and the helper scripts in place and let the operator
       finish by hand. }
+    ReportLine('mode: files only, no configuration and no service');
+    FlushReport();
     exit;
   end;
+
+  ReportLine('configuration: ' + ConfigPath);
 
   if ShouldGenerateConfig() then
   begin
@@ -1028,8 +1097,13 @@ begin
       if Report = '' then
         Report := 'New-Config.ps1 produced no output';
       FailOrReport(FmtMessage(CustomMessage('GenerateFailed'), [Report]));
+      FlushReport();
+      exit;
     end;
-  end;
+    ReportLine('configuration: generated');
+  end
+  else
+    ReportLine('configuration: kept');
 
   { An unattended install never went through the wizard's validation, so the file
     the service is about to use is checked here instead. }
@@ -1040,11 +1114,18 @@ begin
               ' -ReportFile ' + Quote(ReportPath);
     DeleteFile(ReportPath);
     if (not RunScript(ScriptPath, Params, ExitCode)) or (ExitCode <> 0) then
-      FailOrReport(FmtMessage(CustomMessage('ConfigRejected'), [ReadTextFile(ReportPath)]));
+    begin
+      Report := ReadTextFile(ReportPath);
+      FailOrReport(FmtMessage(CustomMessage('ConfigRejected'), [Report]));
+      FlushReport();
+      exit;
+    end;
+    ReportLine('configuration: accepted by the relay');
   end;
 
   if not ShouldInstallService() then
   begin
+    ReportLine('service: not requested');
     { A service stopped for the upgrade is still registered, so put the machine
       back the way we found it instead of silently leaving the relay down. }
     if ServiceWasStopped then
@@ -1054,10 +1135,12 @@ begin
       DeleteFile(ReportPath);
       RunScript(ScriptPath, Params, ExitCode);
     end;
+    FlushReport();
     exit;
   end;
 
   StartupType := ServiceStartupType();
+  ReportLine('service: {#ServiceName} (' + StartupType + ')');
 
   ScriptPath := ExpandConstant('{app}\scripts\service.ps1');
   Params := '-Action install -ExePath ' + Quote(ExePath) +
@@ -1069,16 +1152,26 @@ begin
   if (not RunScript(ScriptPath, Params, ExitCode)) or (ExitCode <> 0) then
   begin
     Report := ReadTextFile(ReportPath);
+    if Report = '' then
+      Report := 'service.ps1 produced no report';
     FailOrReport(FmtMessage(CustomMessage('ServiceInstallFailed'), [Report]));
+    FlushReport();
+    exit;
   end;
+  ReportLine('service: installed');
 
   Params := '-Action start -ReportFile "' + ReportPath + '"';
   DeleteFile(ReportPath);
   if (not RunScript(ScriptPath, Params, ExitCode)) or (ExitCode <> 0) then
   begin
     Report := ReadTextFile(ReportPath);
+    if Report = '' then
+      Report := 'service.ps1 produced no report';
     FailOrReport(FmtMessage(CustomMessage('ServiceStartFailed'), [Report]));
+    FlushReport();
+    exit;
   end;
+  ReportLine('service: started');
 
   ServiceWasInstalled := True;
 
@@ -1086,19 +1179,33 @@ begin
     injected when the service starts below — and are visible to nothing else on
     the machine. }
   if not StoreSecrets('{#ServiceName}') then
+  begin
     FailOrReport(FmtMessage(CustomMessage('SecretsFailed'), [SecretsMessage]));
+    FlushReport();
+    exit;
+  end;
 
   { `sc start` only proves that the service manager accepted the request. Ask the
     relay whether it actually came up: a service that exits during startup would
-    otherwise be reported as a success. }
+    otherwise be reported as a success. The service is registered either way, so
+    this is a report and an exit code, not a rollback. }
   ScriptPath := ExpandConstant('{app}\scripts\verify-service.ps1');
   Params := '-ConfigPath ' + Quote(ConfigPath) +
             ' -TimeoutSeconds 20 -ReportFile ' + Quote(ReportPath);
   DeleteFile(ReportPath);
   if RunScript(ScriptPath, Params, ExitCode) and (ExitCode = 0) then
-    ServiceVerification := CustomMessage('ServiceAlive')
+  begin
+    ServiceVerification := CustomMessage('ServiceAlive');
+    ReportLine('relay: running');
+  end
   else
+  begin
     ServiceVerification := FmtMessage(CustomMessage('ServiceNotServing'), ['20']);
+    PostInstallFailure := ServiceVerification;
+    ReportLine('relay: did not report itself as running within 20s');
+  end;
+
+  FlushReport();
 end;
 
 procedure CurPageChanged(CurPageID: Integer);
@@ -1139,7 +1246,12 @@ end;
 function InitializeUninstall(): Boolean;
 begin
   ServiceWasInstalled := False;
-  KeepConfig := MsgBox(CustomMessage('UninstKeepConfig'), mbConfirmation, MB_YESNO) = IDYES;
+  { A silent uninstall has nobody to answer, and deleting the configuration is the
+    destructive answer: keep it unless asked otherwise. }
+  if UninstallSilent() then
+    KeepConfig := True
+  else
+    KeepConfig := MsgBox(CustomMessage('UninstKeepConfig'), mbConfirmation, MB_YESNO) = IDYES;
   Result := True;
 end;
 
@@ -1164,7 +1276,7 @@ begin
       Report := ReadTextFile(ReportPath);
       if Report = '' then
         Report := 'service.ps1 could not be executed';
-      MsgBox(FmtMessage(CustomMessage('UninstServiceFailed'), [Report]), mbError, MB_OK);
+      SuppressibleMsgBox(FmtMessage(CustomMessage('UninstServiceFailed'), [Report]), mbError, MB_OK, IDOK);
     end;
     exit;
   end;

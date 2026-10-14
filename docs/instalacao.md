@@ -51,19 +51,45 @@ Instalação silenciosa, para deploy automatizado:
 | Parâmetro | Significado |
 | --- | --- |
 | `/CONFIG=<arquivo>` | Usa uma configuração que já existe. Ela precisa existir: sem isso o instalador se recusa a começar, e nada é gerado. |
-| `/SERVICE=0\|1` | `1` (padrão) registra e inicia o serviço; `0` apenas copia os arquivos, para quem vai terminar à mão. |
-| `/SERVICESTART=auto\|delayed-auto\|demand` | Tipo de inicialização. Padrão `auto`, ou `demand` quando a tarefa "iniciar automaticamente" está desmarcada no wizard. |
+| `/SERVICE=0\|1` | `1` (padrão no modo silencioso) registra e inicia o serviço; `0` apenas copia os arquivos, para quem vai terminar à mão. No wizard quem decide são as tarefas — e atenção: o Inno deixa uma tarefa `checkedonce` desmarcada numa instalação posterior. |
+| `/SERVICESTART=auto\|delayed-auto\|demand` | Tipo de inicialização; `auto` é o padrão no modo silencioso. No wizard é `auto`, a menos que a tarefa "iniciar automaticamente" esteja desmarcada. |
 
 Sem `/CONFIG` a configuração é gerada com as respostas padrão do wizard (entrada
 Redis para saída Redis); para mudá-las, rode o wizard ou edite o `config.json`
 depois.
 
 Um valor inválido aborta antes de escrever qualquer coisa, e **nada é exibido** em
-modo silencioso — uma caixa de diálogo esperaria por um clique que nunca vem. O
-código de saída diferente de zero é o sinal, e `/LOG=<arquivo>` guarda o log do
-próprio Inno. Falhas depois de copiar os arquivos (o relay rejeitando a
-configuração, o serviço não subindo) abortam a instalação do mesmo jeito, em vez de
-mostrar uma caixa de mensagem.
+modo silencioso — uma caixa de diálogo esperaria por um clique que nunca vem.
+`/LOG=<arquivo>` guarda o log do próprio Inno.
+
+O relay implementa o protocolo de serviço do Windows, então o gerenciador de
+serviços consegue iniciá-lo, pará-lo e reiniciá-lo em falha. O instalador confirma
+que o relay subiu, não apenas que o serviço aceitou o pedido de início.
+
+### O que um deploy automatizado consegue checar
+
+| Código de saída | Significado |
+| --- | --- |
+| `0` | Tudo o que o instalador foi chamado a fazer foi feito. |
+| `1` | Os parâmetros foram rejeitados, ou o `/CONFIG` não existe: nada foi escrito. |
+| `9` | Uma etapa **depois** da cópia dos arquivos falhou. O Inno devolve `0` para falha de script (verificado: `RaiseException` e `Abort()` em `ssPostInstall` deixam o código em `0`), então o instalador reporta essa pelo `GetCustomSetupExitCode`. |
+| `5`, `7`, `8` | Códigos do próprio Inno: cancelado, não foi possível prosseguir, precisa reiniciar. |
+
+O `{app}\install-report.txt` diz qual etapa falhou, uma linha por etapa:
+
+```
+configuration: C:\Program Files\Conflated Pub/Sub\config.json
+configuration: generated
+configuration: accepted by the relay
+service: redis-conflated-pubsub (auto)
+service: installed
+service: started
+relay: running
+result: ok
+```
+
+Uma desinstalação silenciosa mantém o `config.json`: não há ninguém para responder,
+e apagá-lo é a resposta destrutiva.
 
 ### Credenciais
 

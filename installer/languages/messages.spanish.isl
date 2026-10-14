@@ -66,6 +66,7 @@ FinishedNoConfig=No se creó ninguna configuración y el servicio no se instaló
 BadServiceParam=/SERVICE acepta solo 0 o 1, pero llegó "%1".
 BadStartupParam=/SERVICESTART acepta solo auto, delayed-auto o demand, pero llegó "%1".
 ConfigRejected=El relay rechazó esta configuración:%n%n%1
+ServiceStopFailed=El servicio del relay no se pudo detener:%n%n%1%n%nDetenlo y vuelve a ejecutar el instalador.
 ConfigPathLabel=Archivo de configuración
 ValidateOk=La configuración es válida.
 ValidateFailed=El relay rechazó esta configuración:%n%n%1%n%n¿Instalar de todos modos? El servicio no arrancará hasta que se corrija el archivo.
