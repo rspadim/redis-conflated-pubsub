@@ -66,33 +66,44 @@ O conteúdo pt-BR fica em `docs/*.md` e é o idioma padrão, servido na raiz. O
 deploy acontece pelo workflow `.github/workflows/docs.yml` a cada push para
 `main`, publicando em GitHub Pages.
 
-### Adicionar um idioma
+### Ajude a traduzir
+
+O site é publicado em português (padrão, na raiz), inglês (`/en/`) e espanhol
+(`/es/`). Outros idiomas são bem-vindos — e correções nos existentes também.
 
 Os arquivos são resolvidos pela convenção de sufixo do plugin: um arquivo
 `docs/<pagina>.<locale>.md` substitui `docs/<pagina>.md` naquele idioma. Páginas
-sem tradução caem para o idioma padrão (`fallback_to_default: true`).
+sem tradução caem para o idioma padrão (`fallback_to_default: true`), então a
+tradução pode entrar página a página.
 
-1. Crie a tradução ao lado do original, por exemplo
-   `docs/index.en.md` e `docs/inicio-rapido.en.md`.
-2. Descomente (ou acrescente) o bloco do idioma em `mkdocs.yml`:
+1. Abra uma
+   [issue de tradução](https://github.com/rspadim/redis-conflated-pubsub/issues/new?template=translation.yml)
+   (ou comente em uma existente) para o idioma ficar registrado.
+2. Crie a tradução ao lado do original — por exemplo `docs/index.de.md` e
+   `docs/inicio-rapido.de.md` para alemão (`de`).
+3. Acrescente o bloco do idioma em `mkdocs.yml`:
 
    ```yaml
    plugins:
      - i18n:
          languages:
-           - locale: pt-BR
-             name: Português (Brasil)
-             default: true
+           - locale: de
+             name: Deutsch
              build: true
-           - locale: en
-             name: English
-             build: true
+             nav_translations:
+               Início: Startseite
+               Início rápido: Schnellstart
    ```
 
-3. Rode `mkdocs build --strict` e confira o seletor de idiomas no topo.
+   `nav_translations` traduz os títulos do menu; `admonition_translations` faz o
+   mesmo com os títulos de avisos. O novo idioma é servido em `/de/`.
 
-Use `nav_translations` se quiser traduzir os títulos do menu, e `admonition_translations`
-para os títulos de avisos. O idioma `en` é servido em `/en/`.
+4. Rode `mkdocs build --strict` e confira o seletor de idiomas no topo.
+
+O que **nunca** é traduzido: nomes de campos JSON, comandos de shell, nomes de
+métricas, caminhos de arquivo, mensagens de erro, versões e números. Mantenha a
+ordem das seções da fonte em pt-BR e ligue as páginas pelo caminho **sem** o
+sufixo de idioma (`nats.md`, nunca `nats.de.md`).
 
 !!! note "Renomear o repositório"
     Ao trocar o nome do repositório, atualize `site_url`, `repo_url`, `repo_name`

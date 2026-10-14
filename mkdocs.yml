@@ -5,9 +5,10 @@
 #   mkdocs serve          # http://127.0.0.1:8000
 #   mkdocs build --strict # validação usada no CI
 #
-# Idioma: o conteúdo em `docs/*.md` é escrito em pt-BR (idioma padrão, servido na
-# raiz). Para habilitar outro idioma, adicione os arquivos `*.en.md` e descomente
-# o bloco `en` em `plugins.i18n.languages` (veja docs/desenvolvimento.md).
+# Idioma: o conteúdo padrão é escrito em pt-BR em `docs/*.md` e servido na raiz;
+# a tradução inglesa fica em `docs/*.en.md` e é servida em `/en/`. Para um idioma
+# novo, crie os `docs/<pagina>.<locale>.md` e adicione o bloco em
+# `plugins.i18n.languages` (veja docs/desenvolvimento.md).
 #
 # Ao renomear o repositório, atualize `site_url`, `repo_url`, `repo_name` e o
 # `edit_uri` aqui.
@@ -81,10 +82,38 @@ plugins:
           name: Português (Brasil)
           default: true
           build: true
-        # Segundo idioma: crie docs/<pagina>.en.md e habilite o bloco abaixo.
-        # - locale: en
-        #   name: English
-        #   build: true
+        - locale: en
+          name: English
+          build: true
+          nav_translations:
+            Início: Home
+            Início rápido: Quick start
+            Configuração: Configuration
+            Backend NATS: NATS backend
+            Docker e testes: Docker and tests
+            Operação e monitoramento: Operations and monitoring
+            Arquitetura: Architecture
+            Desenvolvimento: Development
+            Histórico de mudanças: Changelog
+        - locale: es
+          name: Español
+          build: true
+          nav_translations:
+            Início: Inicio
+            Início rápido: Inicio rápido
+            Configuração: Configuración
+            Backend NATS: Backend NATS
+            Docker e testes: Docker y pruebas
+            Operação e monitoramento: Operación y monitoreo
+            Arquitetura: Arquitectura
+            Desenvolvimento: Desarrollo
+            Histórico de mudanças: Historial de cambios
+        # Entrada extra no seletor de idiomas: convite para contribuir com
+        # traduções, apontando para o issue form do GitHub.
+        - locale: "null"
+          name: "🌍 Help translate"
+          build: false
+          fixed_link: "https://github.com/rspadim/redis-conflated-pubsub/issues/new?template=translation.yml"
 
 markdown_extensions:
   - admonition

@@ -84,3 +84,10 @@ payload (22,57% menos)**. Os números dependem da carga. Detalhes e ressalvas em
     Apenas **Pub/Sub efêmero**. JetStream (persistência, ack, replay durável) e
     Redis Streams estão **permanentemente fora de escopo**: o contrato do relay é
     de Pub/Sub sem replay.
+
+!!! tip "Traduções são bem-vindas"
+    Este site é publicado em português, inglês e espanhol. Se você é nativo de
+    outro idioma — ou achou um erro em um destes — abra uma
+    [issue de tradução](https://github.com/rspadim/redis-conflated-pubsub/issues/new?template=translation.yml)
+    e mande as páginas como pull request. As convenções estão em
+    [Desenvolvimento](desenvolvimento.md#ajude-a-traduzir).
