@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tokio::time;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use config::{AppConfig, NatsConfig, RedisConfig};
 #[cfg(unix)]
@@ -103,19 +103,37 @@ fn runtime_worker_name() -> String {
     )
 }
 
+/// Read-only Redis commands the probe tries, in order.
+///
+/// The installer runs this against a server the user typed in, which often
+/// belongs to somebody else, so the probe must never write, publish or create
+/// anything: `DBSIZE` and `PUBSUB CHANNELS` are reads (the second is the
+/// category the relay's input actually uses), and `PING` is the last resort.
+///
+/// A ladder, and not `PING` alone, because "did the server answer" and "was the
+/// login accepted" are the only questions a probe may answer, and because a
+/// single command can be unavailable for reasons that say nothing about the
+/// installation: a server that fails its background save answers with
+/// `-MISCONF` while still serving every read (`stop-writes-on-bgsave-error`),
+/// and a read-only ACL user is denied `PING` (`@connection`) but allowed
+/// `DBSIZE` (`@read`). A permission denial is *not* a failure here - see
+/// [`probe_redis`].
+const REDIS_PROBE_COMMANDS: &[&[&str]] = &[&["DBSIZE"], &["PUBSUB", "CHANNELS"], &["PING"]];
+
 /// Connects to every configured backend and exits, so the installer can prove a
 /// host/password/TLS setting before anything is installed or the service is
 /// started. It reuses the very client configuration the relay uses
 /// ([`RedisConfig::client`] and the NATS connection plan), never a parallel
 /// implementation: a probe that disagreed with the runtime would be worse than
-/// none. Read-only - it opens a connection (and, for Redis, a `PING`) and drops
-/// it; nothing is published and no key is touched.
+/// none. Read-only - it opens a connection (and, for Redis, sends one of the
+/// [`REDIS_PROBE_COMMANDS`] reads) and drops it; nothing is published, no key is
+/// touched and no NATS object is created.
 async fn test_connection(config: &AppConfig) -> Result<()> {
     let mut failures = 0usize;
 
     // Input first: the relay cannot deliver anything without it.
     if let Some(redis) = &config.input.redis {
-        match ping_redis(redis).await {
+        match probe_redis(redis).await {
             Ok(()) => println!("input redis  {}:{}  OK", redis.host, redis.port),
             Err(error) => {
                 failures += 1;
@@ -135,7 +153,7 @@ async fn test_connection(config: &AppConfig) -> Result<()> {
 
     for (name, output) in &config.outputs {
         if let Some(redis) = &output.redis {
-            match ping_redis(redis).await {
+            match probe_redis(redis).await {
                 Ok(()) => println!("output {name}  {}:{}  OK", redis.host, redis.port),
                 Err(error) => {
                     failures += 1;
@@ -169,21 +187,107 @@ async fn test_connection(config: &AppConfig) -> Result<()> {
 }
 
 /// Opens (and immediately drops) a Redis connection, proving the address,
-/// credentials, TLS and database selection. `PING` is the smallest command that
-/// forces the server to answer, so an authentication failure surfaces here
-/// instead of at first publish.
-async fn ping_redis(config: &RedisConfig) -> Result<()> {
+/// credentials, TLS and database selection with a READ.
+///
+/// The verdict is "connected and authenticated", never "allowed to run this
+/// particular command": per-command authorization belongs to whoever issued the
+/// credentials, so a `NOPERM`, `READONLY` or `MISCONF` reply still proves the
+/// probe reached a server that accepted the login. Only a failure to connect or
+/// a rejected login fails the probe.
+async fn probe_redis(config: &RedisConfig) -> Result<()> {
     let client = config.client()?;
-    let connection = time::timeout(config.connect_timeout(), client.get_multiplexed_async_connection())
-        .await
-        .context("timed out connecting")?
-        .context("could not connect")?;
-    let mut connection = connection;
-    redis::cmd("PING")
-        .query_async::<String>(&mut connection)
-        .await
-        .context("PING failed")?;
-    Ok(())
+    let connection = time::timeout(
+        config.connect_timeout(),
+        client.get_multiplexed_async_connection(),
+    )
+    .await
+    .context("timed out connecting")?;
+    let mut connection = match connection {
+        Ok(connection) => connection,
+        // The handshake (AUTH, and SELECT for a non-zero database) is where a
+        // rejected login surfaces, so it has to be classified here too: without
+        // this a wrong password would be reported as an unreachable server and
+        // the installer would show the wrong advice.
+        Err(error) if is_auth_failure(&error) => return Err(authentication_error(&error)),
+        Err(error) => bail!("could not connect: {error}"),
+    };
+
+    // The handshake was accepted; the reads below prove the server still
+    // answers on this connection.
+    let mut last_error: Option<redis::RedisError> = None;
+    for command in REDIS_PROBE_COMMANDS {
+        let mut cmd = redis::cmd(command[0]);
+        for argument in &command[1..] {
+            cmd.arg(*argument);
+        }
+        match cmd.query_async::<redis::Value>(&mut connection).await {
+            Ok(_) => return Ok(()),
+            Err(error) => {
+                if is_auth_failure(&error) {
+                    return Err(authentication_error(&error));
+                }
+                if is_server_reply(&error) {
+                    // The server answered and the connection handshake (AUTH and
+                    // SELECT) was accepted; it only refused this command. A
+                    // denied command says nothing about the installation, so it
+                    // is not the installer's verdict to make.
+                    return Ok(());
+                }
+                // Connection-level failure (I/O, protocol): try the next read
+                // once, then report the last reason.
+                last_error = Some(error);
+            }
+        }
+    }
+
+    match last_error {
+        Some(error) => bail!("the server did not answer a read: {error}"),
+        None => bail!("the server did not answer a read"),
+    }
+}
+
+/// True when the server rejected the credentials themselves, which is the one
+/// answer a probe must report as a failure.
+fn is_auth_failure(error: &redis::RedisError) -> bool {
+    if error.kind() == redis::ErrorKind::AuthenticationFailed {
+        return true;
+    }
+    if matches!(error.code(), Some("NOAUTH" | "WRONGPASS")) {
+        return true;
+    }
+    // A SELECT against a server that demands a login is reported by the client
+    // as a database-switch failure whose detail says the authentication is
+    // missing; the kind alone would call that an unreachable server.
+    error.detail().is_some_and(|detail| {
+        let detail = detail.to_ascii_lowercase();
+        detail.contains("authentication required")
+            || detail.contains("noauth")
+            || detail.contains("invalid password")
+            || detail.contains("wrongpass")
+    })
+}
+
+/// One clean line for a rejected login. `RedisError`'s own source chain repeats
+/// the same detail, which made the installer's report carry it twice.
+fn authentication_error(error: &redis::RedisError) -> anyhow::Error {
+    let reason = error
+        .detail()
+        .unwrap_or("the server rejected the credentials");
+    anyhow::anyhow!("authentication failed: {reason}")
+}
+
+/// True when the server itself answered with an error (`-MISCONF`, `-NOPERM`,
+/// `-READONLY`, `-LOADING`, `-ERR ...`). That is proof of a live, authenticated
+/// connection: the login was accepted at handshake time, and per-command
+/// authorization belongs to whoever issued the credentials. The cases this
+/// covers are real - a server with `stop-writes-on-bgsave-error yes` answers
+/// `PING` with `-MISCONF` while serving every read, and a read-only ACL user is
+/// denied a command it does not need.
+fn is_server_reply(error: &redis::RedisError) -> bool {
+    matches!(
+        error.kind(),
+        redis::ErrorKind::Extension | redis::ErrorKind::Server(_)
+    )
 }
 
 /// Opens (and immediately drops) a NATS connection using the relay's own
@@ -321,3 +425,7 @@ async fn run(service_stop: Option<tokio::sync::watch::Receiver<bool>>) -> Result
 #[cfg(test)]
 #[path = "../tests/unit/cli_help.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../tests/unit/probe_read_only.rs"]
+mod probe_read_only_tests;

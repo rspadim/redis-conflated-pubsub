@@ -861,7 +861,10 @@ end;
   therefore get a button that runs the relay's own --test-connection against a
   DRAFT of the configuration the wizard would write: the same binary, the same
   client, the same credentials resolution - so the probe cannot disagree with
-  what the service will do at startup. Read-only: it connects and drops. }
+  what the service will do at startup. Read-only: it connects and drops, sending
+  only reads (never a write or a PUBLISH), and it reports the server as OK when
+  the connection and the login were accepted even if the user's ACL denies the
+  specific command. }
 
 { Runs the relay's --test-connection on a draft built from the current answers.
   Returns the binary's exit code (0 = every backend answered), or 8 when there
@@ -942,7 +945,10 @@ begin
   else
     { Exit code 1 means "a backend did not answer"; the relay's report says
       which reason, so the page can name it instead of a bare "failed". }
-    if Pos('authenticationfailed', ProbeReport()) > 0 then
+    if (Pos('authenticationfailed', ProbeReport()) > 0) or
+       (Pos('authentication failed', ProbeReport()) > 0) or
+       (Pos('noauth', ProbeReport()) > 0) or
+       (Pos('wrongpass', ProbeReport()) > 0) then
       Result := CustomMessage('ProbeAuthFailed')
     else if (Pos('timed out', ProbeReport()) > 0) or
             (Pos('timeout', ProbeReport()) > 0) then

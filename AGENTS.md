@@ -91,10 +91,14 @@ Setup, PowerShell helpers), and all of it is reachable from PowerShell:
   connection" button runs `redis-conflated-pubsub --test-connection` against a
   draft of the configuration it would write (`ProbeEndpoints` in the `.iss`).
   That flag validates the configuration, then connects to every backend with the
-  runtime's own client configuration (Redis: connect + `PING`; NATS: the full
-  connection plan), prints one line per backend and exits non-zero when any of
-  them failed. It is read-only. Do not replace it with a PowerShell/socket
-  probe: reachability says nothing about credentials, TLS or a connection-string
-  the client rejects, and those are the cases that actually fail. Also do not
+  runtime's own client configuration (Redis: connect + a read ladder,
+  `DBSIZE`/`PUBSUB CHANNELS`/`PING`; NATS: the full connection plan), prints one
+  line per backend and exits non-zero when any of them failed. The verdict is
+  "connected and authenticated", not "allowed to run this command": a
+  `-MISCONF`/`-NOPERM`/`-READONLY` reply proves the login worked and does not
+  fail the probe. It is read-only - never a write, a `PUBLISH` or a NATS object.
+  Do not replace it with a PowerShell/socket probe: reachability says nothing
+  about credentials, TLS or a connection-string the client rejects, and those
+  are the cases that actually fail. Also do not
   make `--check-config` connect - it is documented and tested as a pure
   validation that returns before dialling.
