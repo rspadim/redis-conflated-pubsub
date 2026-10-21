@@ -20,10 +20,10 @@ Cada release publica pacotes para as quatro famílias, todos gerados com o
 [nFPM](https://nfpm.goreleaser.com/) a partir do mesmo binário estático (musl):
 
 ```sh
-sudo apt install ./redis-conflated-pubsub_0.3.1-1_amd64.deb                     # Debian/Ubuntu
-sudo dnf install ./redis-conflated-pubsub-0.3.1-1.x86_64.rpm                    # RHEL/Fedora/SUSE
-sudo apk add --allow-untrusted ./redis-conflated-pubsub_0.3.1-r1_x86_64.apk     # Alpine
-sudo pacman -U redis-conflated-pubsub-0.3.1-1-x86_64.pkg.tar.zst                # Arch
+sudo apt install ./redis-conflated-pubsub_0.4.0-1_amd64.deb                     # Debian/Ubuntu
+sudo dnf install ./redis-conflated-pubsub-0.4.0-1.x86_64.rpm                    # RHEL/Fedora/SUSE
+sudo apk add --allow-untrusted ./redis-conflated-pubsub_0.4.0-r1_x86_64.apk     # Alpine
+sudo pacman -U redis-conflated-pubsub-0.4.0-1-x86_64.pkg.tar.zst                # Arch
 ```
 
 Os pacotes são não assinados, como os demais artefatos do release, então cada

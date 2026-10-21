@@ -58,7 +58,7 @@ payload (22,57% menos)**. Os números dependem da carga. Detalhes e ressalvas em
 
     Baixe o binário, valide uma configuração e rode contra um Redis local.
 
-- :material-tuning:{ .lg .middle } **[Configuração](configuracao.md)**
+- :material-tune:{ .lg .middle } **[Configuração](configuracao.md)**
 
     Referência completa de campos, perfis, políticas de canal, filtros e filas.
 

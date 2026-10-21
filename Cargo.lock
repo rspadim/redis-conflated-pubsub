@@ -1075,7 +1075,7 @@ dependencies = [
 
 [[package]]
 name = "redis-conflated-pubsub"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-nats",

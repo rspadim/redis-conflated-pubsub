@@ -57,7 +57,7 @@ The numbers are workload-specific. Details and caveats in
 
     Download the binary, validate a configuration and run it against a local Redis.
 
-- :material-tuning:{ .lg .middle } **[Configuration](configuracao.md)**
+- :material-tune:{ .lg .middle } **[Configuration](configuracao.md)**
 
     Full field reference, profiles, channel policies, filters and queues.
 

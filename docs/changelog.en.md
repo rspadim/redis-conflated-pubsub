@@ -3,6 +3,13 @@
 The canonical file is [`CHANGELOG.md`](https://github.com/rspadim/redis-conflated-pubsub/blob/main/CHANGELOG.md)
 at the repository root. Below is a summary of the versions.
 
+## 0.4.0 — 2026-10-21
+
+- The installer's "Test connection" button now runs the relay's own `--test-connection` against a draft of the configuration the wizard would write, instead of a PowerShell probe of the wire protocol. The new flag validates the configuration, then connects to every configured backend (Redis: connect + `PING`; NATS: the full connection plan) and exits non-zero when any of them did not answer. It reuses the runtime's client configuration, so the check cannot disagree with what the service does at startup - including TLS, ACL, cluster and the NATS credential styles. Read-only: it connects and drops, publishing nothing and touching no key.
+- The probe is available outside the installer too: `redis-conflated-pubsub --config config.json --test-connection` reports one line per backend (`input redis  host:port  OK`, or `FAILED: <reason>`), which makes it usable from a deployment script or a support session.
+- The wizard names the specific reason on failure (rejected credentials, timeout, refused) by reading the relay's own report instead of a bare "failed". Localized in all 10 wizard languages.
+- Removed `installer/test-connection.ps1` and the messages only it used: a wire-level handshake proved reachability but not credentials, which is the case that actually fails. The endpoint pages keep their "Test connection" button, now backed by the real client.
+
 ## 0.3.1 — 2026-10-14
 
 - The relay now implements the Windows service protocol: the service control

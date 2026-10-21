@@ -58,7 +58,7 @@ en [Arquitectura](design.md).
 
     Descarga el binario, valida una configuración y ejecútalo contra un Redis local.
 
-- :material-tuning:{ .lg .middle } **[Configuración](configuracao.md)**
+- :material-tune:{ .lg .middle } **[Configuración](configuracao.md)**
 
     Referencia completa de campos, perfiles, políticas de canal, filtros y colas.
 

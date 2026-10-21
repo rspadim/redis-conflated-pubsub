@@ -54,6 +54,6 @@ None of them declares dependencies (the binary is static). The systemd families 
 
 ```sh
 for packager in deb rpm apk archlinux; do
-  VERSION=0.3.1 nfpm package --config nfpm.yaml --packager "$packager" --target dist/
+  VERSION=0.4.0 nfpm package --config nfpm.yaml --packager "$packager" --target dist/
 done
 ```

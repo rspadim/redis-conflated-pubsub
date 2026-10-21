@@ -87,8 +87,14 @@ Setup, PowerShell helpers), and all of it is reachable from PowerShell:
 - **This wizard runs its helpers with `SW_HIDE`** (`RunScript`), so helper
   console output is invisible during a normal install: a console banner there
   would be dead weight. User-visible text belongs in the `.isl` files.
-- **Endpoints are probed by protocol, not by socket.** `installer\test-connection.ps1`
-  speaks Redis (`AUTH`+`PING`) and NATS (`INFO`+`CONNECT`+`PING`) and returns
-  stable exit codes (0 ok, 2 unknown host, 3 timeout, 4 refused, 5 auth, 6
-  unexpected, 7 websocket). Do not "simplify" it to a TCP connect: reachability
-  says nothing about credentials, which is the case that actually fails.
+- **Endpoints are probed by the relay's own client.** The wizard's "Test
+  connection" button runs `redis-conflated-pubsub --test-connection` against a
+  draft of the configuration it would write (`ProbeEndpoints` in the `.iss`).
+  That flag validates the configuration, then connects to every backend with the
+  runtime's own client configuration (Redis: connect + `PING`; NATS: the full
+  connection plan), prints one line per backend and exits non-zero when any of
+  them failed. It is read-only. Do not replace it with a PowerShell/socket
+  probe: reachability says nothing about credentials, TLS or a connection-string
+  the client rejects, and those are the cases that actually fail. Also do not
+  make `--check-config` connect - it is documented and tested as a pure
+  validation that returns before dialling.
