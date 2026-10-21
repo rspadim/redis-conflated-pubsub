@@ -43,11 +43,34 @@ flowchart LR
   D --> G[(Saída N\nCore NATS)]
 ```
 
-## Resultado observado
+## Resultados medidos
+
+A página reporta dois tipos de número, medidos de formas diferentes. Os dois são
+reproduzíveis pelo próprio repositório.
+
+### Custo interno (v0.4.0, medida em 21/10/2026)
+
+Medido com os benchmarks do repositório (`cargo test --release -- --ignored
+--nocapture`), 5 execuções, mediana e faixa entre parênteses — máquina de
+desenvolvimento, não um servidor dedicado:
+
+| Medida | Resultado |
+| --- | --- |
+| Replay do feed anonimizado 100× (a carga mais próxima do real) | **352 mil msg/s** (250k–436k), 12,3 M de mensagens aceitas |
+| Resolução de política com cache compilado, 1 seletor | **1,4× mais rápida** que a dinâmica (1,23–1,54×) |
+| Filtro sem regras (piso de custo por mensagem) | **~97 M msg/s** (38–103 M) |
+
+São custos **dentro do processo**: não medem a rede nem o servidor. A dispersão
+vem da máquina compartilhada — a faixa é a informação honesta, não a mediana
+sozinha.
+
+### Redução de mensagens (snapshot de produção)
 
 Um snapshot anonimizado da v0.1.2 após cerca de 16 segundos: **28.482 mensagens
 de entrada / 9.320 de saída (67,28% menos)** e **581.458 / 450.218 bytes de
-payload (22,57% menos)**. Os números dependem da carga. Detalhes e ressalvas em
+payload (22,57% menos)**. Este número vem de um feed real e mede o efeito da
+conflation; ele não é reproduzido pelos benchmarks acima (que não têm o feed de
+origem). Os números dependem da carga. Detalhes e ressalvas em
 [Arquitetura](design.md).
 
 ## Próximos passos

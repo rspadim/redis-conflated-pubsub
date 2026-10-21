@@ -42,10 +42,33 @@ flowchart LR
   D --> G[(Output N\nCore NATS)]
 ```
 
-## Observed reduction
+## Measured results
 
-An anonymized v0.1.2 snapshot after about 16 seconds: **28,482 input / 9,320 output
-messages (67.28% fewer)** and **581,458 / 450,218 payload bytes (22.57% fewer)**.
+This page reports two kinds of number, measured in different ways. Both are
+reproducible from the repository itself.
+
+### Internal cost (v0.4.0, measured 2026-10-21)
+
+From the repository's own benchmarks (`cargo test --release -- --ignored
+--nocapture`), 5 runs, median with the range in parentheses — a development
+machine, not a dedicated server:
+
+| Measure | Result |
+| --- | --- |
+| Anonymized feed replay 100× (closest to a real workload) | **352k msg/s** (250k–436k), 12.3 M messages accepted |
+| Policy resolution with the compiled cache, 1 selector | **1.4× faster** than dynamic (1.23–1.54×) |
+| Filter with no rules (the per-message cost floor) | **~97 M msg/s** (38–103 M) |
+
+These are **in-process** costs: they measure neither the network nor the server.
+The spread comes from a shared machine — the range is the honest part, not the
+median alone.
+
+### Message reduction (production snapshot)
+
+An anonymized v0.1.2 snapshot after about 16 seconds: **28,482 input / 9,320
+output messages (67.28% fewer)** and **581,458 / 450,218 payload bytes (22.57%
+fewer)**. That figure comes from a real feed and measures the conflation effect;
+it is not reproduced by the benchmarks above (they do not have the source feed).
 The numbers are workload-specific. Details and caveats in
 [Architecture](design.md).
 

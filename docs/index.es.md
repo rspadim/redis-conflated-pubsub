@@ -43,12 +43,35 @@ flowchart LR
   D --> G[(Salida N\nCore NATS)]
 ```
 
-## Reducción observada
+## Resultados medidos
+
+Esta página reporta dos tipos de número, medidos de formas distintas. Ambos son
+reproducibles desde el propio repositorio.
+
+### Costo interno (v0.4.0, medido el 21/10/2026)
+
+Con los benchmarks del repositorio (`cargo test --release -- --ignored
+--nocapture`), 5 ejecuciones, mediana y rango entre paréntesis — máquina de
+desarrollo, no un servidor dedicado:
+
+| Medida | Resultado |
+| --- | --- |
+| Replay del feed anonimizado 100× (la carga más cercana a la real) | **352 mil msg/s** (250k–436k), 12,3 M de mensajes aceptados |
+| Resolución de política con caché compilado, 1 selector | **1,4× más rápida** que la dinámica (1,23–1,54×) |
+| Filtro sin reglas (piso de costo por mensaje) | **~97 M msg/s** (38–103 M) |
+
+Son costos **dentro del proceso**: no miden la red ni el servidor. La dispersión
+viene de la máquina compartida — el rango es la información honesta, no la
+mediana sola.
+
+### Reducción de mensajes (snapshot de producción)
 
 Un snapshot anonimizado de la v0.1.2 tras unos 16 segundos: **28.482 mensajes de
 entrada / 9.320 de salida (67,28% menos)** y **581.458 / 450.218 bytes de
-payload (22,57% menos)**. Los números dependen de la carga. Detalles y salvedades
-en [Arquitectura](design.md).
+payload (22,57% menos)**. Ese número viene de un feed real y mide el efecto de la
+conflación; no lo reproducen los benchmarks de arriba (no tienen el feed de
+origen). Los números dependen de la carga. Detalles y salvedades en
+[Arquitectura](design.md).
 
 ## Próximos pasos
 
