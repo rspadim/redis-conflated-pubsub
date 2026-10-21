@@ -48,3 +48,47 @@ it with the constant or limit of the new case. Precedents worth following:
   for any payload ceiling of another backend.
 - The service's own environment block (installer) is the credential mechanism; do
   not invent another one for a new backend.
+
+## Shell for agents
+
+This is a **Rust** project, but the tooling around it is Windows-first (Inno
+Setup, PowerShell helpers), and all of it is reachable from PowerShell:
+
+- **PowerShell is available and preferred over bash on Windows.** Build with
+  `cargo build --release --locked`, test with `cargo test`, compile the
+  installer with `& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+  "/DAppVersion=<ver>" "installer\redis-conflated-pubsub.iss"`. Under WSL the
+  POSIX tools are fine for the Rust side and for Redis/NATS fixtures.
+- **When a bash-style command is unavoidable, prefer the PowerShell equivalent**
+  on the Windows side: `grep` -> `Select-String`, `sed`/`awk` -> `-replace`/
+  `-split`, `head`/`tail` -> `Select-Object -First/-Last`, `which` ->
+  `Get-Command`.
+- **Quoting differs between the two shells** and silently corrupts output: a
+  bash heredoc (`<<'EOF'`) and `$(...)` do not work in PowerShell (`<<` is
+  reserved, `$(...)` is subexpression syntax). Write the body to a file and pass
+  `-File` instead of inlining a long multi-line command.
+- **Never rewrite a text file with `Set-Content`/`Out-File` just to change a few
+  bytes.** Both re-encode the file; this family of projects already had a
+  mixed ASCII/CJK/accented `.iss` corrupted that way. Use a targeted replace, or
+  `[IO.File]::WriteAllText($p, $text, (New-Object Text.UTF8Encoding($false)))`,
+  and verify with a strict decode (`New-Object Text.UTF8Encoding($false, $true)`).
+  The console showing `?` does NOT mean the file is broken; a failed strict
+  decode does.
+- **Inno Setup parsing traps** that look like code errors: a continuation line
+  that BEGINS with `[` is read as a section tag ("Invalid section tag") - keep a
+  bracketed argument on the line that opens the call; and `const`/`type`/`var`
+  belong in the declarations block at the top of `[Code]`, not between
+  procedures.
+- **A wizard built with `PrivilegesRequired=admin` runs elevated**, and an
+  unelevated process can neither kill it (`Stop-Process` -> "Acesso negado") nor
+  capture its window (`PrintWindow` returns black). To validate layout, compile
+  a throwaway copy with `PrivilegesRequired=lowest` into a temp directory, and
+  never leave that copy in `installer\output`.
+- **This wizard runs its helpers with `SW_HIDE`** (`RunScript`), so helper
+  console output is invisible during a normal install: a console banner there
+  would be dead weight. User-visible text belongs in the `.isl` files.
+- **Endpoints are probed by protocol, not by socket.** `installer\test-connection.ps1`
+  speaks Redis (`AUTH`+`PING`) and NATS (`INFO`+`CONNECT`+`PING`) and returns
+  stable exit codes (0 ok, 2 unknown host, 3 timeout, 4 refused, 5 auth, 6
+  unexpected, 7 websocket). Do not "simplify" it to a TCP connect: reachability
+  says nothing about credentials, which is the case that actually fails.

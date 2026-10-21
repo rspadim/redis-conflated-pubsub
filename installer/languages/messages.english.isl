@@ -92,3 +92,15 @@ BadServiceParam=/SERVICE accepts only 0 or 1, but got "%1".
 BadStartupParam=/SERVICESTART accepts only auto, delayed-auto or demand, but got "%1".
 ConfigRejected=The relay rejected this configuration:%n%n%1
 ServiceStopFailed=The relay's service could not be stopped:%n%n%1%n%nStop it and run the setup again.
+
+; --- "Test connection" button on the endpoint pages ---
+ProbeButton=Test connection
+ProbeTesting=Testing... (waits up to %1 seconds)
+ProbeOk=Connected - the server answered at %1.
+ProbeUnknownHost=Could not connect: unknown host name. Check the address for a typo.
+ProbeTimeout=Could not connect: no answer in time. Is the server running and reachable (firewall, VPN)?
+ProbeAuthFailed=The server rejected the credentials. Check the username and the password value.
+ProbeUnexpected=Something answered on that address, but it is not the expected server.
+ProbeNoWebSocket=This address uses WebSocket, which this check does not support. Use the relay's --check-config, or test it after installing.
+ProbeEmpty=Type the endpoint before testing.
+ProbeRefused=Could not connect: the connection was refused. Is the server running on that port?

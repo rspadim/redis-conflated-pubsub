@@ -87,3 +87,15 @@ SecretValueLabel=密码值（存储在服务自身的环境中；留空则由您
 SecretsStored=已存储到服务环境中：%1
 SecretsFailed=无法更新服务环境：%n%n%1
 SecretNotSetWarning=您未为 %1 输入任何值，因此安装程序不会存储它。relay 从服务自身的环境中读取凭据，而该变量在其中尚不存在：在您设置它之前，服务会在启动时退出。要继续吗？
+
+; --- 端点页面上的“测试连接”按钮 ---
+ProbeButton=测试连接
+ProbeTesting=正在测试...（最多等待 %1 秒）
+ProbeOk=已连接 - %1 的服务器已响应。
+ProbeUnknownHost=无法连接：主机名未知。请检查地址是否拼写错误。
+ProbeTimeout=无法连接：未在预期时间内响应。服务器是否在运行且可访问（防火墙、VPN）？
+ProbeAuthFailed=服务器拒绝了凭据。请检查用户名和密码值。
+ProbeUnexpected=该地址有响应，但不是预期的服务器。
+ProbeNoWebSocket=该地址使用 WebSocket，本检查不支持。请使用中继的 --check-config，或安装后再测试。
+ProbeEmpty=请先输入端点再测试。
+ProbeRefused=无法连接：连接被拒绝。服务器是否在该端口上运行？

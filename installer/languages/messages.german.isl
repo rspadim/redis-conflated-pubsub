@@ -87,3 +87,15 @@ SecretValueLabel=Wert des Passworts (wird in der eigenen Umgebung des Dienstes g
 SecretsStored=In der Umgebung des Dienstes gespeichert: %1
 SecretsFailed=Die Umgebung des Dienstes konnte nicht aktualisiert werden:%n%n%1
 SecretNotSetWarning=Für %1 wurde kein Wert eingegeben, daher speichert das Setup ihn nicht. Das Relay liest seine Anmeldedaten aus der eigenen Umgebung des Dienstes, in der diese Variable noch nicht existiert: Der Dienst beendet sich beim Start, bis Sie die Variable festlegen. Fortfahren?
+
+; --- Schaltfläche "Verbindung testen" der Endpunkt-Seiten ---
+ProbeButton=Verbindung testen
+ProbeTesting=Wird getestet... (wartet bis zu %1 Sekunden)
+ProbeOk=Verbunden - der Server hat unter %1 geantwortet.
+ProbeUnknownHost=Verbindung fehlgeschlagen: unbekannter Hostname. Prüfen Sie die Adresse auf Tippfehler.
+ProbeTimeout=Verbindung fehlgeschlagen: keine Antwort in der erwarteten Zeit. Läuft der Server und ist er erreichbar (Firewall, VPN)?
+ProbeAuthFailed=Der Server hat die Anmeldedaten abgelehnt. Prüfen Sie Benutzername und Passwortwert.
+ProbeUnexpected=Unter dieser Adresse hat etwas geantwortet, aber nicht der erwartete Server.
+ProbeNoWebSocket=Diese Adresse nutzt WebSocket, was diese Prüfung nicht unterstützt. Nutzen Sie --check-config des Relais oder testen Sie nach der Installation.
+ProbeEmpty=Geben Sie den Endpunkt ein, bevor Sie testen.
+ProbeRefused=Verbindung fehlgeschlagen: die Verbindung wurde abgelehnt. Läuft der Server auf diesem Port?

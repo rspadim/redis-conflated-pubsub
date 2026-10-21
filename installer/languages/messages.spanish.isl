@@ -89,3 +89,15 @@ UninstServiceFailed=No se pudo eliminar el servicio de Windows:%n%n%1
 FinishedLine=Apunta tus productores al backend de entrada configurado y observa el directorio de logs para ver los primeros mensajes.
 ServiceAlive=El relay arrancó y se reportó como en ejecución.
 ServiceNotServing=El servicio está en ejecución, pero el relay no se reportó como en ejecución en %1 segundos. Revisa el directorio de logs para saber el motivo.
+
+; --- boton "Probar conexión" de las páginas de endpoint ---
+ProbeButton=Probar conexión
+ProbeTesting=Probando... (espera hasta %1 segundos)
+ProbeOk=Conectado: el servidor respondió en %1.
+ProbeUnknownHost=No se pudo conectar: nombre de host desconocido. Revise si hay un error de escritura.
+ProbeTimeout=No se pudo conectar: sin respuesta a tiempo. ¿El servidor está en marcha y accesible (cortafuegos, VPN)?
+ProbeAuthFailed=El servidor rechazó las credenciales. Revise el usuario y el valor de la contraseña.
+ProbeUnexpected=Algo respondió en esa dirección, pero no es el servidor esperado.
+ProbeNoWebSocket=Esta dirección usa WebSocket, que esta comprobación no admite. Use el --check-config del relay, o pruébelo después de instalar.
+ProbeEmpty=Escriba el endpoint antes de probar.
+ProbeRefused=No se pudo conectar: se rechazó la conexión. ¿El servidor está en marcha en ese puerto?

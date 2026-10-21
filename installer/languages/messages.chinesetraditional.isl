@@ -87,3 +87,15 @@ SecretValueLabel=密碼值 (存放於服務本身的環境中；保留空白以�
 SecretsStored=已存放於服務環境: %1
 SecretsFailed=無法更新服務環境:%n%n%1
 SecretNotSetWarning=未輸入 %1 的值，因此安裝程式不會存放它。relay 會從服務本身的環境讀取其認證，而該變數在該環境中尚不存在: 在您設定該變數之前，服務會在啟動時結束。要繼續嗎？
+
+; --- 端點頁面上的「測試連線」按鈕 ---
+ProbeButton=測試連線
+ProbeTesting=正在測試...（最多等待 %1 秒）
+ProbeOk=已連線 - %1 的伺服器已回應。
+ProbeUnknownHost=無法連線：主機名稱未知。請檢查位址是否拼寫錯誤。
+ProbeTimeout=無法連線：未在預期時間內回應。伺服器是否在執行且可存取（防火牆、VPN）？
+ProbeAuthFailed=伺服器拒絕了認證資訊。請檢查使用者名稱與密碼值。
+ProbeUnexpected=該位址有回應，但不是預期的伺服器。
+ProbeNoWebSocket=該位址使用 WebSocket，本檢查不支援。請使用中繼的 --check-config，或安裝後再測試。
+ProbeEmpty=請先輸入端點再測試。
+ProbeRefused=無法連線：連線被拒絕。伺服器是否在該連接埠上執行？

@@ -83,3 +83,15 @@ SecretValueLabel=Valeur du mot de passe (enregistrée dans l'environnement du se
 SecretsStored=Enregistré dans l'environnement du service : %1
 SecretsFailed=L'environnement du service n'a pas pu être mis à jour :%n%n%1
 SecretNotSetWarning=Aucune valeur n'a été saisie pour %1, donc l'installateur ne l'enregistrera pas. Le relay lit ses identifiants dans l'environnement du service lui-même, où cette variable n'existe pas encore : le service quittera au démarrage tant que vous ne l'aurez pas définie. Continuer ?
+
+; --- bouton "Tester la connexion" des pages de point de terminaison ---
+ProbeButton=Tester la connexion
+ProbeTesting=Test en cours... (attente jusqu'à %1 secondes)
+ProbeOk=Connecté - le serveur a répondu à %1.
+ProbeUnknownHost=Connexion impossible : nom d'hôte inconnu. Vérifiez l'adresse (faute de frappe).
+ProbeTimeout=Connexion impossible : aucune réponse dans le délai. Le serveur est-il démarré et joignable (pare-feu, VPN) ?
+ProbeAuthFailed=Le serveur a refusé les identifiants. Vérifiez l'utilisateur et la valeur du mot de passe.
+ProbeUnexpected=Quelque chose a répondu à cette adresse, mais ce n'est pas le serveur attendu.
+ProbeNoWebSocket=Cette adresse utilise WebSocket, que cette vérification ne prend pas en charge. Utilisez --check-config du relais, ou testez après l'installation.
+ProbeEmpty=Saisissez le point de terminaison avant de tester.
+ProbeRefused=Connexion impossible : la connexion a été refusée. Le serveur est-il démarré sur ce port ?

@@ -85,3 +85,15 @@ SecretValueLabel=암호 값 (서비스 자체의 환경에 저장됩니다; 변�
 SecretsStored=서비스 환경에 저장됨: %1
 SecretsFailed=서비스 환경을 업데이트할 수 없습니다:%n%n%1
 SecretNotSetWarning=%1에 값을 입력하지 않았으므로 설치 프로그램이 값을 저장하지 않습니다. relay는 자격 증명을 서비스 자체의 환경에서 읽지만, 그 환경에는 해당 변수가 아직 존재하지 않습니다. 변수를 설정할 때까지 서비스는 시작할 때 종료됩니다. 계속하시겠습니까?
+
+; --- 끝점 페이지의 "연결 테스트" 버튼 ---
+ProbeButton=연결 테스트
+ProbeTesting=테스트 중... (최대 %1초 대기)
+ProbeOk=연결됨 - %1의 서버가 응답했습니다.
+ProbeUnknownHost=연결할 수 없습니다: 알 수 없는 호스트 이름입니다. 주소에 오타가 있는지 확인하세요.
+ProbeTimeout=연결할 수 없습니다: 시간 내에 응답이 없습니다. 서버가 실행 중이며 접근 가능한가요(방화벽, VPN)?
+ProbeAuthFailed=서버가 자격 증명을 거부했습니다. 사용자 이름과 비밀번호 값을 확인하세요.
+ProbeUnexpected=해당 주소에서 무언가 응답했지만 예상한 서버가 아닙니다.
+ProbeNoWebSocket=이 주소는 이 검사가 지원하지 않는 WebSocket을 사용합니다. 릴레이의 --check-config를 사용하거나 설치 후 테스트하세요.
+ProbeEmpty=테스트하기 전에 끝점을 입력하세요.
+ProbeRefused=연결할 수 없습니다: 연결이 거부되었습니다. 해당 포트에서 서버가 실행 중인가요?

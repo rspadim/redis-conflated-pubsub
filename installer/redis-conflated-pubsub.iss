@@ -138,6 +138,9 @@ Source: "{#RepoRoot}\installer\Set-ServiceSecrets.ps1"; DestDir: "{app}\scripts"
 Source: "{#RepoRoot}\installer\service.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
 Source: "{#RepoRoot}\installer\validate-config.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
 Source: "{#RepoRoot}\installer\verify-service.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
+; Endpoint probe used by the wizard's "Test connection" button. Installed too,
+; so an operator can check an address by hand later.
+Source: "{#RepoRoot}\installer\test-connection.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
 Source: "{#RepoRoot}\installer\Validate-Config.cmd"; DestDir: "{app}"; Flags: ignoreversion
 ; Temporary copies so the wizard can validate BEFORE anything is installed.
 Source: "{#BuildDir}\{#AppExeName}.exe"; DestDir: "{tmp}"; Flags: dontcopy
@@ -182,6 +185,23 @@ var
   SilentStartupType: String;
   PostInstallFailure: String;
   PostInstallReport: String;
+
+const
+  ProbeTimeoutSeconds = 5;
+
+type
+  TProbePage = record
+    Page: TInputQueryWizardPage;
+    Kind: String;
+    EndpointIndex: Integer;
+    UserIndex: Integer;
+    SecretIndex: Integer;
+    Button: TNewButton;
+    StatusLabel: TNewStaticText;
+  end;
+
+var
+  ProbeRedisIn, ProbeRedisOut, ProbeNatsIn, ProbeNatsOut: TProbePage;
 
 { --- mode helpers ------------------------------------------------------- }
 { Declared before the functions that use them: Pascal Script resolves
@@ -838,6 +858,151 @@ begin
   ServiceWasStopped := True;
 end;
 
+{ --- endpoint probe ("Test connection") ------------------------------- }
+{ The wizard validates the configuration semantics with the relay's own
+  --check-config, but that never dials: a wrong host, port or password is only
+  discovered after the install, when the service times out. The endpoint pages
+  therefore get a button that probes what is typed RIGHT NOW, without leaving
+  the page and without writing anything. }
+
+function ProbeEndpoint(const Kind, Endpoint, User, Secret: String): Integer;
+var
+  Script, Args, PwFile: String;
+  Code: Integer;
+begin
+  Result := -1;
+  if Trim(Endpoint) = '' then
+  begin
+    Result := 8; { nothing to probe: the page is incomplete }
+    exit;
+  end;
+
+  ExtractTemporaryFile('test-connection.ps1');
+  Script := ExpandConstant('{tmp}\test-connection.ps1');
+
+  Args := '-Kind ' + Kind + ' -Endpoint "' + Endpoint + '"';
+  PwFile := '';
+  if Secret <> '' then
+  begin
+    { The secret travels through a private temp file: it may contain spaces or
+      quotes, and a process command line is readable by other local users. }
+    PwFile := ExpandConstant('{tmp}\probe-secret.txt');
+    if SaveStringToFile(PwFile, Secret, False) then
+      Args := Args + ' -PasswordFile "' + PwFile + '"'
+    else
+      PwFile := '';
+  end;
+  if Trim(User) <> '' then
+    Args := Args + ' -User "' + User + '"';
+
+  { SW_HIDE: the helper never shows a console window during the wizard. Only
+    the exit code is used, never the console text (a redirect re-encodes it into
+    the OEM codepage and would mangle accents). }
+  if not Exec(PowerShellExe(),
+       '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + Script + '" ' + Args,
+       '', SW_HIDE, ewWaitUntilTerminated, Code) then
+    Code := -1;
+
+  if PwFile <> '' then DeleteFile(PwFile);
+  Result := Code;
+end;
+
+function ProbeReason(Code: Integer): String;
+begin
+  case Code of
+    2: Result := CustomMessage('ProbeUnknownHost');
+    3: Result := CustomMessage('ProbeTimeout');
+    5: Result := CustomMessage('ProbeAuthFailed');
+    6: Result := CustomMessage('ProbeUnexpected');
+    7: Result := CustomMessage('ProbeNoWebSocket');
+    8: Result := CustomMessage('ProbeEmpty');
+  else
+    Result := CustomMessage('ProbeRefused');
+  end;
+end;
+
+{ The username column, or '' when the backend has none (Redis takes only a
+  password). }
+function ProbeUser(const Page: TProbePage): String;
+begin
+  if Page.UserIndex < 0 then
+    Result := ''
+  else
+    Result := Page.Page.Values[Page.UserIndex];
+end;
+
+procedure ProbeButtonClick(Sender: TObject);
+var
+  Page: TProbePage;
+  Code: Integer;
+  Endpoint: String;
+begin
+  if Sender = ProbeRedisIn.Button then Page := ProbeRedisIn
+  else if Sender = ProbeRedisOut.Button then Page := ProbeRedisOut
+  else if Sender = ProbeNatsIn.Button then Page := ProbeNatsIn
+  else if Sender = ProbeNatsOut.Button then Page := ProbeNatsOut
+  else
+  begin
+    { Not ours: nothing to do. A record cannot be "nil", so bail out by its
+      missing page reference instead. }
+    exit;
+  end;
+
+  Endpoint := Page.Page.Values[Page.EndpointIndex];
+
+  { Immediate feedback: a dead host takes the whole timeout. The FmtMessage
+    argument must not start a line with a bracket: Inno reads a leading "[" as
+    the start of a section tag and aborts with "Invalid section tag". }
+  Page.StatusLabel.Font.Color := clGrayText;
+  Page.StatusLabel.Caption :=
+    FmtMessage(CustomMessage('ProbeTesting'), [IntToStr(ProbeTimeoutSeconds)]);
+  Page.StatusLabel.Refresh;
+  Page.Button.Enabled := False;
+  try
+    Code := ProbeEndpoint(Page.Kind, Endpoint,
+      ProbeUser(Page), Page.Page.Values[Page.SecretIndex]);
+  finally
+    Page.Button.Enabled := True;
+  end;
+
+  if Code = 0 then
+  begin
+    Page.StatusLabel.Font.Color := clGreen;
+    Page.StatusLabel.Caption := FmtMessage(CustomMessage('ProbeOk'), [Endpoint]);
+  end
+  else
+  begin
+    Page.StatusLabel.Font.Color := clRed;
+    Page.StatusLabel.Caption := ProbeReason(Code);
+  end;
+  Log('Probe: kind=' + Page.Kind + ' exit=' + IntToStr(Code));
+end;
+
+{ Adds the button and the status line to one endpoint page. Placed above the
+  page's last field so it never overlaps the description or the Next button. }
+procedure AddProbeControls(var Target: TProbePage);
+begin
+  Target.Button := TNewButton.Create(Target.Page);
+  Target.Button.Parent := Target.Page.Surface;
+  Target.Button.Width := ScaleX(150);
+  Target.Button.Height := ScaleY(25);
+  Target.Button.Left := 0;
+  Target.Button.Top := Target.Page.SurfaceHeight - Target.Button.Height - ScaleY(4);
+  Target.Button.Caption := CustomMessage('ProbeButton');
+  Target.Button.OnClick := @ProbeButtonClick;
+
+  { Above the button, full width: a failure is a sentence, not a word. }
+  Target.StatusLabel := TNewStaticText.Create(Target.Page);
+  Target.StatusLabel.Parent := Target.Page.Surface;
+  Target.StatusLabel.Left := 0;
+  Target.StatusLabel.Top := Target.Button.Top - ScaleY(40);
+  Target.StatusLabel.Width := Target.Page.SurfaceWidth;
+  Target.StatusLabel.Height := ScaleY(36);
+  Target.StatusLabel.AutoSize := False;
+  Target.StatusLabel.WordWrap := True;
+  Target.StatusLabel.Caption := '';
+end;
+
 procedure InitializeWizard();
 begin
   { The configuration wizard. A menu picks what to do, then only the pages that
@@ -869,6 +1034,12 @@ begin
   RedisInPage.Values[0] := 'localhost:6379';
   RedisInPage.Values[1] := '0';
   RedisInPage.Values[3] := '*';
+  ProbeRedisIn.Page := RedisInPage;
+  ProbeRedisIn.Kind := 'redis';
+  ProbeRedisIn.EndpointIndex := 0;
+  ProbeRedisIn.UserIndex := -1;     { Redis has no username field }
+  ProbeRedisIn.SecretIndex := 4;
+  AddProbeControls(ProbeRedisIn);
 
   RedisOutPage := CreateInputQueryPage(RedisInPage.ID,
     CustomMessage('PageOutputTitle'), '', CustomMessage('PageOutputDesc'));
@@ -884,6 +1055,12 @@ begin
     server the relay refuses a configuration without a prefix or a suffix, and
     the sensible default is to namespace the published channels. }
   RedisOutPage.Values[3] := 'conflated:';
+  ProbeRedisOut.Page := RedisOutPage;
+  ProbeRedisOut.Kind := 'redis';
+  ProbeRedisOut.EndpointIndex := 0;
+  ProbeRedisOut.UserIndex := -1;    { Redis has no username field }
+  ProbeRedisOut.SecretIndex := 5;
+  AddProbeControls(ProbeRedisOut);
 
   NatsInPage := CreateInputQueryPage(RedisOutPage.ID,
     CustomMessage('PageNatsInTitle'), '', CustomMessage('PageNatsInDesc'));
@@ -898,6 +1075,12 @@ begin
   NatsInPage.Values[0] := 'nats://localhost:4222';
   NatsInPage.Values[1] := 'none';
   NatsInPage.Values[6] := '>';
+  ProbeNatsIn.Page := NatsInPage;
+  ProbeNatsIn.Kind := 'nats';
+  ProbeNatsIn.EndpointIndex := 0;
+  ProbeNatsIn.UserIndex := 2;
+  ProbeNatsIn.SecretIndex := 7;
+  AddProbeControls(ProbeNatsIn);
 
   NatsOutPage := CreateInputQueryPage(NatsInPage.ID,
     CustomMessage('PageNatsOutTitle'), '', CustomMessage('PageNatsOutDesc'));
@@ -912,6 +1095,12 @@ begin
   NatsOutPage.Add(CustomMessage('SecretValueLabel'), True);
   NatsOutPage.Values[0] := 'nats://localhost:4222';
   NatsOutPage.Values[1] := 'none';
+  ProbeNatsOut.Page := NatsOutPage;
+  ProbeNatsOut.Kind := 'nats';
+  ProbeNatsOut.EndpointIndex := 0;
+  ProbeNatsOut.UserIndex := 2;
+  ProbeNatsOut.SecretIndex := 8;
+  AddProbeControls(ProbeNatsOut);
 
   TuningPage := CreateInputQueryPage(NatsOutPage.ID,
     CustomMessage('PageTuningTitle'), '', CustomMessage('PageTuningDesc'));
