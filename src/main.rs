@@ -137,7 +137,10 @@ async fn test_connection(config: &AppConfig) -> Result<()> {
             Ok(()) => println!("input redis  {}:{}  OK", redis.host, redis.port),
             Err(error) => {
                 failures += 1;
-                eprintln!("input redis  {}:{}  FAILED: {error:#}", redis.host, redis.port);
+                eprintln!(
+                    "input redis  {}:{}  FAILED: {error:#}",
+                    redis.host, redis.port
+                );
             }
         }
     }
@@ -179,9 +182,7 @@ async fn test_connection(config: &AppConfig) -> Result<()> {
     }
 
     if failures > 0 {
-        anyhow::bail!(
-            "{failures} backend(s) did not answer; the service would fail the same way"
-        );
+        anyhow::bail!("{failures} backend(s) did not answer; the service would fail the same way");
     }
     Ok(())
 }
