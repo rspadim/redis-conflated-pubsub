@@ -138,9 +138,6 @@ Source: "{#RepoRoot}\installer\Set-ServiceSecrets.ps1"; DestDir: "{app}\scripts"
 Source: "{#RepoRoot}\installer\service.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
 Source: "{#RepoRoot}\installer\validate-config.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
 Source: "{#RepoRoot}\installer\verify-service.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
-; Endpoint probe used by the wizard's "Test connection" button. Installed too,
-; so an operator can check an address by hand later.
-Source: "{#RepoRoot}\installer\test-connection.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
 Source: "{#RepoRoot}\installer\Validate-Config.cmd"; DestDir: "{app}"; Flags: ignoreversion
 ; Temporary copies so the wizard can validate BEFORE anything is installed.
 Source: "{#BuildDir}\{#AppExeName}.exe"; DestDir: "{tmp}"; Flags: dontcopy
@@ -194,14 +191,13 @@ type
     Page: TInputQueryWizardPage;
     Kind: String;
     EndpointIndex: Integer;
-    UserIndex: Integer;
-    SecretIndex: Integer;
     Button: TNewButton;
     StatusLabel: TNewStaticText;
   end;
 
 var
   ProbeRedisIn, ProbeRedisOut, ProbeNatsIn, ProbeNatsOut: TProbePage;
+  LastProbeReport: String;
 
 { --- mode helpers ------------------------------------------------------- }
 { Declared before the functions that use them: Pascal Script resolves
@@ -860,75 +856,102 @@ end;
 
 { --- endpoint probe ("Test connection") ------------------------------- }
 { The wizard validates the configuration semantics with the relay's own
-  --check-config, but that never dials: a wrong host, port or password is only
-  discovered after the install, when the service times out. The endpoint pages
-  therefore get a button that probes what is typed RIGHT NOW, without leaving
-  the page and without writing anything. }
+  --check-config, but that returns BEFORE any connection (it is documented and
+  tested that way, so it cannot become a probing mode). The endpoint pages
+  therefore get a button that runs the relay's own --test-connection against a
+  DRAFT of the configuration the wizard would write: the same binary, the same
+  client, the same credentials resolution - so the probe cannot disagree with
+  what the service will do at startup. Read-only: it connects and drops. }
 
-function ProbeEndpoint(const Kind, Endpoint, User, Secret: String): Integer;
+{ Runs the relay's --test-connection on a draft built from the current answers.
+  Returns the binary's exit code (0 = every backend answered), or 8 when there
+  is nothing to test yet. The relay's own report is captured so a failure can be
+  classified into a specific message instead of a bare "failed". }
+function ProbeEndpoints(): Integer;
 var
-  Script, Args, PwFile: String;
-  Code: Integer;
+  ExePath, DraftPath, OutFile, Report: String;
+  Lines: TArrayOfString;
+  Code, I: Integer;
 begin
-  Result := -1;
-  if Trim(Endpoint) = '' then
+  Result := 8;
+  LastProbeReport := '';
+
+  DraftPath := ExpandConstant('{tmp}\probe-draft.json');
+  DeleteFile(DraftPath);
+  { BuildConfig writes the very configuration the install would produce, from
+    the answers on the pages, so the probe tests what the user sees. It needs
+    New-Config.ps1 extracted, which the validator step would normally do; the
+    probe can run on the FIRST page, before that step ever ran. }
+  if not FileExists(ExpandConstant('{tmp}\New-Config.ps1')) then
+    ExtractTemporaryFile('New-Config.ps1');
+  if not BuildConfig(DraftPath, True) then
   begin
-    Result := 8; { nothing to probe: the page is incomplete }
+    Result := 9; { the draft could not be built: the reason is in its report }
     exit;
   end;
+  if not FileExists(DraftPath) then
+    exit;
 
-  ExtractTemporaryFile('test-connection.ps1');
-  Script := ExpandConstant('{tmp}\test-connection.ps1');
+  ExePath := ExpandConstant('{tmp}\{#AppExeName}.exe');
+  if not FileExists(ExePath) then
+    ExtractTemporaryFile('{#AppExeName}.exe');
 
-  Args := '-Kind ' + Kind + ' -Endpoint "' + Endpoint + '"';
-  PwFile := '';
-  if Secret <> '' then
-  begin
-    { The secret travels through a private temp file: it may contain spaces or
-      quotes, and a process command line is readable by other local users. }
-    PwFile := ExpandConstant('{tmp}\probe-secret.txt');
-    if SaveStringToFile(PwFile, Secret, False) then
-      Args := Args + ' -PasswordFile "' + PwFile + '"'
-    else
-      PwFile := '';
-  end;
-  if Trim(User) <> '' then
-    Args := Args + ' -User "' + User + '"';
+  OutFile := ExpandConstant('{tmp}\probe-report.txt');
+  DeleteFile(OutFile);
 
-  { SW_HIDE: the helper never shows a console window during the wizard. Only
-    the exit code is used, never the console text (a redirect re-encodes it into
-    the OEM codepage and would mangle accents). }
-  if not Exec(PowerShellExe(),
-       '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + Script + '" ' + Args,
+  { SW_HIDE: the relay is a console binary and the wizard must not flash a
+    window. The redirect captures its report; the exit code is the verdict. }
+  if not Exec('cmd.exe',
+       '/c ""' + ExePath + '" --config "' + DraftPath + '" --test-connection > "' +
+       OutFile + '" 2>&1"',
        '', SW_HIDE, ewWaitUntilTerminated, Code) then
     Code := -1;
 
-  if PwFile <> '' then DeleteFile(PwFile);
+  DeleteFile(DraftPath);
+
+  { Keep the relay's own lines (they name the backend and the reason) so the
+    failure message can be specific. ASCII on purpose in the relay's output. }
+  if LoadStringsFromFile(OutFile, Lines) then
+  begin
+    Report := '';
+    for I := 0 to GetArrayLength(Lines) - 1 do
+    begin
+      if Pos('FAILED', Lines[I]) > 0 then
+      begin
+        if Report <> '' then Report := Report + ' ';
+        Report := Report + Trim(Lines[I]);
+      end;
+    end;
+    LastProbeReport := Report;
+  end;
+
   Result := Code;
+end;
+
+{ The backend's own failure text, used to pick the specific reason. }
+function ProbeReport(): String;
+begin
+  Result := Lowercase(LastProbeReport);
 end;
 
 function ProbeReason(Code: Integer): String;
 begin
   case Code of
-    2: Result := CustomMessage('ProbeUnknownHost');
-    3: Result := CustomMessage('ProbeTimeout');
-    5: Result := CustomMessage('ProbeAuthFailed');
-    6: Result := CustomMessage('ProbeUnexpected');
-    7: Result := CustomMessage('ProbeNoWebSocket');
     8: Result := CustomMessage('ProbeEmpty');
+    9: Result := CustomMessage('ProbeUnexpected');
   else
-    Result := CustomMessage('ProbeRefused');
+    { Exit code 1 means "a backend did not answer"; the relay's report says
+      which reason, so the page can name it instead of a bare "failed". }
+    if Pos('authenticationfailed', ProbeReport()) > 0 then
+      Result := CustomMessage('ProbeAuthFailed')
+    else if (Pos('timed out', ProbeReport()) > 0) or
+            (Pos('timeout', ProbeReport()) > 0) then
+      Result := CustomMessage('ProbeTimeout')
+    else if Pos('refused', ProbeReport()) > 0 then
+      Result := CustomMessage('ProbeRefused')
+    else
+      Result := CustomMessage('ProbeRefused');
   end;
-end;
-
-{ The username column, or '' when the backend has none (Redis takes only a
-  password). }
-function ProbeUser(const Page: TProbePage): String;
-begin
-  if Page.UserIndex < 0 then
-    Result := ''
-  else
-    Result := Page.Page.Values[Page.UserIndex];
 end;
 
 procedure ProbeButtonClick(Sender: TObject);
@@ -959,8 +982,10 @@ begin
   Page.StatusLabel.Refresh;
   Page.Button.Enabled := False;
   try
-    Code := ProbeEndpoint(Page.Kind, Endpoint,
-      ProbeUser(Page), Page.Page.Values[Page.SecretIndex]);
+    { The whole draft is tested, not just this page: the relay needs every
+      backend it was configured with, and testing one alone would report a
+      failure the real startup does not have. }
+    Code := ProbeEndpoints();
   finally
     Page.Button.Enabled := True;
   end;
@@ -982,22 +1007,28 @@ end;
   page's last field so it never overlaps the description or the Next button. }
 procedure AddProbeControls(var Target: TProbePage);
 begin
-  Target.Button := TNewButton.Create(Target.Page);
-  Target.Button.Parent := Target.Page.Surface;
+  { The button goes on the WIZARD's own surface, not on the page: a
+    TInputQueryPage lays its fields out from a fixed origin and ignores added
+    controls, so a button parented to the page overlaps the last field (verified
+    on screen). Anchored to the TOP of the Next button, on the left, it sits in
+    the navigation band and never collides with a page field. }
+  Target.Button := TNewButton.Create(WizardForm);
+  Target.Button.Parent := WizardForm;
   Target.Button.Width := ScaleX(150);
   Target.Button.Height := ScaleY(25);
-  Target.Button.Left := 0;
-  Target.Button.Top := Target.Page.SurfaceHeight - Target.Button.Height - ScaleY(4);
+  Target.Button.Left := ScaleX(8);
+  Target.Button.Top := WizardForm.NextButton.Top + ScaleY(3);
   Target.Button.Caption := CustomMessage('ProbeButton');
   Target.Button.OnClick := @ProbeButtonClick;
 
-  { Above the button, full width: a failure is a sentence, not a word. }
-  Target.StatusLabel := TNewStaticText.Create(Target.Page);
-  Target.StatusLabel.Parent := Target.Page.Surface;
-  Target.StatusLabel.Left := 0;
-  Target.StatusLabel.Top := Target.Button.Top - ScaleY(40);
-  Target.StatusLabel.Width := Target.Page.SurfaceWidth;
-  Target.StatusLabel.Height := ScaleY(36);
+  { The result sits to the RIGHT of the button, in the same band: two lines fit
+    there without covering a page field. }
+  Target.StatusLabel := TNewStaticText.Create(WizardForm);
+  Target.StatusLabel.Parent := WizardForm;
+  Target.StatusLabel.Left := Target.Button.Left + Target.Button.Width + ScaleX(10);
+  Target.StatusLabel.Top := Target.Button.Top - ScaleY(8);
+  Target.StatusLabel.Width := WizardForm.NextButton.Left - Target.StatusLabel.Left - ScaleX(10);
+  Target.StatusLabel.Height := ScaleY(34);
   Target.StatusLabel.AutoSize := False;
   Target.StatusLabel.WordWrap := True;
   Target.StatusLabel.Caption := '';
@@ -1036,9 +1067,7 @@ begin
   RedisInPage.Values[3] := '*';
   ProbeRedisIn.Page := RedisInPage;
   ProbeRedisIn.Kind := 'redis';
-  ProbeRedisIn.EndpointIndex := 0;
-  ProbeRedisIn.UserIndex := -1;     { Redis has no username field }
-  ProbeRedisIn.SecretIndex := 4;
+  ProbeRedisIn.EndpointIndex := 0;     { Redis has no username field }
   AddProbeControls(ProbeRedisIn);
 
   RedisOutPage := CreateInputQueryPage(RedisInPage.ID,
@@ -1057,9 +1086,7 @@ begin
   RedisOutPage.Values[3] := 'conflated:';
   ProbeRedisOut.Page := RedisOutPage;
   ProbeRedisOut.Kind := 'redis';
-  ProbeRedisOut.EndpointIndex := 0;
-  ProbeRedisOut.UserIndex := -1;    { Redis has no username field }
-  ProbeRedisOut.SecretIndex := 5;
+  ProbeRedisOut.EndpointIndex := 0;    { Redis has no username field }
   AddProbeControls(ProbeRedisOut);
 
   NatsInPage := CreateInputQueryPage(RedisOutPage.ID,
@@ -1078,8 +1105,6 @@ begin
   ProbeNatsIn.Page := NatsInPage;
   ProbeNatsIn.Kind := 'nats';
   ProbeNatsIn.EndpointIndex := 0;
-  ProbeNatsIn.UserIndex := 2;
-  ProbeNatsIn.SecretIndex := 7;
   AddProbeControls(ProbeNatsIn);
 
   NatsOutPage := CreateInputQueryPage(NatsInPage.ID,
@@ -1098,8 +1123,6 @@ begin
   ProbeNatsOut.Page := NatsOutPage;
   ProbeNatsOut.Kind := 'nats';
   ProbeNatsOut.EndpointIndex := 0;
-  ProbeNatsOut.UserIndex := 2;
-  ProbeNatsOut.SecretIndex := 8;
   AddProbeControls(ProbeNatsOut);
 
   TuningPage := CreateInputQueryPage(NatsOutPage.ID,
@@ -1400,7 +1423,29 @@ end;
 procedure CurPageChanged(CurPageID: Integer);
 var
   Extra, Suggested: String;
+  OnEndpoint: Boolean;
 begin
+  { The "Test connection" controls belong to the endpoint pages only: they are
+    wizard-level controls (see AddProbeControls), so they must be hidden
+    elsewhere or they would float over the directory, license and summary pages. }
+  OnEndpoint := (CurPageID = RedisInPage.ID) or (CurPageID = RedisOutPage.ID) or
+                (CurPageID = NatsInPage.ID) or (CurPageID = NatsOutPage.ID);
+  ProbeRedisIn.Button.Visible := (CurPageID = RedisInPage.ID);
+  ProbeRedisIn.StatusLabel.Visible := ProbeRedisIn.Button.Visible;
+  ProbeRedisOut.Button.Visible := (CurPageID = RedisOutPage.ID);
+  ProbeRedisOut.StatusLabel.Visible := ProbeRedisOut.Button.Visible;
+  ProbeNatsIn.Button.Visible := (CurPageID = NatsInPage.ID);
+  ProbeNatsIn.StatusLabel.Visible := ProbeNatsIn.Button.Visible;
+  ProbeNatsOut.Button.Visible := (CurPageID = NatsOutPage.ID);
+  ProbeNatsOut.StatusLabel.Visible := ProbeNatsOut.Button.Visible;
+  if not OnEndpoint then
+  begin
+    ProbeRedisIn.StatusLabel.Caption := '';
+    ProbeRedisOut.StatusLabel.Caption := '';
+    ProbeNatsIn.StatusLabel.Caption := '';
+    ProbeNatsOut.StatusLabel.Caption := '';
+  end;
+
   if CurPageID = ConfigPage.ID then
   begin
     { Computed here, not in InitializeWizard: the app constant only exists once

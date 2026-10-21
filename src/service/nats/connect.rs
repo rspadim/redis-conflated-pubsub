@@ -364,3 +364,14 @@ pub(in crate::service) fn connect_failure(error: anyhow::Error) -> PublishFailur
 #[cfg(test)]
 #[path = "../../../tests/unit/service/nats_connect.rs"]
 mod tests;
+
+/// Connects and immediately drops a client, so a caller outside the service can
+/// prove a backend configuration (address, credentials, TLS) before installing.
+/// Reuses every `ConnectOptions` decision the runtime makes, so the probe cannot
+/// disagree with startup. Read-only: nothing is published.
+pub(crate) async fn test_connection(config: &NatsConfig) -> Result<()> {
+    let plan = connection_plan(config)?;
+    let client = connect_with_metrics(&plan, None).await?;
+    drop(client);
+    Ok(())
+}

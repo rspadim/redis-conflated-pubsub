@@ -20,9 +20,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use tokio::time;
+
 use anyhow::{Context, Result};
 use clap::Parser;
-use config::AppConfig;
+use config::{AppConfig, NatsConfig, RedisConfig};
 #[cfg(unix)]
 use tracing::warn;
 use tracing::{error, info};
@@ -55,6 +57,14 @@ struct Args {
         help = "Validate the selected JSON configuration and exit without connecting to Redis"
     )]
     check_config: bool,
+
+    #[arg(
+        long,
+        help = "Validate the configuration, then CONNECT to every configured backend and exit. \
+                Uses the same client and credentials the relay uses at startup, so a wrong \
+                address, password or TLS setting is reported before the service is installed"
+    )]
+    test_connection: bool,
 
     #[arg(
         long,
@@ -93,6 +103,96 @@ fn runtime_worker_name() -> String {
     )
 }
 
+/// Connects to every configured backend and exits, so the installer can prove a
+/// host/password/TLS setting before anything is installed or the service is
+/// started. It reuses the very client configuration the relay uses
+/// ([`RedisConfig::client`] and the NATS connection plan), never a parallel
+/// implementation: a probe that disagreed with the runtime would be worse than
+/// none. Read-only - it opens a connection (and, for Redis, a `PING`) and drops
+/// it; nothing is published and no key is touched.
+async fn test_connection(config: &AppConfig) -> Result<()> {
+    let mut failures = 0usize;
+
+    // Input first: the relay cannot deliver anything without it.
+    if let Some(redis) = &config.input.redis {
+        match ping_redis(redis).await {
+            Ok(()) => println!("input redis  {}:{}  OK", redis.host, redis.port),
+            Err(error) => {
+                failures += 1;
+                eprintln!("input redis  {}:{}  FAILED: {error:#}", redis.host, redis.port);
+            }
+        }
+    }
+    if let Some(nats) = &config.input.nats {
+        match connect_nats(nats).await {
+            Ok(()) => println!("input nats   {}  OK", nats.servers.join(",")),
+            Err(error) => {
+                failures += 1;
+                eprintln!("input nats   {}  FAILED: {error:#}", nats.servers.join(","));
+            }
+        }
+    }
+
+    for (name, output) in &config.outputs {
+        if let Some(redis) = &output.redis {
+            match ping_redis(redis).await {
+                Ok(()) => println!("output {name}  {}:{}  OK", redis.host, redis.port),
+                Err(error) => {
+                    failures += 1;
+                    eprintln!(
+                        "output {name}  {}:{}  FAILED: {error:#}",
+                        redis.host, redis.port
+                    );
+                }
+            }
+        }
+        if let Some(nats) = &output.nats {
+            match connect_nats(nats).await {
+                Ok(()) => println!("output {name}  {}  OK", nats.servers.join(",")),
+                Err(error) => {
+                    failures += 1;
+                    eprintln!(
+                        "output {name}  {}  FAILED: {error:#}",
+                        nats.servers.join(",")
+                    );
+                }
+            }
+        }
+    }
+
+    if failures > 0 {
+        anyhow::bail!(
+            "{failures} backend(s) did not answer; the service would fail the same way"
+        );
+    }
+    Ok(())
+}
+
+/// Opens (and immediately drops) a Redis connection, proving the address,
+/// credentials, TLS and database selection. `PING` is the smallest command that
+/// forces the server to answer, so an authentication failure surfaces here
+/// instead of at first publish.
+async fn ping_redis(config: &RedisConfig) -> Result<()> {
+    let client = config.client()?;
+    let connection = time::timeout(config.connect_timeout(), client.get_multiplexed_async_connection())
+        .await
+        .context("timed out connecting")?
+        .context("could not connect")?;
+    let mut connection = connection;
+    redis::cmd("PING")
+        .query_async::<String>(&mut connection)
+        .await
+        .context("PING failed")?;
+    Ok(())
+}
+
+/// Opens (and immediately drops) a NATS connection using the relay's own
+/// connection plan, so user/password, token, NKey seed, creds file and TLS are
+/// all exercised exactly as at startup.
+async fn connect_nats(config: &NatsConfig) -> Result<()> {
+    service::nats::test_connection(config).await
+}
+
 /// Runs the relay until it is told to stop.
 ///
 /// `service_stop` is the Windows service host's stop trigger: the service control
@@ -117,6 +217,11 @@ async fn run(service_stop: Option<tokio::sync::watch::Receiver<bool>>) -> Result
 
     if args.check_config {
         println!("Configuration is valid.");
+        return Ok(());
+    }
+
+    if args.test_connection {
+        test_connection(&config).await?;
         return Ok(());
     }
 
