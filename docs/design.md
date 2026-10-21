@@ -247,6 +247,14 @@ A entrada exclui 882 mensagens `__sentinel__:hello` por execução. A conflation
 reduziu a publicação para 16–38% da entrada conforme a taxa, com zero backlog e
 espera de fila e RTT de publish sub-milissegundo em média.
 
+A tabela foi reproduzida inteira em 0.4.0 com a mesma captura e o mesmo
+procedimento, e os volumes publicados caíram dentro de ~1% dos valores acima:
+1× → 2.294.007 (37,9%), 4× → 1.378.734 (22,7%), 8× → 1.141.798 (18,6%),
+4× com 256/256 → 1.356.285 (22,4%) e 4× com payloads repetidos → 977.867 (16,2%),
+todos com `pending=0`. As latências ficaram na mesma ordem de grandeza, com os
+máximos desta máquina menores (espera na fila máx. 13,4/18,8 ms e RTT máx.
+14,8/21,2 ms nas variantes de 4× e 8×).
+
 ### Loopback (sem Redis/Valkey)
 
 `examples/loopback_benchmark.rs` implementa um broker RESP2 mínimo em Rust: aceita
@@ -275,6 +283,11 @@ Sweep de janela (`max_commands_per_exec`, uma saída, 640k, Redis 7.4.11, pipeli
 com a janela em voo enquanto o RTT de publish cresce proporcionalmente, então o
 platô é o processamento de `PUBLISH` no servidor, não a janela do cliente.
 
+Verificação 0.4.0: o sweep se repetiu (mediana de 5 execuções por célula, mesmo
+pipeline), com as taxas absolutas abaixo das da sessão original porque a máquina
+estava compartilhada — 256 → 92,1k, 1024 → 108,2k, 4096 → 90,3k msg/s: o topo em
+1024 se manteve e a taxa continua sem escalar com a janela.
+
 Grade 2D após o desacoplamento (uma saída, 640k, open-loop, mediana de 3 reps):
 
 | Batch | Janela | Taxa (msg/s) | Espera na fila média | RTT de publish médio |
@@ -294,12 +307,34 @@ concorrentes enfileiram no servidor de saída. A melhor região é janela 1024 c
 batch 64–256. A variância entre execuções é alta, então diferenças de taxa abaixo
 de ~10% são ruído; os sinais de latência são os robustos.
 
+Verificação 0.4.0 da grade (5 execuções por célula): as duas colunas de latência
+reproduziram monotonicamente em todas as linhas — o RTT de publish sobe com a
+janela (2,6 → 8,6 → 36,3 ms com batch 64; 2,1 → 7,7 → 43,1 ms com 256; 2,7 → 9,5 →
+25,6 ms com 1024) e a espera na fila cai (1873 → 1111 → 886 ms; 1681 → 1035 →
+870 ms; 2112 → 1028 → 773 ms). A **ordenação de taxa** entre as nove células não
+reproduziu de forma confiável (a melhor célula foi 113,4k e a pior 75,5k, com
+faixas que se sobrepõem), coerente com a ressalva de ruído acima: os números de
+taxa da tabela ficam como foram medidos, e o que a verificação confirma são as
+latências.
+
 Após as otimizações (payload `Arc<[u8]>`, janela em voo desacoplada, fairness de
 flush por turno), execuções com Redis 7.4.11: uma saída 640k — **139,4k msg/s**
 com a janela padrão e **149,1k** com `max_in_flight_commands: 1024`; duas saídas
 640k — **77,6k msg/s** (~155k publishes/s), igual com um servidor ou dois; loopback
 (sem Redis) 1M — **80k msg/s**. Antes dessas mudanças as mesmas execuções mediam
 99,8k (uma), 50,1k (duas) e 57,6k (endpoints separados).
+
+Verificação 0.4.0 (21/10/2026): o caminho de publicação não mudou entre 0.3.1 e
+0.4.0, e uma execução alternada dos dois binários na mesma máquina confirmou isso
+— mediana de 180,6k msg/s em 0.3.1 contra 180,7k em 0.4.0 (uma saída, 640k,
+open-loop, pipeline 128, três repetições cada). As taxas absolutas acima são da
+sessão original, em máquina menos carregada; nesta máquina de desenvolvimento
+compartilhada a mesma execução pelo Compose deu mediana de 73,4k msg/s
+(43,8k–81,5k) com uma saída e 49,7k (29,9k–57,9k) com duas, e o loopback 1M deu
+49,1k (35,7k–61,1k). O que se reproduziu foi a **ordenação relativa**, não o valor
+absoluto: janela 1024 acima de 256/4096, uma saída acima de duas, loopback abaixo
+do caminho com Redis. A dispersão de 50%+ entre repetições é da máquina, não da
+versão.
 
 Observações:
 
@@ -311,12 +346,15 @@ Observações:
   servidor e um teto de cliente/intake em torno de 50–58k entradas/s.
 - Variância entre execuções é alta: a mesma configuração de uma saída mediu 139,4k,
   mediana de 129k na grade e 106,9k na verificação, com amostras cruas de
-  91k–138k. Prefira os sinais de latência (`queue_wait`, RTT de publish).
+  91k–138k. Prefira os sinais de latência (`queue_wait`, RTT de publish). A
+  verificação 0.4.0 repetiu o padrão em escala menor (mediana de 73,4k, amostras
+  de 43,8k a 81,5k, mesma máquina, mesmo dia): a ordem entre configurações é
+  estável, o valor absoluto não.
 
 ## Suíte de testes
 
 - Testes unitários e de integração ficam em `tests/unit/`, incluídos como módulos
-  do crate; `cargo test --locked` passa 187 testes no Windows e 198 no Unix (onde
+  do crate; `cargo test --locked` passa 197 testes no Windows e 208 no Unix (onde
   os testes de reload `#[cfg(unix)]` compilam), e lista 8 benchmarks manuais
   ignorados.
 - Compose E2Es (veja [Docker e testes](docker.md)): integração Pub/Sub, mensagens
@@ -331,8 +369,10 @@ Benchmarks unitários manuais: rode com
 - `filter_cache_load_benchmark`, `channel_policy_cache_load_benchmark`
   (`tests/unit/service/filter_load.rs`) — 64 regras, conjunto quente de 8.192
   canais, churn de 24.576 canais, mais o replay do fixture anonimizado 100×.
-  Misses com 64 regras: ~30–41 µs (filtros) e ~28–39 µs (políticas); hits
-  ~80–120 ns.
+  Misses com 64 regras: ~24–38 µs (filtros) e ~50–66 µs (políticas); hits
+  ~61–145 ns. Reconfirmado em 0.4.0 (Linux, 3 execuções por benchmark): a faixa
+  antiga de filtros se manteve, a de políticas veio ~1,7× mais lenta nesta
+  máquina e os hits ficaram no topo da faixa anterior.
 - `direct_lane_load_benchmark` (`tests/unit/service/direct_lane_load.rs`) — drena
   100.000 mensagens diretas enfileiradas com latência simulada por comando (padrão
-  50 µs) em batch caps 1/32/256 (836 / 11.443 / 18.187 msg/s) e garante ordem FIFO.
+  50 µs) em batch caps 1/32/256 (816 / 11.433 / 18.263 msg/s) e garante ordem FIFO.

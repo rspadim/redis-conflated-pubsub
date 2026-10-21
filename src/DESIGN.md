@@ -191,7 +191,7 @@ Input excludes 882 Sentinel `__sentinel__:hello` messages per run; the repeated-
 
 ### Loopback (no Redis/Valkey)
 
-`examples/loopback_benchmark.rs` (built into the same benchmark image) implements a minimal RESP2 broker in Rust: it accepts the service's `PSUBSCRIBE`, feeds messages as fast as the socket accepts them, and acts as the output server that receives the service's `PUBLISH`/`MULTI/EXEC` commands, reporting end-to-end percentiles. `compose.loopback.test.yml` runs it with no Redis containers, isolating the service and the wire protocol. A 200k-message smoke measured ~35k msg/s with the broker process sharing CPU with the service; `LOOPBACK_MESSAGES`, `LOOPBACK_CHUNK`, `LOOPBACK_WARMUP` and `LOOPBACK_TIMEOUT_S` tune the run.
+`examples/loopback_benchmark.rs` (built into the same benchmark image) implements a minimal RESP2 broker in Rust: it accepts the service's `PSUBSCRIBE`, feeds messages as fast as the socket accepts them, and acts as the output server that receives the service's `PUBLISH`/`MULTI/EXEC` commands, reporting end-to-end percentiles. `compose.loopback.test.yml` runs it with no Redis containers, isolating the service and the wire protocol. A 200k-message smoke measured ~35k msg/s with the broker process sharing CPU with the service; `LOOPBACK_MESSAGES`, `LOOPBACK_CHUNK`, `LOOPBACK_WARMUP` and `LOOPBACK_TIMEOUT_S` tune the run. On 0.4.0 the 1M-message run measured 49.1k msg/s median over 6 runs (35.7k–61.1k) on the shared development machine — the broker shares CPU with the service, so this is a service-plus-broker figure and the spread reflects the machine.
 
 ### Transport comparison and NATS e2e (`spikes/`)
 
@@ -226,7 +226,7 @@ Window sweep (`max_commands_per_exec`, single output, 640k, Redis 7.4.11, open-l
 
 The window helps up to 1024 (rate up, queue wait roughly halved); at 4096 the publish RTT explodes because too many concurrent `MULTI/EXEC` requests queue at the output server. The batch cap helps mainly with a small window (64→256/1024 at window 256 is ~+12%); batch larger than the window is harmless (the dispatch chunks by window), while window much larger than batch underfills transactions and hurts. Best region: window 1024 with batch 64–256. Run-to-run variance is high (for example 256/1024 measured 91k and 138k msg/s), so rate differences under ~10% are noise; the latency signals are the robust ones.
 
-Closed-loop, Redis 7.4.11, 4×2,500: with two outputs serial p50 ~0.9 ms, e2e p50 ~1.0 ms / p95 ~1.7 ms / p99 ~3.0 ms and ACK RTT p50 0.30 ms; with one output serial p50 0.61 ms, e2e p50 0.64 ms / p95 0.97 ms / p99 1.43 ms and ACK RTT p50 0.24 ms.
+Closed-loop, Redis 7.4.11, 4×2,500: with two outputs serial p50 ~0.9 ms, e2e p50 ~1.0 ms / p95 ~1.7 ms / p99 ~3.0 ms and ACK RTT p50 0.30 ms; with one output serial p50 0.61 ms, e2e p50 0.64 ms / p95 0.97 ms / p99 1.43 ms and ACK RTT p50 0.24 ms. The 0.4.0 check (3 runs per shape) landed inside that noise: two outputs serial p50 1.08 ms, e2e p50 0.89 ms / p95 1.75 ms, ACK RTT p50 0.29 ms; one output serial p50 0.95 ms, e2e p50 0.76 ms / p95 1.73 ms, ACK RTT p50 0.28 ms.
 
 Open-loop saturated runs (all drained to zero pending). "Outputs" is `HOTPATH_OUTPUTS`; every input message is published once per output.
 
@@ -247,12 +247,14 @@ Other reference points:
 
 | Scenario | Result |
 | --- | --- |
-| Direct lane unit (100k messages, 50 µs/command) | batch 1/32/256 → 836 / 11,443 / 18,187 msg/s; FIFO preserved |
-| Filter/policy caches | 8,192 warm channels: no evictions at 16,384; 64-rule misses ~30–41 µs (filters) and ~28–39 µs (policies); hits ~80–120 ns; 100× fixture replay 12.4M lookups in 18.8 s |
+| Direct lane unit (100k messages, 50 µs/command) | batch 1/32/256 → 816 / 11,433 / 18,263 msg/s; FIFO preserved (0.4.0, Linux) |
+| Filter/policy caches | 8,192 warm channels: no evictions at 16,384; 64-rule misses ~24–38 µs (filters) and ~50–66 µs (policies); hits ~61–145 ns; 100× fixture replay 12.3M lookups in 12.2–14.6 s (0.4.0, Linux, 3 runs) |
 
 Observations:
 
-- Post-optimization runs (payload `Arc<[u8]>`, decoupled in-flight window, per-turn flush fairness, input/metric trims; Redis 7.4.11): single output 640k — **139.4k msg/s** with the default window and **149.1k** with `max_in_flight_commands: 1024`; two outputs 640k — **77.6k msg/s** (~155k publishes/s), identical whether both outputs share one server or use two; loopback (no Redis) 1M — **80k msg/s**. Before these changes the same runs measured 99.8k (single), 50.1k (two outputs) and 57.6k (split endpoints): single-output rose ~40%, two-output ~55%, and the split-endpoint advantage disappeared. The service publish path (~150–160k publishes/s) is now the limiter rather than the output server.
+- Post-optimization runs (payload `Arc<[u8]>`, decoupled in-flight window, per-turn flush fairness, input/metric trims; Redis 7.4.11): single output 640k — **139.4k msg/s** with the default window and **149.1k** with `max_in_flight_commands: 1024`; two outputs 640k — **77.6k msg/s** (~155k publishes/s), identical whether both outputs share one server or use two; loopback (no Redis) 1M — **80k msg/s** (median 49.1k, range 35.7k–61.1k when re-measured on 0.4.0 on a shared machine; the broker shares CPU with the service). Before these changes the same runs measured 99.8k (single), 50.1k (two outputs) and 57.6k (split endpoints): single-output rose ~40%, two-output ~55%, and the split-endpoint advantage disappeared. The service publish path (~150–160k publishes/s) is now the limiter rather than the output server.
+- 0.4.0 check (2026-10-21): the publish path did not change between 0.3.1 and 0.4.0, and alternating the two binaries on the same machine confirmed it — median 180.6k msg/s on 0.3.1 against 180.7k on 0.4.0 (single output, 640k, open-loop, pipeline 128, three repetitions each). The absolute figures above belong to the original session on a less loaded machine; through the Compose procedure on this shared development machine the same run gave a 73.4k msg/s median (43.8k–81.5k) with one output and 49.7k (29.9k–57.9k) with two, and the 1M loopback gave 49.1k (35.7k–61.1k). What reproduces is the relative ordering — window 1024 above 256/4096, one output above two, loopback below the Redis path — not the absolute value; the 50%+ spread between repetitions belongs to the machine.
+- The 2D grid's latency columns reproduced monotonically on 0.4.0 (5 runs per cell): publish RTT 2.6 → 8.6 → 36.3 ms at batch 64, 2.1 → 7.7 → 43.1 ms at 256 and 2.7 → 9.5 → 25.6 ms at 1024 as the window grows, with queue wait falling 1873 → 1111 → 886 ms, 1681 → 1035 → 870 ms and 2112 → 1028 → 773 ms. The rate ordering across the nine cells did not reproduce reliably (113.4k best, 75.5k worst, overlapping ranges), so the table's rate figures stay as measured and the latency is what the check confirms. The window sweep itself repeated: 256 → 92.1k, 1024 → 108.2k, 4096 → 90.3k msg/s, peak still at 1024.
 - The end-to-end rate plateaus near 40–49k messages/s under this load generator; larger bursts raise the median delay roughly in proportion to the backlog rather than lowering throughput.
 - Output lanes keep up: publish RTT stays at 1.7–4.4 ms even at 640k, and pending ends at zero. The term that grows at 640k is the intake queue wait (fan-out to worker acceptance), so the single input reader plus per-worker intake is the next concurrency lever.
 - Redis and Valkey were close at 320k; at 640k the Valkey sample showed 3–6× higher queue wait and ~2.6× peak pending. This is one sample per engine, not a controlled comparison.
@@ -263,6 +265,6 @@ Observations:
 
 ## Test suite
 
-- Unit and integration tests live in `tests/unit/`, included as crate modules; `${cargo test --locked}` currently passes 187 tests on Windows and 198 on Unix (where the `#[cfg(unix)]` reload tests compile), and lists 8 ignored manual benchmarks.
+- Unit and integration tests live in `tests/unit/`, included as crate modules; `${cargo test --locked}` currently passes 197 tests on Windows and 208 on Unix (where the `#[cfg(unix)]` reload tests compile), and lists 8 ignored manual benchmarks.
 - Compose E2Es (see [`../docker/README.md`](../docker/README.md)): Pub/Sub integration, oversized request handling, RESP protocol/policies, TTL/groups/SIGHUP, hot-path latency (closed/open/mixed), and fault handling. The Pub/Sub integration, filter, oversize, RESP protocol/policies, fault and TTL/groups/SIGHUP stacks run the Rust drivers and proxies from `examples/e2e.rs` (built by `Dockerfile.e2e`) instead of Python.
 - `cargo fmt --all --check` and `cargo clippy --all-targets --locked -- -D warnings` are expected clean.

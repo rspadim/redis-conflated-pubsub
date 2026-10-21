@@ -246,6 +246,14 @@ The input excludes 882 `__sentinel__:hello` messages per run. Conflation reduced
 publishing to 16–38% of the input depending on the rate, with zero backlog and
 sub-millisecond average queue wait and publish RTT.
 
+The whole table was reproduced on 0.4.0 with the same capture and procedure, and
+the published volumes landed within ~1% of the figures above: 1× → 2,294,007
+(37.9%), 4× → 1,378,734 (22.7%), 8× → 1,141,798 (18.6%), 4× at 256/256 →
+1,356,285 (22.4%) and 4× with repeated payloads → 977,867 (16.2%), all with
+`pending=0`. Latencies stayed in the same order of magnitude, with lower maxima on
+this machine (queue wait max 13.4/18.8 ms and publish RTT max 14.8/21.2 ms in the
+4× and 8× variants).
+
 ### Loopback (no Redis/Valkey)
 
 `examples/loopback_benchmark.rs` implements a minimal RESP2 broker in Rust: it
@@ -274,6 +282,11 @@ rate does not scale with the in-flight window while the publish RTT grows
 proportionally, so the plateau is server-side `PUBLISH` processing, not the
 client window.
 
+0.4.0 check: the sweep repeated (median of 5 runs per cell, same pipeline), with
+absolute rates below the original session because the machine was shared — 256 →
+92.1k, 1024 → 108.2k, 4096 → 90.3k msg/s: the peak at 1024 held and the rate still
+does not scale with the window.
+
 2D grid after the decoupling (single output, 640k, open-loop, median of 3 reps):
 
 | Batch | Window | Rate (msg/s) | Queue wait avg | Publish RTT avg |
@@ -293,12 +306,33 @@ The window helps up to 1024; at 4096 the RTT explodes because too many concurren
 with batch 64–256. Run-to-run variance is high, so rate differences under ~10%
 are noise; the latency signals are the robust ones.
 
+0.4.0 check of the grid (5 runs per cell): both latency columns reproduced
+monotonically in every row — publish RTT rises with the window (2.6 → 8.6 →
+36.3 ms at batch 64; 2.1 → 7.7 → 43.1 ms at 256; 2.7 → 9.5 → 25.6 ms at 1024) and
+queue wait falls (1873 → 1111 → 886 ms; 1681 → 1035 → 870 ms; 2112 → 1028 →
+773 ms). The **rate ordering** across the nine cells did not reproduce reliably
+(best cell 113.4k, worst 75.5k, with overlapping ranges), consistent with the
+noise caveat above: the rate figures in the table stay as measured, and what the
+check confirms is the latency.
+
 After the optimizations (payload `Arc<[u8]>`, decoupled in-flight window, per-turn
 flush fairness), runs with Redis 7.4.11: single output 640k — **139.4k msg/s**
 with the default window and **149.1k** with `max_in_flight_commands: 1024`; two
 outputs 640k — **77.6k msg/s** (~155k publishes/s), identical with one server or
 two; loopback (no Redis) 1M — **80k msg/s**. Before these changes the same runs
 measured 99.8k (single), 50.1k (two) and 57.6k (split endpoints).
+
+0.4.0 check (2026-10-21): the publish path did not change between 0.3.1 and 0.4.0,
+and an alternating run of both binaries on the same machine confirmed it — median
+180.6k msg/s on 0.3.1 against 180.7k on 0.4.0 (single output, 640k, open-loop,
+pipeline 128, three repetitions each). The absolute rates above are from the
+original session, on a less loaded machine; through the Compose procedure on this
+shared development machine the same run gave a median of 73.4k msg/s
+(43.8k–81.5k) with one output and 49.7k (29.9k–57.9k) with two, and the 1M
+loopback gave 49.1k (35.7k–61.1k). What reproduced is the **relative ordering**,
+not the absolute value: window 1024 above 256/4096, one output above two, loopback
+below the Redis path. The 50%+ spread between repetitions belongs to the machine,
+not to the version.
 
 Observations:
 
@@ -311,12 +345,14 @@ Observations:
 - Run-to-run variance is high: the same single-output configuration measured
   139.4k, a 129k median across the grid and 106.9k in the verification run, with
   raw samples spanning 91k–138k. Prefer the latency signals (`queue_wait`, publish
-  RTT).
+  RTT). The 0.4.0 check repeated the pattern at a smaller scale (73.4k median,
+  samples 43.8k to 81.5k, same machine, same day): the ordering between
+  configurations is stable, the absolute value is not.
 
 ## Test suite
 
 - Unit and integration tests live in `tests/unit/`, included as crate modules;
-  `cargo test --locked` passes 187 tests on Windows and 198 on Unix (where the
+  `cargo test --locked` passes 197 tests on Windows and 208 on Unix (where the
   `#[cfg(unix)]` reload tests compile), and lists 8 ignored manual benchmarks.
 - Compose E2Es (see [Docker and tests](docker.md)): Pub/Sub integration, oversized
   messages, RESP protocol/policies, TTL/groups/SIGHUP, hot-path latency and fault
@@ -330,8 +366,11 @@ Manual unit benchmarks: run with
 - `filter_cache_load_benchmark`, `channel_policy_cache_load_benchmark`
   (`tests/unit/service/filter_load.rs`) — 64 rules, 8,192-channel hot set,
   24,576-channel churn set, plus the anonymized fixture replay 100×. Misses with
-  64 rules: ~30–41 µs (filters) and ~28–39 µs (policies); hits ~80–120 ns.
+  64 rules: ~24–38 µs (filters) and ~50–66 µs (policies); hits ~61–145 ns.
+  Re-confirmed on 0.4.0 (Linux, 3 runs per benchmark): the filter range held, the
+  policy range came out ~1.7× slower on this machine, and the hits sat at the top
+  of the previous range.
 - `direct_lane_load_benchmark` (`tests/unit/service/direct_lane_load.rs`) — drains
   100,000 queued direct messages with a simulated per-command latency (default
-  50 µs) at batch caps 1/32/256 (836 / 11,443 / 18,187 msg/s) and asserts FIFO
+  50 µs) at batch caps 1/32/256 (816 / 11,433 / 18,263 msg/s) and asserts FIFO
   order.
